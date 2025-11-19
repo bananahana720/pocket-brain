@@ -1,0 +1,40 @@
+import React, { useEffect } from 'react';
+import { X, CheckCircle, AlertCircle, Info } from 'lucide-react';
+
+export interface ToastMessage {
+  id: string;
+  message: string;
+  type: 'success' | 'error' | 'info';
+}
+
+interface ToastContainerProps {
+  toasts: ToastMessage[];
+  removeToast: (id: string) => void;
+}
+
+export const ToastContainer: React.FC<ToastContainerProps> = ({ toasts, removeToast }) => {
+  return (
+    <div className="fixed top-safe left-1/2 transform -translate-x-1/2 z-[60] flex flex-col gap-2 w-full max-w-xs pointer-events-none pt-4">
+      {toasts.map((toast) => (
+        <div
+          key={toast.id}
+          className="pointer-events-auto flex items-center gap-3 bg-zinc-900/95 text-white px-4 py-3 rounded-2xl shadow-xl shadow-zinc-900/20 backdrop-blur-md animate-fade-in text-sm font-medium border border-zinc-800 transform transition-all"
+          role="alert"
+        >
+          {toast.type === 'success' && <CheckCircle className="w-4 h-4 text-emerald-400" />}
+          {toast.type === 'error' && <AlertCircle className="w-4 h-4 text-rose-400" />}
+          {toast.type === 'info' && <Info className="w-4 h-4 text-brand-400" />}
+          
+          <span className="flex-1">{toast.message}</span>
+          
+          <button 
+            onClick={() => removeToast(toast.id)} 
+            className="text-zinc-500 hover:text-white transition-colors"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+};

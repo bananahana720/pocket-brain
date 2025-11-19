@@ -1,0 +1,7 @@
+{
+  "name": "PocketBrain",
+  "description": "A mobile-first, AI-powered capture tool for your thoughts. Features instant voice transcription, batch entry, and semantic search to help you find what you forgot.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
