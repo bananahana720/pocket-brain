@@ -128,7 +128,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
         recognitionRef.current.start();
         setIsListening(true);
       } catch (e) {
-        console.error(e);
+        console.error('Failed to start speech recognition:', e);
       }
     }
   };

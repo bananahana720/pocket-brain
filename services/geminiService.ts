@@ -5,7 +5,7 @@ import { Note, NoteType, AIAnalysisResult } from "../types";
 // Gemini uses @google/genai SDK. OpenRouter uses fetch with OpenAI-compatible format.
 
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY;
-const GEMINI_KEY = process.env.API_KEY;
+const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const OPENROUTER_MODEL = 'google/gemini-2.5-flash';
 
 type Provider = 'gemini' | 'openrouter';
@@ -249,7 +249,7 @@ export const processBatchEntry = async (content: string): Promise<AIAnalysisResu
     if (!text) return [];
 
     const results = JSON.parse(text);
-    return results.map((r: any) => ({
+    return results.map((r: { content: string; title: string; tags: string[]; type: string }) => ({
       content: r.content,
       title: r.title,
       tags: r.tags,

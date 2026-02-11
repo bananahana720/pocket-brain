@@ -32,11 +32,6 @@ export interface AIAnalysisResult {
   priority?: 'urgent' | 'normal' | 'low';
 }
 
-export interface SearchResult {
-  answer: string;
-  relevantNoteIds: string[];
-}
-
 export interface UndoAction {
   type: 'DELETE' | 'ARCHIVE' | 'EDIT' | 'TOGGLE_COMPLETE';
   noteSnapshot: Note;
