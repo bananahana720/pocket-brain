@@ -15,6 +15,12 @@ export interface Note {
   isProcessed: boolean;
   // Task specific
   isCompleted?: boolean;
+  // Pin & Archive
+  isPinned?: boolean;
+  isArchived?: boolean;
+  // Due dates & Priority
+  dueDate?: number;  // timestamp
+  priority?: 'urgent' | 'normal' | 'low';
 }
 
 export interface AIAnalysisResult {
@@ -22,9 +28,17 @@ export interface AIAnalysisResult {
   tags: string[];
   type: NoteType;
   content?: string;
+  dueDate?: string;  // ISO date string from AI
+  priority?: 'urgent' | 'normal' | 'low';
 }
 
 export interface SearchResult {
   answer: string;
   relevantNoteIds: string[];
+}
+
+export interface UndoAction {
+  type: 'DELETE' | 'ARCHIVE' | 'EDIT' | 'TOGGLE_COMPLETE';
+  noteSnapshot: Note;
+  timestamp: number;
 }

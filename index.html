@@ -7,6 +7,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       tailwind.config = {
+        darkMode: 'class',
         theme: {
           extend: {
             colors: {
@@ -59,6 +60,12 @@
       body {
         background-color: #fafafa; /* zinc-50 */
         color: #18181b; /* zinc-900 */
+        transition: background-color 0.2s, color 0.2s;
+      }
+      .dark body,
+      html.dark body {
+        background-color: #18181b; /* zinc-900 */
+        color: #f4f4f5; /* zinc-100 */
         -webkit-tap-highlight-color: transparent;
         -webkit-font-smoothing: antialiased;
       }
