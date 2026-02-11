@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { X, Settings, Download, Trash2, Database, PieChart, FileText, CheckSquare, Lightbulb, Tag, Sun, Moon, Archive, Flame, Upload, ChevronDown, FileJson, FileText as FileMarkdown, Table } from 'lucide-react';
 import { Note, NoteType } from '../types';
 import { useTheme } from '../contexts/ThemeContext';
@@ -23,75 +23,125 @@ const Drawer: React.FC<DrawerProps> = ({ isOpen, onClose, notes, onExport, onCle
   const [showExportOptions, setShowExportOptions] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  if (!isOpen) return null;
-
-  const archivedCount = notes.filter(n => n.isArchived).length;
-  const activeNotes = notes.filter(n => !n.isArchived);
-  const stats = {
-    total: activeNotes.length,
-    notes: activeNotes.filter(n => n.type === NoteType.NOTE).length,
-    tasks: activeNotes.filter(n => n.type === NoteType.TASK).length,
-    ideas: activeNotes.filter(n => n.type === NoteType.IDEA).length,
-  };
-
-  // --- Productivity stats ---
-  const today = new Date();
-  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
-  const todayEnd = todayStart + 86400000;
-
-  // Daily streak: consecutive days with at least 1 note
-  const computeStreak = () => {
-    const daySet = new Set<string>();
-    notes.forEach(n => {
-      const d = new Date(n.createdAt);
-      daySet.add(`${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`);
-    });
-    let streak = 0;
-    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    // Check if today has notes, if not start from yesterday
-    const todayKey = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-    if (!daySet.has(todayKey)) {
-      d.setDate(d.getDate() - 1);
+  const {
+    archivedCount,
+    stats,
+    streak,
+    todayCaptured,
+    completedTasks,
+    totalTasks,
+    completionRate,
+    weekHeatmap,
+    sortedTags,
+    topTags,
+  } = useMemo(() => {
+    if (!isOpen) {
+      return {
+        archivedCount: 0,
+        stats: { total: 0, notes: 0, tasks: 0, ideas: 0 },
+        streak: 0,
+        todayCaptured: 0,
+        completedTasks: 0,
+        totalTasks: 0,
+        completionRate: 0,
+        weekHeatmap: [] as { label: string; count: number }[],
+        sortedTags: [] as [string, number][],
+        topTags: [] as [string, number][],
+      };
     }
-    while (true) {
-      const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-      if (daySet.has(key)) {
-        streak++;
-        d.setDate(d.getDate() - 1);
+
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const todayEnd = todayStart + 86400000;
+
+    const dayOfWeek = now.getDay(); // 0=Sun, 1=Mon...
+    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + mondayOffset);
+    const mondayStart = monday.getTime();
+    const nextMondayStart = mondayStart + (7 * 86400000);
+
+    let archived = 0;
+    let total = 0;
+    let notesCount = 0;
+    let tasks = 0;
+    let ideas = 0;
+    let capturedToday = 0;
+    let completed = 0;
+    let taskTotal = 0;
+
+    const tagCounts: Record<string, number> = {};
+    const daySet = new Set<string>();
+    const weekCounts = [0, 0, 0, 0, 0, 0, 0];
+
+    for (const note of notes) {
+      const createdAt = note.createdAt;
+      const created = new Date(createdAt);
+      daySet.add(`${created.getFullYear()}-${created.getMonth()}-${created.getDate()}`);
+
+      if (createdAt >= todayStart && createdAt < todayEnd) {
+        capturedToday++;
+      }
+
+      if (createdAt >= mondayStart && createdAt < nextMondayStart) {
+        const dayIndex = Math.floor((createdAt - mondayStart) / 86400000);
+        if (dayIndex >= 0 && dayIndex < 7) weekCounts[dayIndex]++;
+      }
+
+      if (note.isArchived) {
+        archived++;
       } else {
-        break;
+        total++;
+        if (note.type === NoteType.NOTE) notesCount++;
+        if (note.type === NoteType.TASK) tasks++;
+        if (note.type === NoteType.IDEA) ideas++;
+      }
+
+      if (note.type === NoteType.TASK) {
+        taskTotal++;
+        if (note.isCompleted) completed++;
+      }
+
+      if (note.tags?.length) {
+        for (const tag of note.tags) {
+          tagCounts[tag] = (tagCounts[tag] || 0) + 1;
+        }
       }
     }
-    return streak;
-  };
-  const streak = computeStreak();
 
-  // Today stats
-  const todayNotes = notes.filter(n => n.createdAt >= todayStart && n.createdAt < todayEnd);
-  const todayCaptured = todayNotes.length;
-  const completedTasks = notes.filter(n => n.type === NoteType.TASK && n.isCompleted).length;
-  const totalTasks = notes.filter(n => n.type === NoteType.TASK).length;
-  const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
-
-  // Weekly heatmap: Mon-Sun for current week
-  const getWeekHeatmap = () => {
-    const dayOfWeek = today.getDay(); // 0=Sun, 1=Mon...
-    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-    const monday = new Date(today.getFullYear(), today.getMonth(), today.getDate() + mondayOffset);
-
-    const days: { label: string; count: number }[] = [];
-    const labels = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
-    for (let i = 0; i < 7; i++) {
-      const dayStart = new Date(monday);
-      dayStart.setDate(monday.getDate() + i);
-      const start = dayStart.getTime();
-      const end = start + 86400000;
-      const count = notes.filter(n => n.createdAt >= start && n.createdAt < end).length;
-      days.push({ label: labels[i], count });
+    let currentStreak = 0;
+    const streakDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const todayKey = `${streakDay.getFullYear()}-${streakDay.getMonth()}-${streakDay.getDate()}`;
+    if (!daySet.has(todayKey)) {
+      streakDay.setDate(streakDay.getDate() - 1);
     }
-    return days;
-  };
-  const weekHeatmap = getWeekHeatmap();
+
+    while (true) {
+      const key = `${streakDay.getFullYear()}-${streakDay.getMonth()}-${streakDay.getDate()}`;
+      if (!daySet.has(key)) break;
+      currentStreak++;
+      streakDay.setDate(streakDay.getDate() - 1);
+    }
+
+    const sorted = Object.entries(tagCounts).sort((a, b) => b[1] - a[1]) as [string, number][];
+    const labels = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+    const heatmap = labels.map((label, i) => ({ label, count: weekCounts[i] }));
+    const rate = taskTotal > 0 ? Math.round((completed / taskTotal) * 100) : 0;
+
+    return {
+      archivedCount: archived,
+      stats: { total, notes: notesCount, tasks, ideas },
+      streak: currentStreak,
+      todayCaptured: capturedToday,
+      completedTasks: completed,
+      totalTasks: taskTotal,
+      completionRate: rate,
+      weekHeatmap: heatmap,
+      sortedTags: sorted,
+      topTags: sorted.slice(0, 5),
+    };
+  }, [isOpen, notes]);
+
+  if (!isOpen) return null;
 
   const getHeatmapColor = (count: number) => {
     if (count === 0) return 'bg-zinc-200 dark:bg-zinc-700';
@@ -99,12 +149,6 @@ const Drawer: React.FC<DrawerProps> = ({ isOpen, onClose, notes, onExport, onCle
     if (count <= 5) return 'bg-violet-400 dark:bg-violet-600';
     return 'bg-violet-600 dark:bg-violet-400';
   };
-
-  // Top 5 tags
-  const tagCounts: Record<string, number> = {};
-  notes.forEach(n => n.tags?.forEach(t => { tagCounts[t] = (tagCounts[t] || 0) + 1; }));
-  const sortedTags = Object.entries(tagCounts).sort((a, b) => b[1] - a[1]);
-  const topTags = sortedTags.slice(0, 5);
 
   // Export handlers
   const handleExportMarkdown = () => {
@@ -428,4 +472,4 @@ const Drawer: React.FC<DrawerProps> = ({ isOpen, onClose, notes, onExport, onCle
   );
 };
 
-export default Drawer;
+export default React.memo(Drawer);

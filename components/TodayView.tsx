@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Note } from '../types';
 import { AlertTriangle, Clock, Plus, Share2, Sparkles } from 'lucide-react';
 import NoteCard from './NoteCard';
@@ -20,16 +20,6 @@ interface TodayViewProps {
   onShareBrief: (brief: string, stats: { overdue: number; dueToday: number; capturedToday: number }) => void;
 }
 
-const getStartOfToday = (): number => {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-};
-
-const getEndOfToday = (): number => {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
-};
-
 const TodayView: React.FC<TodayViewProps> = ({
   notes,
   onUpdate,
@@ -46,23 +36,36 @@ const TodayView: React.FC<TodayViewProps> = ({
   isLoadingBrief,
   onShareBrief,
 }) => {
-  const startOfToday = getStartOfToday();
-  const endOfToday = getEndOfToday();
+  const { overdueNotes, dueTodayNotes, capturedTodayNotes } = useMemo(() => {
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
 
-  // Only consider non-archived notes
-  const activeNotes = notes.filter(n => !n.isArchived);
+    const overdue: Note[] = [];
+    const dueToday: Note[] = [];
+    const capturedToday: Note[] = [];
 
-  const overdueNotes = activeNotes.filter(
-    n => n.dueDate && n.dueDate < startOfToday && !n.isCompleted
-  );
+    for (const note of notes) {
+      if (note.isArchived) continue;
 
-  const dueTodayNotes = activeNotes.filter(
-    n => n.dueDate && n.dueDate >= startOfToday && n.dueDate < endOfToday && !n.isCompleted
-  );
+      if (note.createdAt >= startOfToday && note.createdAt < endOfToday) {
+        capturedToday.push(note);
+      }
 
-  const capturedTodayNotes = activeNotes.filter(
-    n => n.createdAt >= startOfToday && n.createdAt < endOfToday
-  );
+      if (note.isCompleted || !note.dueDate) continue;
+      if (note.dueDate < startOfToday) {
+        overdue.push(note);
+      } else if (note.dueDate < endOfToday) {
+        dueToday.push(note);
+      }
+    }
+
+    return {
+      overdueNotes: overdue,
+      dueTodayNotes: dueToday,
+      capturedTodayNotes: capturedToday,
+    };
+  }, [notes]);
 
   const hasOverdue = overdueNotes.length > 0;
   const hasDueToday = dueTodayNotes.length > 0;
@@ -203,4 +206,4 @@ const TodayView: React.FC<TodayViewProps> = ({
   );
 };
 
-export default TodayView;
+export default React.memo(TodayView);

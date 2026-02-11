@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { Search, Sparkles, Menu, Zap, BrainCircuit, X, Archive, Calendar, WifiOff } from 'lucide-react';
 import { Note, NoteType, UndoAction } from './types';
 import { analyzeNote, askMyNotes, processBatchEntry, generateDailyBrief } from './services/geminiService';
@@ -12,6 +12,8 @@ import { ThemeProvider } from './contexts/ThemeContext';
 import { trackEvent } from './utils/analytics';
 
 const STORAGE_KEY = 'pocketbrain_notes';
+const INITIAL_VISIBLE_NOTES = 60;
+const VISIBLE_NOTES_STEP = 40;
 
 function App() {
   const [notes, setNotes] = useState<Note[]>([]);
@@ -32,12 +34,17 @@ function App() {
   const [viewMode, setViewMode] = useState<'all' | 'today'>('all');
   const [aiBrief, setAiBrief] = useState<string | null>(null);
   const [isLoadingBrief, setIsLoadingBrief] = useState(false);
+  const [visibleNotesCount, setVisibleNotesCount] = useState(INITIAL_VISIBLE_NOTES);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
   const inputAreaRef = useRef<InputAreaHandle>(null);
   const handleUndoRef = useRef<() => void>(() => {});
+  const isAiSearchRef = useRef(false);
+  const isDrawerOpenRef = useRef(false);
 
   const hasLoadedRef = useRef(false);
+  const lastSerializedNotesRef = useRef<string | null>(null);
+  const loadMoreRef = useRef<HTMLDivElement>(null);
 
   // --- Load/Save Logic ---
   useEffect(() => {
@@ -45,6 +52,7 @@ function App() {
     if (saved) {
       try {
         setNotes(JSON.parse(saved));
+        lastSerializedNotesRef.current = saved;
       } catch (e) {
         console.error('Failed to parse notes', e);
       }
@@ -58,9 +66,10 @@ function App() {
   useEffect(() => {
     if (!hasLoadedRef.current) return;
     const serialized = JSON.stringify(notes);
-    if (serialized === localStorage.getItem(STORAGE_KEY)) return;
+    if (serialized === lastSerializedNotesRef.current) return;
     try {
       localStorage.setItem(STORAGE_KEY, serialized);
+      lastSerializedNotesRef.current = serialized;
     } catch (e) {
       console.error('Failed to save notes', e);
       addToast('Storage full — some changes may not be saved', 'error');
@@ -93,17 +102,25 @@ function App() {
   }, []);
 
   // --- Toast System ---
-  const addToast = (message: string, type: 'success' | 'error' | 'info' = 'success', action?: ToastAction) => {
+  const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'success', action?: ToastAction) => {
     const id = Date.now().toString() + Math.random();
     setToasts(prev => [...prev, { id, message, type, action }]);
     setTimeout(() => {
         setToasts(prev => prev.filter(t => t.id !== id));
     }, action ? 5000 : 3000);
-  };
+  }, []);
 
-  const removeToast = (id: string) => {
+  const removeToast = useCallback((id: string) => {
     setToasts(prev => prev.filter(t => t.id !== id));
-  };
+  }, []);
+
+  useEffect(() => {
+    isAiSearchRef.current = isAiSearch;
+  }, [isAiSearch]);
+
+  useEffect(() => {
+    isDrawerOpenRef.current = isDrawerOpen;
+  }, [isDrawerOpen]);
 
   // --- Global Keyboard Shortcuts ---
   useEffect(() => {
@@ -128,20 +145,20 @@ function App() {
         if (document.activeElement instanceof HTMLElement) {
           document.activeElement.blur();
         }
-        if (isAiSearch) setIsAiSearch(false);
-        if (isDrawerOpen) setIsDrawerOpen(false);
+        if (isAiSearchRef.current) setIsAiSearch(false);
+        if (isDrawerOpenRef.current) setIsDrawerOpen(false);
       }
     };
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [isAiSearch, isDrawerOpen]);
+  }, []);
 
   // --- Undo System ---
-  const pushUndo = (action: UndoAction) => {
+  const pushUndo = useCallback((action: UndoAction) => {
     setUndoStack(prev => [...prev.slice(-9), action]);
-  };
+  }, []);
 
-  const handleUndo = () => {
+  const handleUndo = useCallback(() => {
     setUndoStack(prev => {
       if (prev.length === 0) return prev;
       const last = prev[prev.length - 1];
@@ -153,16 +170,38 @@ function App() {
       addToast('Action undone', 'success');
       return prev.slice(0, -1);
     });
-  };
-  handleUndoRef.current = handleUndo;
+  }, [addToast]);
+
+  useEffect(() => {
+    handleUndoRef.current = handleUndo;
+  }, [handleUndo]);
 
   // --- Tag Filtering ---
-  const handleTagClick = (tag: string) => {
+  const handleTagClick = useCallback((tag: string) => {
     setActiveTag(prev => prev === tag ? null : tag);
-  };
+  }, []);
 
   // --- Note Actions ---
-  const handleAddNote = async (content: string, presetType?: NoteType) => {
+  const processNoteAnalysis = useCallback(async (noteId: string, content: string) => {
+     const analysis = await analyzeNote(content);
+    
+    setNotes((prev) => prev.map(n => {
+      if (n.id === noteId) {
+        return {
+          ...n,
+          title: analysis?.title || 'Quick Note',
+          tags: analysis?.tags || [],
+          type: analysis?.type || NoteType.NOTE,
+          isProcessed: true,
+          ...(analysis?.dueDate ? { dueDate: new Date(analysis.dueDate).getTime() } : {}),
+          ...(analysis?.priority ? { priority: analysis.priority } : {}),
+        };
+      }
+      return n;
+    }));
+  }, []);
+
+  const handleAddNote = useCallback((content: string, presetType?: NoteType) => {
     const newNote: Note = {
       id: Date.now().toString(),
       content,
@@ -178,10 +217,10 @@ function App() {
     if (!presetType) {
       processNoteAnalysis(newNote.id, content);
     }
-  };
+  }, [addToast, processNoteAnalysis]);
 
   // Handle "Magic Split" Batch Entry
-  const handleBatchNote = async (content: string) => {
+  const handleBatchNote = useCallback(async (content: string) => {
     setIsProcessingBatch(true);
     addToast('AI processing batch...', 'info');
     
@@ -207,28 +246,9 @@ function App() {
     setNotes((prev) => [...newNotes, ...prev]);
     addToast(`Created ${newNotes.length} notes from batch`, 'success');
     setIsProcessingBatch(false);
-  };
+  }, [addToast, handleAddNote]);
 
-  const processNoteAnalysis = async (noteId: string, content: string) => {
-     const analysis = await analyzeNote(content);
-    
-    setNotes((prev) => prev.map(n => {
-      if (n.id === noteId) {
-        return {
-          ...n,
-          title: analysis?.title || 'Quick Note',
-          tags: analysis?.tags || [],
-          type: analysis?.type || NoteType.NOTE,
-          isProcessed: true,
-          ...(analysis?.dueDate ? { dueDate: new Date(analysis.dueDate).getTime() } : {}),
-          ...(analysis?.priority ? { priority: analysis.priority } : {}),
-        };
-      }
-      return n;
-    }));
-  };
-
-  const handleUpdateNote = (id: string, newContent: string) => {
+  const handleUpdateNote = useCallback((id: string, newContent: string) => {
     setNotes((prev) => prev.map(n => {
       if (n.id === id) {
         return { ...n, content: newContent };
@@ -236,9 +256,9 @@ function App() {
       return n;
     }));
     addToast('Note updated', 'success');
-  };
+  }, [addToast]);
 
-  const handleDeleteNote = (id: string) => {
+  const handleDeleteNote = useCallback((id: string) => {
     const note = notes.find(n => n.id === id);
     if (note) {
       pushUndo({ type: 'DELETE', noteSnapshot: { ...note }, timestamp: Date.now() });
@@ -247,14 +267,14 @@ function App() {
     // Dismiss any existing undo toasts before showing new one (LIFO undo)
     setToasts(prev => prev.filter(t => !t.action));
     addToast('Note deleted', 'info', { label: 'Undo', onClick: handleUndo });
-  };
+  }, [notes, pushUndo, addToast, handleUndo]);
 
-  const handleCopyNote = (content: string) => {
+  const handleCopyNote = useCallback((content: string) => {
     navigator.clipboard.writeText(content);
     addToast('Copied to clipboard', 'success');
-  };
+  }, [addToast]);
 
-  const handleToggleComplete = (id: string) => {
+  const handleToggleComplete = useCallback((id: string) => {
     const note = notes.find(n => n.id === id);
     if (note) {
       pushUndo({ type: 'TOGGLE_COMPLETE', noteSnapshot: { ...note }, timestamp: Date.now() });
@@ -265,23 +285,23 @@ function App() {
         }
         return n;
     }));
-  };
+  }, [notes, pushUndo]);
 
-  const handleReanalyze = (id: string) => {
+  const handleReanalyze = useCallback((id: string) => {
     const note = notes.find(n => n.id === id);
     if(note) {
         setNotes(prev => prev.map(n => n.id === id ? { ...n, isProcessed: false } : n));
         addToast('Re-analyzing...', 'info');
         processNoteAnalysis(id, note.content);
     }
-  };
+  }, [notes, addToast, processNoteAnalysis]);
 
   // --- Pin & Archive ---
-  const handlePinNote = (id: string) => {
+  const handlePinNote = useCallback((id: string) => {
     setNotes((prev) => prev.map(n => n.id === id ? { ...n, isPinned: !n.isPinned } : n));
-  };
+  }, []);
 
-  const handleArchiveNote = (id: string) => {
+  const handleArchiveNote = useCallback((id: string) => {
     const note = notes.find(n => n.id === id);
     if (note) {
       pushUndo({ type: 'ARCHIVE', noteSnapshot: { ...note }, timestamp: Date.now() });
@@ -289,35 +309,37 @@ function App() {
     setNotes((prev) => prev.map(n => n.id === id ? { ...n, isArchived: !n.isArchived } : n));
     setToasts(prev => prev.filter(t => !t.action));
     addToast(note?.isArchived ? 'Note unarchived' : 'Note archived', 'info', { label: 'Undo', onClick: handleUndo });
-  };
+  }, [notes, pushUndo, addToast, handleUndo]);
 
   // --- Due Dates & Priority ---
-  const handleSetDueDate = (id: string, date: number | undefined) => {
+  const handleSetDueDate = useCallback((id: string, date: number | undefined) => {
     setNotes((prev) => prev.map(n => n.id === id ? { ...n, dueDate: date } : n));
-  };
+  }, []);
 
-  const handleSetPriority = (id: string, priority: 'urgent' | 'normal' | 'low' | undefined) => {
+  const handleSetPriority = useCallback((id: string, priority: 'urgent' | 'normal' | 'low' | undefined) => {
     setNotes((prev) => prev.map(n => n.id === id ? { ...n, priority } : n));
-  };
+  }, []);
 
   // --- Today View ---
-  const handleEnterTodayView = async () => {
+  const handleEnterTodayView = useCallback(async () => {
     setViewMode('today');
     setIsLoadingBrief(true);
     setAiBrief(null);
     const brief = await generateDailyBrief(notes);
     setAiBrief(brief);
     setIsLoadingBrief(false);
-  };
+  }, [notes]);
 
-  const hasOverdueTasks = notes.some(n => {
-    if (n.isArchived || n.isCompleted || !n.dueDate) return false;
+  const hasOverdueTasks = useMemo(() => {
     const now = new Date();
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    return n.dueDate < startOfToday;
-  });
+    return notes.some(n => {
+      if (n.isArchived || n.isCompleted || !n.dueDate) return false;
+      return n.dueDate < startOfToday;
+    });
+  }, [notes]);
 
-  const handleShareTodayBrief = async (
+  const handleShareTodayBrief = useCallback(async (
     brief: string,
     stats: { overdue: number; dueToday: number; capturedToday: number }
   ) => {
@@ -350,9 +372,9 @@ function App() {
     } catch {
       addToast('Unable to share brief on this device', 'error');
     }
-  };
+  }, [addToast]);
 
-  const handleExportData = () => {
+  const handleExportData = useCallback(() => {
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(notes, null, 2));
     const downloadAnchorNode = document.createElement('a');
     downloadAnchorNode.setAttribute("href", dataStr);
@@ -361,25 +383,26 @@ function App() {
     downloadAnchorNode.click();
     downloadAnchorNode.remove();
     addToast('Data exported', 'success');
-  };
+  }, [notes, addToast]);
 
-  const handleClearData = () => {
+  const handleClearData = useCallback(() => {
     setNotes([]);
     localStorage.removeItem(STORAGE_KEY);
+    lastSerializedNotesRef.current = null;
     addToast('All data cleared', 'info');
-  };
+  }, [addToast]);
 
   // --- Import ---
-  const handleImportNotes = (newNotes: Note[]) => {
+  const handleImportNotes = useCallback((newNotes: Note[]) => {
     setNotes(prev => {
       const existingIds = new Set(prev.map(n => n.id));
       const unique = newNotes.filter(n => !existingIds.has(n.id));
       return [...prev, ...unique];
     });
-  };
+  }, []);
 
   // --- Search Logic ---
-  const handleSearch = async (e: React.FormEvent) => {
+  const handleSearch = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     if (!searchQuery.trim()) return;
 
@@ -390,36 +413,106 @@ function App() {
       setAiAnswer(answer);
       setIsAiThinking(false);
     }
-  };
+  }, [searchQuery, isAiSearch, notes]);
 
-  const filteredNotes = notes.filter(note => {
-    // Archive filter: hide archived unless viewing archived
-    if (!showArchived && note.isArchived) return false;
-    if (showArchived && !note.isArchived) return false;
-    if (filter !== 'ALL' && note.type !== filter) return false;
-    if (activeTag && !note.tags?.some(t => t.toLowerCase() === activeTag.toLowerCase())) return false;
-    if (!isAiSearch && searchQuery) {
-      const lowerQ = searchQuery.toLowerCase();
-      return (
-        note.content.toLowerCase().includes(lowerQ) ||
-        note.title?.toLowerCase().includes(lowerQ) ||
-        note.tags?.some(t => t.toLowerCase().includes(lowerQ))
-      );
+  const filteredNotes = useMemo(() => {
+    const activeTagLower = activeTag?.toLowerCase() || null;
+    const lowerQ = !isAiSearch && searchQuery ? searchQuery.toLowerCase() : null;
+
+    return notes
+      .filter(note => {
+        // Archive filter: hide archived unless viewing archived
+        if (!showArchived && note.isArchived) return false;
+        if (showArchived && !note.isArchived) return false;
+        if (filter !== 'ALL' && note.type !== filter) return false;
+        if (activeTagLower && !note.tags?.some(t => t.toLowerCase() === activeTagLower)) return false;
+        if (lowerQ) {
+          return (
+            note.content.toLowerCase().includes(lowerQ) ||
+            note.title?.toLowerCase().includes(lowerQ) ||
+            note.tags?.some(t => t.toLowerCase().includes(lowerQ))
+          );
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        // Pinned notes first
+        if (a.isPinned && !b.isPinned) return -1;
+        if (!a.isPinned && b.isPinned) return 1;
+        // For TASK filter: sort by due date (overdue first, then upcoming)
+        if (filter === NoteType.TASK) {
+          const aDue = a.dueDate ?? Infinity;
+          const bDue = b.dueDate ?? Infinity;
+          if (aDue !== bDue) return aDue - bDue;
+        }
+        return 0;
+      });
+  }, [notes, showArchived, filter, activeTag, isAiSearch, searchQuery]);
+
+  const visibleNotes = useMemo(
+    () => filteredNotes.slice(0, visibleNotesCount),
+    [filteredNotes, visibleNotesCount]
+  );
+
+  const hasMoreVisibleNotes = visibleNotesCount < filteredNotes.length;
+
+  useEffect(() => {
+    setVisibleNotesCount(INITIAL_VISIBLE_NOTES);
+  }, [filter, activeTag, searchQuery, showArchived, isAiSearch, viewMode]);
+
+  useEffect(() => {
+    setVisibleNotesCount(prev => Math.min(prev, Math.max(filteredNotes.length, INITIAL_VISIBLE_NOTES)));
+  }, [filteredNotes.length]);
+
+  useEffect(() => {
+    if (viewMode !== 'all') return;
+    if (!hasMoreVisibleNotes) return;
+    const sentinel = loadMoreRef.current;
+    if (!sentinel) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (!entry?.isIntersecting) return;
+        setVisibleNotesCount(prev => Math.min(prev + VISIBLE_NOTES_STEP, filteredNotes.length));
+      },
+      { root: null, rootMargin: '800px 0px', threshold: 0.01 }
+    );
+
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMoreVisibleNotes, filteredNotes.length, viewMode]);
+
+  const handleOpenDrawer = useCallback(() => setIsDrawerOpen(true), []);
+  const handleCloseDrawer = useCallback(() => setIsDrawerOpen(false), []);
+  const handleShowArchived = useCallback(() => {
+    setShowArchived(true);
+    setIsDrawerOpen(false);
+  }, []);
+  const handleExitArchived = useCallback(() => setShowArchived(false), []);
+
+  const handleSearchInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setSearchQuery(e.target.value);
+    if (!e.target.value) setAiAnswer(null);
+  }, []);
+
+  const handleToggleAiSearch = useCallback(() => {
+    setIsAiSearch(prev => !prev);
+  }, []);
+
+  const handleTodayToggle = useCallback(() => {
+    if (viewMode === 'today') {
+      setViewMode('all');
+      return;
     }
-    return true;
-  }).sort((a, b) => {
-    // Pinned notes first
-    if (a.isPinned && !b.isPinned) return -1;
-    if (!a.isPinned && b.isPinned) return 1;
-    // For TASK filter: sort by due date (overdue first, then upcoming)
-    if (filter === NoteType.TASK) {
-      const now = Date.now();
-      const aDue = a.dueDate ?? Infinity;
-      const bDue = b.dueDate ?? Infinity;
-      if (aDue !== bDue) return aDue - bDue;
-    }
-    return 0;
-  });
+    handleEnterTodayView();
+  }, [viewMode, handleEnterTodayView]);
+
+  const handleClearFilters = useCallback(() => {
+    setFilter('ALL');
+    setSearchQuery('');
+    setActiveTag(null);
+  }, []);
 
   return (
     <ThemeProvider>
@@ -429,14 +522,14 @@ function App() {
 
       <Drawer
         isOpen={isDrawerOpen}
-        onClose={() => setIsDrawerOpen(false)}
+        onClose={handleCloseDrawer}
         notes={notes}
         onExport={handleExportData}
         onClearData={handleClearData}
         onTagClick={handleTagClick}
-        onShowArchived={() => { setShowArchived(true); setIsDrawerOpen(false); }}
+        onShowArchived={handleShowArchived}
         showArchived={showArchived}
-        onExitArchived={() => setShowArchived(false)}
+        onExitArchived={handleExitArchived}
         onImportNotes={handleImportNotes}
         addToast={addToast}
       />
@@ -464,13 +557,7 @@ function App() {
             </div>
             <div className="flex items-center gap-1">
               <button
-                onClick={() => {
-                  if (viewMode === 'today') {
-                    setViewMode('all');
-                  } else {
-                    handleEnterTodayView();
-                  }
-                }}
+                onClick={handleTodayToggle}
                 className={`relative p-2 rounded-full transition-colors flex items-center gap-1.5 ${
                   viewMode === 'today'
                     ? 'bg-brand-100 dark:bg-brand-900/50 text-brand-700 dark:text-brand-300'
@@ -485,7 +572,7 @@ function App() {
                 )}
               </button>
               <button
-                  onClick={() => setIsDrawerOpen(true)}
+                  onClick={handleOpenDrawer}
                   className="p-2 -mr-2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-full transition-colors"
               >
                 <Menu className="w-5 h-5" />
@@ -501,10 +588,7 @@ function App() {
                   ref={searchInputRef}
                   type="text"
                   value={searchQuery}
-                  onChange={(e) => {
-                    setSearchQuery(e.target.value);
-                    if(!e.target.value) setAiAnswer(null);
-                  }}
+                  onChange={handleSearchInputChange}
                   placeholder={isAiSearch ? "Ask your second brain..." : "Search your thoughts..."}
                   className={`w-full pl-10 pr-20 py-3 rounded-xl text-sm font-medium transition-all outline-none border shadow-sm ${
                     isAiSearch
@@ -514,7 +598,7 @@ function App() {
                 />
                 <button
                   type="button"
-                  onClick={() => setIsAiSearch(!isAiSearch)}
+                  onClick={handleToggleAiSearch}
                   className={`absolute right-2 top-1.5 bottom-1.5 px-3 rounded-lg text-[10px] font-bold tracking-wide uppercase transition-all flex items-center gap-1.5 ${
                     isAiSearch
                       ? 'bg-brand-100 dark:bg-brand-900/50 text-brand-700 dark:text-brand-300 hover:bg-brand-200 dark:hover:bg-brand-900/70'
@@ -599,7 +683,7 @@ function App() {
                   Viewing archived notes
                 </div>
                 <button
-                  onClick={() => setShowArchived(false)}
+                  onClick={handleExitArchived}
                   className="text-xs font-medium text-brand-600 hover:underline"
                 >
                   Back to notes
@@ -637,7 +721,7 @@ function App() {
               </div>
             ) : (
               <div className="space-y-4">
-                {filteredNotes.map(note => (
+                {visibleNotes.map(note => (
                   <NoteCard
                     key={note.id}
                     note={note}
@@ -653,10 +737,17 @@ function App() {
                     onSetPriority={handleSetPriority}
                   />
                 ))}
+                {hasMoreVisibleNotes && (
+                  <div ref={loadMoreRef} className="py-3 text-center">
+                    <span className="text-[11px] font-medium text-zinc-400">
+                      Loading more notes...
+                    </span>
+                  </div>
+                )}
                 {filteredNotes.length === 0 && (
                   <div className="text-center py-12">
                      <p className="text-zinc-400 text-sm">No notes found matching your criteria.</p>
-                     <button onClick={() => {setFilter('ALL'); setSearchQuery(''); setActiveTag(null);}} className="mt-2 text-brand-600 text-xs font-medium hover:underline">Clear filters</button>
+                     <button onClick={handleClearFilters} className="mt-2 text-brand-600 text-xs font-medium hover:underline">Clear filters</button>
                   </div>
                 )}
               </div>

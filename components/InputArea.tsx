@@ -358,4 +358,4 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
 });
 
 InputArea.displayName = 'InputArea';
-export default InputArea;
+export default React.memo(InputArea);

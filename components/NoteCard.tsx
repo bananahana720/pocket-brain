@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Note, NoteType } from '../types';
 import { Edit2, Check, Clock, MoreVertical, Trash2, Copy, RefreshCw, CheckSquare, Square, Pin, Archive, Calendar, AlertCircle, Share2 } from 'lucide-react';
 import { trackEvent } from '../utils/analytics';
@@ -26,6 +26,17 @@ function formatNoteForSharing(note: Note): string {
   return `${typeEmoji} ${header}\n\n${note.content}${tags}\n\n---\nCaptured with PocketBrain\n${appUrl}`;
 }
 
+const CREATED_AT_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  weekday: 'short',
+  hour: 'numeric',
+  minute: 'numeric',
+});
+
+const DUE_DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+});
+
 const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, onToggleComplete, onReanalyze, onTagClick, onPin, onArchive, onSetDueDate, onSetPriority }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
@@ -36,11 +47,7 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   
-  const dateStr = new Date(note.createdAt).toLocaleDateString('en-US', { 
-    weekday: 'short', 
-    hour: 'numeric', 
-    minute:'numeric' 
-  });
+  const dateStr = useMemo(() => CREATED_AT_FORMATTER.format(note.createdAt), [note.createdAt]);
 
   useEffect(() => {
     setContent(note.content);
@@ -56,6 +63,7 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
 
   // Close menu when clicking outside
   useEffect(() => {
+    if (!showMenu) return;
     const handleClickOutside = (event: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
         setShowMenu(false);
@@ -63,7 +71,7 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+  }, [showMenu]);
 
   const handleSave = () => {
     if (content.trim() !== note.content) {
@@ -165,7 +173,7 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
       label = 'Tomorrow';
       colorClass = 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 border-blue-100 dark:border-blue-800';
     } else {
-      label = dueDateDay.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      label = DUE_DATE_FORMATTER.format(dueDateDay);
       colorClass = 'bg-zinc-50 dark:bg-zinc-700 text-zinc-500 dark:text-zinc-400 border-zinc-100 dark:border-zinc-600';
     }
 
@@ -187,11 +195,14 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
   };
 
   return (
-    <div className={`group relative bg-white dark:bg-zinc-800 rounded-2xl p-5 border transition-all duration-200 animate-slide-up ${getPriorityBorder()} ${
+    <div
+      style={{ contentVisibility: 'auto' }}
+      className={`group relative bg-white dark:bg-zinc-800 rounded-2xl p-5 border transition-all duration-200 animate-slide-up ${getPriorityBorder()} ${
         note.isCompleted
         ? 'opacity-60 shadow-none border-zinc-100 dark:border-zinc-700 bg-zinc-50/50 dark:bg-zinc-800/50'
         : 'shadow-[0_2px_8px_-2px_rgba(0,0,0,0.05)] border-zinc-100 dark:border-zinc-700 hover:shadow-md hover:border-zinc-200 dark:hover:border-zinc-600'
-    }`}>
+    }`}
+    >
       {/* Header */}
       <div className="flex justify-between items-start mb-3 relative">
         <div className="flex items-center gap-2 overflow-hidden">
@@ -469,4 +480,4 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
   );
 };
 
-export default NoteCard;
+export default React.memo(NoteCard);

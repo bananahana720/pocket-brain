@@ -1,4 +1,5 @@
 const ANALYTICS_STORAGE_KEY = 'pocketbrain_analytics_events';
+const MAX_ANALYTICS_EVENTS = 200;
 
 export type AnalyticsEventName =
   | 'daily_brief_share_clicked'
@@ -29,12 +30,16 @@ export const trackEvent = (
 ) => {
   try {
     const events = readEvents();
-    events.push({
+    const nextEvent: AnalyticsEvent = {
       name,
       timestamp: Date.now(),
       ...(metadata ? { metadata } : {}),
-    });
-    localStorage.setItem(ANALYTICS_STORAGE_KEY, JSON.stringify(events));
+    };
+    const updatedEvents =
+      events.length >= MAX_ANALYTICS_EVENTS
+        ? [...events.slice(events.length - MAX_ANALYTICS_EVENTS + 1), nextEvent]
+        : [...events, nextEvent];
+    localStorage.setItem(ANALYTICS_STORAGE_KEY, JSON.stringify(updatedEvents));
   } catch {
     // Analytics is best-effort only.
   }
