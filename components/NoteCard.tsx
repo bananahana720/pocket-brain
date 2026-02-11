@@ -123,6 +123,9 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
     }
   };
 
+  const shareState =
+    shareStatus === 'Failed' ? 'error' : shareStatus ? 'success' : 'idle';
+
   const getTypeBadge = () => {
     switch (note.type) {
       case NoteType.TASK: 
@@ -239,13 +242,21 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
                 <button
                     onClick={handleShare}
                     className={`p-1 rounded-md transition-colors ${
-                        shareStatus
+                        shareState === 'success'
                         ? 'text-emerald-500'
+                        : shareState === 'error'
+                        ? 'text-rose-500'
                         : 'text-zinc-300 hover:text-zinc-500 hover:bg-zinc-100 opacity-0 group-hover:opacity-100'
                     }`}
                     title={shareStatus || 'Share'}
                 >
-                    {shareStatus ? <Check className="w-3.5 h-3.5" /> : <Share2 className="w-3.5 h-3.5" />}
+                    {shareState === 'success' ? (
+                      <Check className="w-3.5 h-3.5" />
+                    ) : shareState === 'error' ? (
+                      <AlertCircle className="w-3.5 h-3.5" />
+                    ) : (
+                      <Share2 className="w-3.5 h-3.5" />
+                    )}
                 </button>
             )}
 
