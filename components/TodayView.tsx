@@ -1,6 +1,6 @@
 import React from 'react';
 import { Note } from '../types';
-import { AlertTriangle, Clock, Plus, Sparkles } from 'lucide-react';
+import { AlertTriangle, Clock, Plus, Share2, Sparkles } from 'lucide-react';
 import NoteCard from './NoteCard';
 
 interface TodayViewProps {
@@ -17,6 +17,7 @@ interface TodayViewProps {
   onTagClick: (tag: string) => void;
   aiBrief: string | null;
   isLoadingBrief: boolean;
+  onShareBrief: (brief: string, stats: { overdue: number; dueToday: number; capturedToday: number }) => void;
 }
 
 const getStartOfToday = (): number => {
@@ -43,6 +44,7 @@ const TodayView: React.FC<TodayViewProps> = ({
   onTagClick,
   aiBrief,
   isLoadingBrief,
+  onShareBrief,
 }) => {
   const startOfToday = getStartOfToday();
   const endOfToday = getEndOfToday();
@@ -159,11 +161,30 @@ const TodayView: React.FC<TodayViewProps> = ({
       {/* AI Daily Brief Section */}
       {hasBrief && (
         <section>
-          <div className="flex items-center gap-2 mb-3">
-            <Sparkles className="w-4 h-4 text-violet-500" />
-            <h2 className="text-sm font-bold text-violet-600 dark:text-violet-400 uppercase tracking-wider">
-              AI Daily Brief
-            </h2>
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-violet-500" />
+              <h2 className="text-sm font-bold text-violet-600 dark:text-violet-400 uppercase tracking-wider">
+                AI Daily Brief
+              </h2>
+            </div>
+            <button
+              onClick={() => {
+                if (!aiBrief) return;
+                onShareBrief(aiBrief, {
+                  overdue: overdueNotes.length,
+                  dueToday: dueTodayNotes.length,
+                  capturedToday: capturedTodayNotes.length,
+                });
+              }}
+              disabled={!aiBrief || isLoadingBrief}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold rounded-full border border-violet-200 dark:border-violet-800 text-violet-700 dark:text-violet-300 hover:bg-violet-50 dark:hover:bg-violet-900/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              title="Share brief"
+              aria-label="Share brief"
+            >
+              <Share2 className="w-3.5 h-3.5" />
+              Share
+            </button>
           </div>
           <div className="bg-white dark:bg-zinc-800 rounded-2xl p-5 border border-violet-100 dark:border-zinc-700 shadow-sm">
             {isLoadingBrief ? (

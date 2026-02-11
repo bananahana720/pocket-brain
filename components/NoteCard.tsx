@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Note, NoteType } from '../types';
-import { Edit2, Check, Clock, MoreVertical, Trash2, Copy, RefreshCw, CheckSquare, Square, Pin, Archive, Calendar, AlertCircle } from 'lucide-react';
+import { Edit2, Check, Clock, MoreVertical, Trash2, Copy, RefreshCw, CheckSquare, Square, Pin, Archive, Calendar, AlertCircle, Share2 } from 'lucide-react';
+import { trackEvent } from '../utils/analytics';
 
 interface NoteCardProps {
   note: Note;
@@ -16,12 +17,22 @@ interface NoteCardProps {
   onSetPriority: (id: string, priority: 'urgent' | 'normal' | 'low' | undefined) => void;
 }
 
+function formatNoteForSharing(note: Note): string {
+  const typeEmoji = note.type === 'TASK' ? '✅' : note.type === 'IDEA' ? '💡' : '📝';
+  const header = note.title || (note.content.length > 50 ? note.content.slice(0, 50) + '...' : note.content);
+  const tags = note.tags?.length ? '\n' + note.tags.map(t => `#${t}`).join(' ') : '';
+  const appUrl = window.location.origin + window.location.pathname;
+
+  return `${typeEmoji} ${header}\n\n${note.content}${tags}\n\n---\nCaptured with PocketBrain\n${appUrl}`;
+}
+
 const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, onToggleComplete, onReanalyze, onTagClick, onPin, onArchive, onSetDueDate, onSetPriority }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showPriorityPicker, setShowPriorityPicker] = useState(false);
   const [content, setContent] = useState(note.content);
+  const [shareStatus, setShareStatus] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   
@@ -72,6 +83,43 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
     }
     if (e.key === 'Escape') {
       handleCancel();
+    }
+  };
+
+  const handleShare = async () => {
+    const text = formatNoteForSharing(note);
+
+    trackEvent('note_share_clicked', {
+      noteType: note.type || 'NOTE',
+      hasTitle: !!note.title,
+      tagCount: note.tags?.length || 0,
+    });
+
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: note.title || 'PocketBrain Note',
+          text,
+        });
+        trackEvent('note_share_completed', { method: 'native', noteType: note.type || 'NOTE' });
+        setShareStatus('Shared!');
+        setTimeout(() => setShareStatus(null), 2000);
+        return;
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          return;
+        }
+      }
+    }
+
+    try {
+      await navigator.clipboard.writeText(text);
+      trackEvent('note_share_completed', { method: 'clipboard', noteType: note.type || 'NOTE' });
+      setShareStatus('Copied!');
+      setTimeout(() => setShareStatus(null), 2000);
+    } catch {
+      setShareStatus('Failed');
+      setTimeout(() => setShareStatus(null), 2000);
     }
   };
 
@@ -183,6 +231,21 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
                     title={note.isPinned ? 'Unpin' : 'Pin'}
                 >
                     <Pin className={`w-3.5 h-3.5 ${note.isPinned ? 'fill-current' : ''}`} />
+                </button>
+            )}
+
+            {/* Share button */}
+            {!isEditing && (
+                <button
+                    onClick={handleShare}
+                    className={`p-1 rounded-md transition-colors ${
+                        shareStatus
+                        ? 'text-emerald-500'
+                        : 'text-zinc-300 hover:text-zinc-500 hover:bg-zinc-100 opacity-0 group-hover:opacity-100'
+                    }`}
+                    title={shareStatus || 'Share'}
+                >
+                    {shareStatus ? <Check className="w-3.5 h-3.5" /> : <Share2 className="w-3.5 h-3.5" />}
                 </button>
             )}
 

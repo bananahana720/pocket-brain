@@ -264,10 +264,7 @@ export const processBatchEntry = async (content: string): Promise<AIAnalysisResu
 /**
  * Generates a short AI daily briefing based on today's relevant notes.
  */
-export const generateDailyBrief = async (notes: Note[]): Promise<string> => {
-  const provider = getProvider();
-  if (!provider) return "I need an API key to generate your daily brief.";
-
+export const generateDailyBrief = async (notes: Note[]): Promise<string | null> => {
   const now = new Date();
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
@@ -286,8 +283,11 @@ export const generateDailyBrief = async (notes: Note[]): Promise<string> => {
 
   const relevantNotes = [...overdueNotes, ...dueTodayNotes, ...capturedTodayNotes];
   if (relevantNotes.length === 0) {
-    return "You have a clean slate today — no overdue tasks, nothing due, and no new captures yet. A great day to get ahead!";
+    return null;
   }
+
+  const provider = getProvider();
+  if (!provider) return "I need an API key to generate your daily brief.";
 
   const formatNote = (n: Note) => {
     const parts: string[] = [];

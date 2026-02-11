@@ -9,6 +9,7 @@ import Drawer from './components/Drawer';
 import ErrorBoundary from './components/ErrorBoundary';
 import { ToastContainer, ToastMessage, ToastAction } from './components/Toast';
 import { ThemeProvider } from './contexts/ThemeContext';
+import { trackEvent } from './utils/analytics';
 
 const STORAGE_KEY = 'pocketbrain_notes';
 
@@ -48,13 +49,18 @@ function App() {
         console.error('Failed to parse notes', e);
       }
     }
-    hasLoadedRef.current = true;
+    const id = requestAnimationFrame(() => {
+      hasLoadedRef.current = true;
+    });
+    return () => cancelAnimationFrame(id);
   }, []);
 
   useEffect(() => {
     if (!hasLoadedRef.current) return;
+    const serialized = JSON.stringify(notes);
+    if (serialized === localStorage.getItem(STORAGE_KEY)) return;
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(notes));
+      localStorage.setItem(STORAGE_KEY, serialized);
     } catch (e) {
       console.error('Failed to save notes', e);
       addToast('Storage full — some changes may not be saved', 'error');
@@ -71,6 +77,19 @@ function App() {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('via') !== 'daily_brief_share') return;
+
+    trackEvent('daily_brief_share_opened');
+    addToast('Opened from a shared PocketBrain brief', 'info');
+
+    params.delete('via');
+    const query = params.toString();
+    const nextUrl = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`;
+    window.history.replaceState({}, '', nextUrl);
   }, []);
 
   // --- Toast System ---
@@ -297,6 +316,41 @@ function App() {
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
     return n.dueDate < startOfToday;
   });
+
+  const handleShareTodayBrief = async (
+    brief: string,
+    stats: { overdue: number; dueToday: number; capturedToday: number }
+  ) => {
+    const shareUrl = `${window.location.origin}${window.location.pathname}?via=daily_brief_share`;
+    const summary = `Overdue: ${stats.overdue} | Due today: ${stats.dueToday} | Captured today: ${stats.capturedToday}`;
+    const shareText = `My PocketBrain daily brief:\n${brief}\n\n${summary}\n\nTry PocketBrain: ${shareUrl}`;
+
+    trackEvent('daily_brief_share_clicked', stats);
+
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: 'My PocketBrain Daily Brief',
+          text: shareText,
+          url: shareUrl,
+        });
+        addToast('Daily brief shared', 'success');
+        return;
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          addToast('Share canceled', 'info');
+          return;
+        }
+      }
+    }
+
+    try {
+      await navigator.clipboard.writeText(shareText);
+      addToast('Brief copied — ready to paste', 'success');
+    } catch {
+      addToast('Unable to share brief on this device', 'error');
+    }
+  };
 
   const handleExportData = () => {
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(notes, null, 2));
@@ -534,6 +588,7 @@ function App() {
             onTagClick={handleTagClick}
             aiBrief={aiBrief}
             isLoadingBrief={isLoadingBrief}
+            onShareBrief={handleShareTodayBrief}
           />
         ) : (
           <>
