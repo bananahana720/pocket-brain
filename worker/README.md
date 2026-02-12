@@ -11,6 +11,11 @@ This Worker secures AI provider keys by storing encrypted keys server-side and i
 
 - `AI_SESSIONS`: Stores encrypted API key sessions with 24-hour TTL.
 
+## Required Durable Object
+
+- `ControlPlaneDO`: Stores distributed rate-limit and provider circuit-breaker state.
+- Defined in `worker/wrangler.toml`; Wrangler applies the migration on deploy.
+
 Create + configure + deploy in one step:
 
 ```bash

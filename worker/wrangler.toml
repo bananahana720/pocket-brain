@@ -8,5 +8,14 @@ workers_dev = true
 binding = "AI_SESSIONS"
 id = "23450b2f1c9342c6a1bde8a4eaead79f"
 
+[durable_objects]
+bindings = [
+  { name = "CONTROL_PLANE_DO", class_name = "ControlPlaneDO" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ControlPlaneDO"]
+
 [vars]
 DEFAULT_MODEL = "google/gemini-2.5-flash"

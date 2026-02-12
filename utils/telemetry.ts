@@ -10,10 +10,13 @@ export type ClientMetricName =
   | 'analysis_queue_recovered'
   | 'backup_writes'
   | 'backup_failures'
+  | 'persist_periodic_flushes'
   | 'ai_requests'
   | 'ai_payload_samples'
   | 'ai_failures'
-  | 'stale_analysis_drops';
+  | 'stale_analysis_drops'
+  | 'analysis_queue_pauses'
+  | 'analysis_queue_stale_pruned';
 
 interface ClientMetrics {
   counters: Record<ClientMetricName, number>;
@@ -38,10 +41,13 @@ const metrics: ClientMetrics = {
     analysis_queue_recovered: 0,
     backup_writes: 0,
     backup_failures: 0,
+    persist_periodic_flushes: 0,
     ai_requests: 0,
     ai_payload_samples: 0,
     ai_failures: 0,
     stale_analysis_drops: 0,
+    analysis_queue_pauses: 0,
+    analysis_queue_stale_pruned: 0,
   },
   aiErrorCodes: {},
   latencies: {

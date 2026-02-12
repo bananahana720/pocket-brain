@@ -18,6 +18,7 @@ export interface PersistedAnalysisJob {
   version: number;
   contentHash: string;
   attempts: number;
+  enqueuedAt: number;
 }
 
 export interface AnalysisQueueState {
@@ -84,6 +85,10 @@ function sanitizeAnalysisJob(raw: unknown): PersistedAnalysisJob | null {
   const contentHash = typeof value.contentHash === 'string' ? value.contentHash : '';
   const version = typeof value.version === 'number' ? Math.max(0, Math.floor(value.version)) : 0;
   const attempts = typeof value.attempts === 'number' ? Math.max(0, Math.floor(value.attempts)) : 0;
+  const enqueuedAt =
+    typeof value.enqueuedAt === 'number' && Number.isFinite(value.enqueuedAt) && value.enqueuedAt > 0
+      ? Math.floor(value.enqueuedAt)
+      : Date.now();
 
   if (!noteId || !contentHash) return null;
   return {
@@ -92,6 +97,7 @@ function sanitizeAnalysisJob(raw: unknown): PersistedAnalysisJob | null {
     version,
     contentHash,
     attempts,
+    enqueuedAt,
   };
 }
 

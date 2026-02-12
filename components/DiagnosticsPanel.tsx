@@ -48,10 +48,13 @@ const DiagnosticsPanel: React.FC = () => {
         <p>Storage persist granted: {clientMetrics.counters.storage_persist_granted}</p>
         <p>Storage persist denied: {clientMetrics.counters.storage_persist_denied}</p>
         <p>Queue dropped: {clientMetrics.counters.analysis_queue_dropped}</p>
+        <p>Queue pauses: {clientMetrics.counters.analysis_queue_pauses}</p>
+        <p>Queue stale pruned: {clientMetrics.counters.analysis_queue_stale_pruned}</p>
         <p>Dead-lettered: {clientMetrics.counters.analysis_dead_lettered}</p>
         <p>Queue recovered: {clientMetrics.counters.analysis_queue_recovered}</p>
         <p>Backups: {clientMetrics.counters.backup_writes}</p>
         <p>Backup failures: {clientMetrics.counters.backup_failures}</p>
+        <p>Periodic flushes: {clientMetrics.counters.persist_periodic_flushes}</p>
         <p>Avg persist: {clientMetrics.latencyAverages.persistMs}ms</p>
         <p>Avg AI: {clientMetrics.latencyAverages.aiMs}ms</p>
       </div>

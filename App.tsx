@@ -65,6 +65,9 @@ const MAX_ANALYSIS_QUEUE_JOBS = 300;
 const MAX_ANALYSIS_RETRIES = 4;
 const MAX_ANALYSIS_DEAD_LETTER = 120;
 const DEAD_LETTER_REPLAY_BATCH = 20;
+const PERIODIC_FLUSH_INTERVAL_MS = 15 * 1000;
+const ANALYSIS_RETRY_PAUSE_MS = 12 * 1000;
+const MAX_ANALYSIS_JOB_AGE_MS = 72 * 60 * 60 * 1000;
 
 const INITIAL_VISIBLE_NOTES = 60;
 const VISIBLE_NOTES_STEP = 40;
@@ -282,12 +285,16 @@ function App() {
   const hasLoadedRef = useRef(false);
   const previousNotesRef = useRef<Note[]>([]);
   const persistChainRef = useRef<Promise<void>>(Promise.resolve());
+  const persistDirtyRef = useRef(false);
   const analysisQueuePersistChainRef = useRef<Promise<void>>(Promise.resolve());
+  const analysisQueueDirtyRef = useRef(false);
   const analysisControllersRef = useRef<Map<string, AbortController>>(new Map());
   const pendingAnalysisRef = useRef<AnalysisJob[]>([]);
   const deferredAnalysisRef = useRef<AnalysisJob[]>([]);
   const transientReplayQueueRef = useRef<AnalysisJob[]>([]);
   const deadLetterAnalysisRef = useRef<AnalysisJob[]>([]);
+  const analysisPauseUntilRef = useRef(0);
+  const analysisResumeTimerRef = useRef<number | null>(null);
   const processingAnalysisRef = useRef(false);
   const backupReminderShownRef = useRef(false);
   const autoBackupInFlightRef = useRef(false);
@@ -367,13 +374,40 @@ function App() {
   );
 
   const persistAnalysisQueueStateSafely = useCallback(() => {
+    analysisQueueDirtyRef.current = true;
     analysisQueuePersistChainRef.current = analysisQueuePersistChainRef.current
-      .then(() => saveAnalysisQueueState(snapshotAnalysisQueueState()))
+      .then(async () => {
+        await saveAnalysisQueueState(snapshotAnalysisQueueState());
+        analysisQueueDirtyRef.current = false;
+      })
       .catch(error => {
+        analysisQueueDirtyRef.current = true;
         console.error('Failed to persist analysis queue state', error);
         incrementMetric('analysis_queue_persist_failures');
       });
   }, [snapshotAnalysisQueueState]);
+
+  const pruneStaleAnalysisJobs = useCallback(() => {
+    const cutoff = Date.now() - MAX_ANALYSIS_JOB_AGE_MS;
+    let pruned = 0;
+
+    const prune = (jobs: AnalysisJob[]) =>
+      jobs.filter(job => {
+        if (job.enqueuedAt >= cutoff) return true;
+        pruned += 1;
+        return false;
+      });
+
+    pendingAnalysisRef.current = prune(pendingAnalysisRef.current);
+    deferredAnalysisRef.current = prune(deferredAnalysisRef.current);
+    transientReplayQueueRef.current = prune(transientReplayQueueRef.current);
+    deadLetterAnalysisRef.current = prune(deadLetterAnalysisRef.current);
+
+    if (pruned > 0) {
+      incrementMetric('analysis_queue_stale_pruned', pruned);
+      persistAnalysisQueueStateSafely();
+    }
+  }, [persistAnalysisQueueStateSafely]);
 
   const writeShadowSnapshot = useCallback((snapshotNotes: Note[]) => {
     try {
@@ -388,14 +422,20 @@ function App() {
     const latestNotes = notesRef.current;
     writeShadowSnapshot(latestNotes);
 
-    persistChainRef.current = persistChainRef.current
-      .then(() => compactSnapshot(latestNotes))
-      .catch(error => {
-        console.error('Failed to flush notes snapshot', error);
-        incrementMetric('persist_failures');
-      });
+    if (persistDirtyRef.current) {
+      persistDirtyRef.current = false;
+      persistChainRef.current = persistChainRef.current
+        .then(() => compactSnapshot(latestNotes))
+        .catch(error => {
+          persistDirtyRef.current = true;
+          console.error('Failed to flush notes snapshot', error);
+          incrementMetric('persist_failures');
+        });
+    }
 
-    persistAnalysisQueueStateSafely();
+    if (analysisQueueDirtyRef.current) {
+      persistAnalysisQueueStateSafely();
+    }
   }, [persistAnalysisQueueStateSafely, writeShadowSnapshot]);
 
   const runAutoBackupIfDue = useCallback(
@@ -486,6 +526,25 @@ function App() {
 
   const runAnalysisQueue = useCallback(() => {
     if (processingAnalysisRef.current) return;
+    pruneStaleAnalysisJobs();
+
+    const now = Date.now();
+    if (analysisPauseUntilRef.current > now) {
+      const delay = analysisPauseUntilRef.current - now;
+      if (analysisResumeTimerRef.current === null) {
+        analysisResumeTimerRef.current = window.setTimeout(() => {
+          analysisResumeTimerRef.current = null;
+          runAnalysisQueue();
+        }, delay);
+      }
+      return;
+    }
+
+    if (analysisResumeTimerRef.current !== null) {
+      window.clearTimeout(analysisResumeTimerRef.current);
+      analysisResumeTimerRef.current = null;
+    }
+
     const job = pendingAnalysisRef.current.shift();
     if (!job) return;
     persistAnalysisQueueStateSafely();
@@ -550,7 +609,7 @@ function App() {
           })
         );
 
-        const retriedJob: AnalysisJob = { ...job, attempts: job.attempts + 1 };
+        const retriedJob: AnalysisJob = { ...job, attempts: job.attempts + 1, enqueuedAt: Date.now() };
 
         if (mapped.deferUntilConnected) {
           removeJobsForNoteId(job.noteId);
@@ -558,6 +617,14 @@ function App() {
           enforceAnalysisQueueBudget(job.noteId);
           persistAnalysisQueueStateSafely();
           return;
+        }
+
+        if (mapped.retryable) {
+          const nextPauseUntil = Date.now() + ANALYSIS_RETRY_PAUSE_MS;
+          if (nextPauseUntil > analysisPauseUntilRef.current) {
+            analysisPauseUntilRef.current = nextPauseUntil;
+            incrementMetric('analysis_queue_pauses');
+          }
         }
 
         if (mapped.retryable && job.attempts < MAX_ANALYSIS_RETRIES) {
@@ -592,6 +659,7 @@ function App() {
                   pendingAnalysisRef.current.push({
                     ...queued,
                     attempts: Math.max(0, queued.attempts - 1),
+                    enqueuedAt: Date.now(),
                   });
                 }
                 deadLetterToastShownRef.current = false;
@@ -610,12 +678,21 @@ function App() {
         persistAnalysisQueueStateSafely();
         runAnalysisQueue();
       });
-  }, [addToast, enforceAnalysisQueueBudget, persistAnalysisQueueStateSafely, removeJobsForNoteId]);
+  }, [
+    addToast,
+    enforceAnalysisQueueBudget,
+    persistAnalysisQueueStateSafely,
+    pruneStaleAnalysisJobs,
+    removeJobsForNoteId,
+  ]);
 
   const enqueueAnalysis = useCallback(
     (job: AnalysisJob) => {
       removeJobsForNoteId(job.noteId);
-      pendingAnalysisRef.current.push(job);
+      pendingAnalysisRef.current.push({
+        ...job,
+        enqueuedAt: job.enqueuedAt || Date.now(),
+      });
       enforceAnalysisQueueBudget(job.noteId);
       persistAnalysisQueueStateSafely();
       runAnalysisQueue();
@@ -671,6 +748,7 @@ function App() {
         deferredAnalysisRef.current = normalizedQueue.state.deferred;
         transientReplayQueueRef.current = normalizedQueue.state.transient;
         deadLetterAnalysisRef.current = normalizedQueue.state.deadLetter;
+        pruneStaleAnalysisJobs();
         enforceAnalysisQueueBudget();
         if (normalizedQueue.dropped > 0) {
           persistAnalysisQueueStateSafely();
@@ -693,6 +771,7 @@ function App() {
                   pendingAnalysisRef.current.push({
                     ...queued,
                     attempts: Math.max(0, queued.attempts - 1),
+                    enqueuedAt: Date.now(),
                   });
                 }
                 deadLetterToastShownRef.current = false;
@@ -753,6 +832,7 @@ function App() {
     addToast,
     enforceAnalysisQueueBudget,
     persistAnalysisQueueStateSafely,
+    pruneStaleAnalysisJobs,
     removeJobsForNoteId,
     runAnalysisQueue,
     tryRestoreAutoBackup,
@@ -776,6 +856,7 @@ function App() {
       console.error('Failed to update localStorage fallback snapshot', error);
     }
 
+    persistDirtyRef.current = true;
     persistChainRef.current = persistChainRef.current
       .then(async () => {
         const started = performance.now();
@@ -786,8 +867,10 @@ function App() {
         if (opCount >= OP_COMPACT_THRESHOLD) {
           await compactSnapshot(next);
         }
+        persistDirtyRef.current = false;
       })
       .catch(error => {
+        persistDirtyRef.current = true;
         console.error('Failed to persist notes', error);
         incrementMetric('persist_failures');
         addToast('Storage issue — some changes may not be saved', 'error');
@@ -861,6 +944,27 @@ function App() {
   }, [flushPersistentState]);
 
   useEffect(() => {
+    const interval = window.setInterval(() => {
+      if (!hasLoadedRef.current) return;
+      if (!persistDirtyRef.current && !analysisQueueDirtyRef.current) return;
+      incrementMetric('persist_periodic_flushes');
+      flushPersistentState();
+    }, PERIODIC_FLUSH_INTERVAL_MS);
+
+    return () => window.clearInterval(interval);
+  }, [flushPersistentState]);
+
+  useEffect(
+    () => () => {
+      if (analysisResumeTimerRef.current !== null) {
+        window.clearTimeout(analysisResumeTimerRef.current);
+        analysisResumeTimerRef.current = null;
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const via = params.get('via');
     if (!via) return;
@@ -931,7 +1035,11 @@ function App() {
     const released = deferredAnalysisRef.current.splice(0, deferredAnalysisRef.current.length);
     for (const job of released) {
       removeJobsForNoteId(job.noteId);
-      pendingAnalysisRef.current.push(job);
+      pendingAnalysisRef.current.push({
+        ...job,
+        attempts: Math.max(0, job.attempts - 1),
+        enqueuedAt: Date.now(),
+      });
     }
     enforceAnalysisQueueBudget();
     persistAnalysisQueueStateSafely();
@@ -940,25 +1048,34 @@ function App() {
 
   useEffect(() => {
     if (isOffline) return;
+    pruneStaleAnalysisJobs();
     if (transientReplayQueueRef.current.length === 0) return;
     const replay = transientReplayQueueRef.current.splice(0, transientReplayQueueRef.current.length);
     for (const job of replay) {
       removeJobsForNoteId(job.noteId);
-      pendingAnalysisRef.current.push(job);
+      pendingAnalysisRef.current.push({ ...job, enqueuedAt: Date.now() });
     }
     enforceAnalysisQueueBudget();
     persistAnalysisQueueStateSafely();
     runAnalysisQueue();
-  }, [enforceAnalysisQueueBudget, isOffline, persistAnalysisQueueStateSafely, removeJobsForNoteId, runAnalysisQueue]);
+  }, [
+    enforceAnalysisQueueBudget,
+    isOffline,
+    persistAnalysisQueueStateSafely,
+    pruneStaleAnalysisJobs,
+    removeJobsForNoteId,
+    runAnalysisQueue,
+  ]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
       if (isOffline) return;
+      pruneStaleAnalysisJobs();
       if (transientReplayQueueRef.current.length === 0) return;
       const replay = transientReplayQueueRef.current.splice(0, transientReplayQueueRef.current.length);
       for (const job of replay) {
         removeJobsForNoteId(job.noteId);
-        pendingAnalysisRef.current.push(job);
+        pendingAnalysisRef.current.push({ ...job, enqueuedAt: Date.now() });
       }
       enforceAnalysisQueueBudget();
       persistAnalysisQueueStateSafely();
@@ -966,7 +1083,14 @@ function App() {
     }, 60_000);
 
     return () => window.clearInterval(interval);
-  }, [enforceAnalysisQueueBudget, isOffline, persistAnalysisQueueStateSafely, removeJobsForNoteId, runAnalysisQueue]);
+  }, [
+    enforceAnalysisQueueBudget,
+    isOffline,
+    persistAnalysisQueueStateSafely,
+    pruneStaleAnalysisJobs,
+    removeJobsForNoteId,
+    runAnalysisQueue,
+  ]);
 
   useEffect(() => {
     if (backupReminderShownRef.current) return;
@@ -1116,6 +1240,7 @@ function App() {
           version: analysisVersion,
           contentHash: contentSignature,
           attempts: 0,
+          enqueuedAt: Date.now(),
         });
       }
     },
@@ -1296,6 +1421,7 @@ function App() {
         version: nextVersion,
         contentHash: nextHash,
         attempts: 0,
+        enqueuedAt: Date.now(),
       });
 
       addToast('Note updated', 'success');
@@ -1360,7 +1486,14 @@ function App() {
         )
       );
       addToast('Re-analyzing...', 'info');
-      enqueueAnalysis({ noteId: id, content: note.content, version, contentHash: signature, attempts: 0 });
+      enqueueAnalysis({
+        noteId: id,
+        content: note.content,
+        version,
+        contentHash: signature,
+        attempts: 0,
+        enqueuedAt: Date.now(),
+      });
     },
     [cancelAnalysisForNote, addToast, enqueueAnalysis]
   );
@@ -1474,6 +1607,13 @@ function App() {
     transientReplayQueueRef.current = [];
     deadLetterAnalysisRef.current = [];
     deadLetterToastShownRef.current = false;
+    analysisPauseUntilRef.current = 0;
+    if (analysisResumeTimerRef.current !== null) {
+      window.clearTimeout(analysisResumeTimerRef.current);
+      analysisResumeTimerRef.current = null;
+    }
+    persistDirtyRef.current = false;
+    analysisQueueDirtyRef.current = false;
     persistAnalysisQueueStateSafely();
 
     setNotes([]);
@@ -1702,7 +1842,11 @@ function App() {
       const released = deferredAnalysisRef.current.splice(0, deferredAnalysisRef.current.length);
       for (const job of released) {
         removeJobsForNoteId(job.noteId);
-        pendingAnalysisRef.current.push(job);
+        pendingAnalysisRef.current.push({
+          ...job,
+          attempts: Math.max(0, job.attempts - 1),
+          enqueuedAt: Date.now(),
+        });
       }
       enforceAnalysisQueueBudget();
       persistAnalysisQueueStateSafely();

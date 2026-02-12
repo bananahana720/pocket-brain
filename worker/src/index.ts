@@ -11,8 +11,29 @@ interface KVNamespace {
   delete(key: string): Promise<void>;
 }
 
+interface DurableObjectId {}
+
+interface DurableObjectStub {
+  fetch(input: string, init?: RequestInit): Promise<Response>;
+}
+
+interface DurableObjectNamespace {
+  idFromName(name: string): DurableObjectId;
+  get(id: DurableObjectId): DurableObjectStub;
+}
+
+interface DurableObjectStorage {
+  get<T>(key: string): Promise<T | undefined>;
+  put<T>(key: string, value: T): Promise<void>;
+}
+
+interface DurableObjectState {
+  storage: DurableObjectStorage;
+}
+
 interface Env {
   AI_SESSIONS: KVNamespace;
+  CONTROL_PLANE_DO: DurableObjectNamespace;
   KEY_ENCRYPTION_SECRET: string;
   KEY_ENCRYPTION_SECRET_PREV?: string;
   DEFAULT_MODEL?: string;
@@ -63,6 +84,7 @@ const MAX_QUERY_CHARS = 400;
 const MAX_SEARCH_CONTEXT_NOTES = 40;
 const MAX_DAILY_CONTEXT_NOTES = 60;
 const MAX_CONTENT_CHARS = 6000;
+const MAX_REQUEST_BODY_BYTES = 128 * 1024;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_REQUESTS = 45;
 const RATE_LIMIT_BLOCK_MS = 60_000;
@@ -77,6 +99,21 @@ type RateLimitEntry = {
 
 type CircuitState = {
   consecutiveFailures: number;
+  openUntil: number;
+};
+
+type ControlPlaneRateCheckResponse = {
+  blocked: boolean;
+  blockedUntil: number;
+};
+
+type ControlPlaneCircuitCheckResponse = {
+  open: boolean;
+  openUntil: number;
+};
+
+type ControlPlaneCircuitFailureResponse = {
+  opened: boolean;
   openUntil: number;
 };
 
@@ -106,6 +143,149 @@ class ApiError extends Error {
     this.status = status;
     this.code = code;
     this.retryable = retryable;
+  }
+}
+
+function doJson(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+    },
+  });
+}
+
+async function parseDoBody(request: Request): Promise<Record<string, unknown>> {
+  try {
+    const raw = await request.text();
+    if (!raw.trim()) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    throw new ApiError(400, 'BAD_REQUEST', 'Invalid JSON body');
+  }
+}
+
+export class ControlPlaneDO {
+  private state: DurableObjectState;
+
+  constructor(state: DurableObjectState) {
+    this.state = state;
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    try {
+      if (request.method !== 'POST') {
+        throw new ApiError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed');
+      }
+
+      const url = new URL(request.url);
+      const body = await parseDoBody(request);
+
+      if (url.pathname === '/rate/check') {
+        const now = typeof body.now === 'number' ? body.now : Date.now();
+        const windowMs = typeof body.windowMs === 'number' ? Math.max(1, body.windowMs) : RATE_LIMIT_WINDOW_MS;
+        const maxRequests = typeof body.maxRequests === 'number' ? Math.max(1, body.maxRequests) : RATE_LIMIT_MAX_REQUESTS;
+        const blockMs = typeof body.blockMs === 'number' ? Math.max(1, body.blockMs) : RATE_LIMIT_BLOCK_MS;
+
+        let entry = (await this.state.storage.get<RateLimitEntry>('rate')) || {
+          windowStart: now,
+          count: 0,
+          blockedUntil: 0,
+        };
+
+        if (now - entry.windowStart >= windowMs) {
+          entry = { windowStart: now, count: 0, blockedUntil: 0 };
+        }
+
+        if (entry.blockedUntil > now) {
+          await this.state.storage.put('rate', entry);
+          return doJson({ blocked: true, blockedUntil: entry.blockedUntil } satisfies ControlPlaneRateCheckResponse);
+        }
+
+        entry.count += 1;
+        if (entry.count > maxRequests) {
+          entry.blockedUntil = now + blockMs;
+          await this.state.storage.put('rate', entry);
+          return doJson({ blocked: true, blockedUntil: entry.blockedUntil } satisfies ControlPlaneRateCheckResponse);
+        }
+
+        await this.state.storage.put('rate', entry);
+        return doJson({ blocked: false, blockedUntil: entry.blockedUntil } satisfies ControlPlaneRateCheckResponse);
+      }
+
+      if (url.pathname === '/circuit/check') {
+        const now = typeof body.now === 'number' ? body.now : Date.now();
+        const entry = (await this.state.storage.get<CircuitState>('circuit')) || {
+          consecutiveFailures: 0,
+          openUntil: 0,
+        };
+        return doJson({ open: entry.openUntil > now, openUntil: entry.openUntil } satisfies ControlPlaneCircuitCheckResponse);
+      }
+
+      if (url.pathname === '/circuit/success') {
+        const entry = (await this.state.storage.get<CircuitState>('circuit')) || {
+          consecutiveFailures: 0,
+          openUntil: 0,
+        };
+        if (entry.consecutiveFailures !== 0) {
+          entry.consecutiveFailures = 0;
+          await this.state.storage.put('circuit', entry);
+        }
+        return doJson({ ok: true });
+      }
+
+      if (url.pathname === '/circuit/failure') {
+        const now = typeof body.now === 'number' ? body.now : Date.now();
+        const threshold =
+          typeof body.failureThreshold === 'number' ? Math.max(1, body.failureThreshold) : CIRCUIT_FAILURE_THRESHOLD;
+        const openMs = typeof body.openMs === 'number' ? Math.max(1, body.openMs) : CIRCUIT_OPEN_MS;
+        const entry = (await this.state.storage.get<CircuitState>('circuit')) || {
+          consecutiveFailures: 0,
+          openUntil: 0,
+        };
+
+        if (entry.openUntil > now) {
+          return doJson({ opened: false, openUntil: entry.openUntil } satisfies ControlPlaneCircuitFailureResponse);
+        }
+
+        entry.consecutiveFailures += 1;
+        let opened = false;
+        if (entry.consecutiveFailures >= threshold) {
+          entry.consecutiveFailures = 0;
+          entry.openUntil = now + openMs;
+          opened = true;
+        }
+
+        await this.state.storage.put('circuit', entry);
+        return doJson({ opened, openUntil: entry.openUntil } satisfies ControlPlaneCircuitFailureResponse);
+      }
+
+      throw new ApiError(404, 'NOT_FOUND', 'Route not found');
+    } catch (error) {
+      if (error instanceof ApiError) {
+        return doJson(
+          {
+            error: {
+              code: error.code,
+              message: error.message,
+            },
+          },
+          error.status
+        );
+      }
+
+      return doJson(
+        {
+          error: {
+            code: 'INTERNAL_ERROR',
+            message: 'Internal server error',
+          },
+        },
+        500
+      );
+    }
   }
 }
 
@@ -194,7 +374,32 @@ function getClientIp(request: Request): string {
   return forwarded.split(',')[0].trim() || 'unknown';
 }
 
-function enforceRateLimit(request: Request, sessionId?: string): void {
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]';
+}
+
+function isLocalDiagnosticsRequest(request: Request): boolean {
+  const url = new URL(request.url);
+  if (isLoopbackHost(url.hostname)) return true;
+  const ip = getClientIp(request);
+  return ip === '127.0.0.1' || ip === '::1';
+}
+
+function requireJsonContentType(request: Request): void {
+  const contentType = (request.headers.get('content-type') || '').toLowerCase();
+  if (!contentType.includes('application/json')) {
+    throw new ApiError(415, 'BAD_REQUEST', 'Content-Type must be application/json');
+  }
+}
+
+function ensureEncryptionSecretConfigured(env: Env): void {
+  const secret = typeof env.KEY_ENCRYPTION_SECRET === 'string' ? env.KEY_ENCRYPTION_SECRET.trim() : '';
+  if (!secret || secret.length < 16) {
+    throw new ApiError(500, 'INTERNAL_ERROR', 'AI proxy encryption secret is not configured');
+  }
+}
+
+function enforceRateLimitLocal(request: Request, sessionId?: string): void {
   const now = Date.now();
   const key = `${sessionId || 'anon'}:${getClientIp(request)}`;
 
@@ -236,18 +441,18 @@ function isRetryableProviderError(error: unknown): boolean {
   return error instanceof ApiError && error.retryable && (error.status === 429 || error.status >= 500);
 }
 
-function ensureCircuitClosed(provider: AIProvider): void {
+function ensureCircuitClosedLocal(provider: AIProvider): void {
   const state = providerCircuit[provider];
   if (state.openUntil > Date.now()) {
     throw new ApiError(503, 'PROVIDER_UNAVAILABLE', 'Provider is temporarily unavailable. Please retry shortly.', true);
   }
 }
 
-function recordProviderSuccess(provider: AIProvider): void {
+function recordProviderSuccessLocal(provider: AIProvider): void {
   providerCircuit[provider].consecutiveFailures = 0;
 }
 
-function recordProviderFailure(provider: AIProvider, error: unknown): void {
+function recordProviderFailureLocal(provider: AIProvider, error: unknown): void {
   if (!isRetryableProviderError(error)) return;
 
   const state = providerCircuit[provider];
@@ -256,6 +461,90 @@ function recordProviderFailure(provider: AIProvider, error: unknown): void {
     state.consecutiveFailures = 0;
     state.openUntil = Date.now() + CIRCUIT_OPEN_MS;
     metrics.circuitOpens += 1;
+  }
+}
+
+async function callControlPlane<T>(env: Env, name: string, path: string, body: Record<string, unknown>): Promise<T> {
+  const id = env.CONTROL_PLANE_DO.idFromName(name);
+  const stub = env.CONTROL_PLANE_DO.get(id);
+  const response = await stub.fetch(`https://control-plane${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new Error(`Control plane request failed with status ${response.status}`);
+  }
+  return (await response.json()) as T;
+}
+
+async function enforceRateLimit(request: Request, env: Env, sessionId?: string): Promise<void> {
+  const key = `${sessionId || 'anon'}:${getClientIp(request)}`;
+  try {
+    const result = await callControlPlane<ControlPlaneRateCheckResponse>(env, `rate:${key}`, '/rate/check', {
+      now: Date.now(),
+      windowMs: RATE_LIMIT_WINDOW_MS,
+      maxRequests: RATE_LIMIT_MAX_REQUESTS,
+      blockMs: RATE_LIMIT_BLOCK_MS,
+    });
+    if (result.blocked) {
+      metrics.rateLimited += 1;
+      throw new ApiError(429, 'RATE_LIMITED', 'Too many AI requests. Please retry in a minute.', true);
+    }
+  } catch (error) {
+    if (error instanceof ApiError && error.code === 'RATE_LIMITED') {
+      throw error;
+    }
+    enforceRateLimitLocal(request, sessionId);
+  }
+}
+
+async function ensureCircuitClosed(provider: AIProvider, env: Env): Promise<void> {
+  try {
+    const result = await callControlPlane<ControlPlaneCircuitCheckResponse>(
+      env,
+      `circuit:${provider}`,
+      '/circuit/check',
+      { now: Date.now() }
+    );
+    if (result.open) {
+      throw new ApiError(503, 'PROVIDER_UNAVAILABLE', 'Provider is temporarily unavailable. Please retry shortly.', true);
+    }
+  } catch (error) {
+    if (error instanceof ApiError && error.code === 'PROVIDER_UNAVAILABLE') {
+      throw error;
+    }
+    ensureCircuitClosedLocal(provider);
+  }
+}
+
+async function recordProviderSuccess(provider: AIProvider, env: Env): Promise<void> {
+  try {
+    await callControlPlane(env, `circuit:${provider}`, '/circuit/success', { now: Date.now() });
+  } catch {
+    recordProviderSuccessLocal(provider);
+  }
+}
+
+async function recordProviderFailure(provider: AIProvider, error: unknown, env: Env): Promise<void> {
+  if (!isRetryableProviderError(error)) return;
+
+  try {
+    const result = await callControlPlane<ControlPlaneCircuitFailureResponse>(
+      env,
+      `circuit:${provider}`,
+      '/circuit/failure',
+      {
+        now: Date.now(),
+        failureThreshold: CIRCUIT_FAILURE_THRESHOLD,
+        openMs: CIRCUIT_OPEN_MS,
+      }
+    );
+    if (result.opened) {
+      metrics.circuitOpens += 1;
+    }
+  } catch {
+    recordProviderFailureLocal(provider, error);
   }
 }
 
@@ -469,9 +758,20 @@ function parseNotesContext(value: unknown, limit: number): Note[] {
 }
 
 async function parseJson(request: Request): Promise<any> {
+  const contentLength = Number(request.headers.get('content-length') || '0');
+  if (Number.isFinite(contentLength) && contentLength > MAX_REQUEST_BODY_BYTES) {
+    throw new ApiError(413, 'BAD_REQUEST', 'Request body too large');
+  }
+
   try {
-    return await request.json();
-  } catch {
+    const raw = await request.text();
+    if (!raw.trim()) return {};
+    if (new TextEncoder().encode(raw).byteLength > MAX_REQUEST_BODY_BYTES) {
+      throw new ApiError(413, 'BAD_REQUEST', 'Request body too large');
+    }
+    return JSON.parse(raw);
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
     throw new ApiError(400, 'BAD_REQUEST', 'Invalid JSON body');
   }
 }
@@ -645,15 +945,15 @@ async function callOpenRouter(apiKey: string, prompt: string, model = 'google/ge
   }
 }
 
-async function callProvider(provider: AIProvider, apiKey: string, prompt: string, model?: string): Promise<string> {
-  ensureCircuitClosed(provider);
+async function callProvider(env: Env, provider: AIProvider, apiKey: string, prompt: string, model?: string): Promise<string> {
+  await ensureCircuitClosed(provider, env);
 
   try {
     const result = provider === 'gemini' ? await callGemini(apiKey, prompt) : await callOpenRouter(apiKey, prompt, model);
-    recordProviderSuccess(provider);
+    await recordProviderSuccess(provider, env);
     return result;
   } catch (error) {
-    recordProviderFailure(provider, error);
+    await recordProviderFailure(provider, error, env);
     throw error;
   }
 }
@@ -676,15 +976,17 @@ function safeParseJson<T>(value: string): T {
   }
 }
 
-async function validateApiKey(provider: AIProvider, apiKey: string): Promise<void> {
+async function validateApiKey(provider: AIProvider, apiKey: string, env: Env): Promise<void> {
   const prompt = 'Reply with exactly OK.';
-  const text = await withRetries(() => callProvider(provider, apiKey, prompt));
+  const text = await withRetries(() => callProvider(env, provider, apiKey, prompt));
   if (!text.toUpperCase().includes('OK')) {
     throw new ApiError(401, 'AUTH_REQUIRED', 'API key validation failed');
   }
 }
 
 async function requireSession(request: Request, env: Env): Promise<{ sessionId: string; provider: AIProvider; apiKey: string; expiresAt: number }> {
+  ensureEncryptionSecretConfigured(env);
+
   const sessionId = getSessionId(request);
   if (!sessionId) {
     throw new ApiError(401, 'AUTH_REQUIRED', 'Connect an AI key in Settings to enable AI features.');
@@ -898,6 +1200,9 @@ export default {
       }
 
       if (pathname === '/api/v1/metrics' && request.method === 'GET') {
+        if (!isLocalDiagnosticsRequest(request)) {
+          throw new ApiError(404, 'NOT_FOUND', 'Route not found');
+        }
         return jsonResponse({ metrics });
       }
 
@@ -922,7 +1227,9 @@ export default {
       }
 
       if (pathname === '/api/v1/auth/connect' && request.method === 'POST') {
-        enforceRateLimit(request);
+        requireJsonContentType(request);
+        ensureEncryptionSecretConfigured(env);
+        await enforceRateLimit(request, env);
         const body = await parseJson(request);
         const provider = parseProvider(body);
         const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
@@ -931,7 +1238,7 @@ export default {
           throw new ApiError(400, 'BAD_REQUEST', 'API key is required.');
         }
 
-        await validateApiKey(provider, apiKey);
+        await validateApiKey(provider, apiKey, env);
 
         const encryptedApiKey = await encryptApiKey(apiKey, env.KEY_ENCRYPTION_SECRET);
         const sessionId = crypto.randomUUID();
@@ -979,7 +1286,8 @@ export default {
       }
 
       if (pathname.startsWith('/api/v1/ai/') && request.method === 'POST') {
-        enforceRateLimit(request, getSessionId(request) || undefined);
+        requireJsonContentType(request);
+        await enforceRateLimit(request, env, getSessionId(request) || undefined);
         const session = await requireSession(request, env);
         const body = await parseJson(request);
 
@@ -987,7 +1295,9 @@ export default {
           const content = parseContent(body.content);
 
           const prompt = buildAnalyzePrompt(content);
-          const text = await withRetries(() => callProvider(session.provider, session.apiKey, prompt, env.DEFAULT_MODEL));
+          const text = await withRetries(() =>
+            callProvider(env, session.provider, session.apiKey, prompt, env.DEFAULT_MODEL)
+          );
           const parsed = safeParseJson<any>(text);
           return jsonResponse({
             result: {
@@ -1007,7 +1317,9 @@ export default {
           const content = parseContent(body.content);
 
           const prompt = buildBatchPrompt(content);
-          const text = await withRetries(() => callProvider(session.provider, session.apiKey, prompt, env.DEFAULT_MODEL));
+          const text = await withRetries(() =>
+            callProvider(env, session.provider, session.apiKey, prompt, env.DEFAULT_MODEL)
+          );
           const parsed = safeParseJson<any>(text);
           const items = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.items) ? parsed.items : [];
 
@@ -1026,7 +1338,9 @@ export default {
 
           const mode = parseCleanupMode(body.mode ?? 'single');
           const prompt = buildCleanupPrompt(content, mode);
-          const text = await withRetries(() => callProvider(session.provider, session.apiKey, prompt, env.DEFAULT_MODEL));
+          const text = await withRetries(() =>
+            callProvider(env, session.provider, session.apiKey, prompt, env.DEFAULT_MODEL)
+          );
           const parsed = safeParseJson<any>(text);
           return jsonResponse({ result: normalizeCleanupResult(content, mode, parsed) });
         }
@@ -1052,7 +1366,9 @@ export default {
           const notes = parseNotesContext(body.notes, MAX_SEARCH_CONTEXT_NOTES);
 
           const prompt = buildSearchPrompt(query, notes);
-          const result = await withRetries(() => callProvider(session.provider, session.apiKey, prompt, env.DEFAULT_MODEL));
+          const result = await withRetries(() =>
+            callProvider(env, session.provider, session.apiKey, prompt, env.DEFAULT_MODEL)
+          );
           return jsonResponse({ result });
         }
 
@@ -1063,7 +1379,9 @@ export default {
             return jsonResponse({ result: null });
           }
 
-          const result = await withRetries(() => callProvider(session.provider, session.apiKey, prompt, env.DEFAULT_MODEL));
+          const result = await withRetries(() =>
+            callProvider(env, session.provider, session.apiKey, prompt, env.DEFAULT_MODEL)
+          );
           return jsonResponse({ result });
         }
 
