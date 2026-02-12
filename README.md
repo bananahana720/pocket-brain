@@ -312,6 +312,8 @@ Required repository secrets:
 - `VPS_SSH_PRIVATE_KEY` (private key content for SSH auth)
 - Optional: `VPS_SSH_PORT` (defaults to `22`)
 
+If the required deploy secrets are missing, the deploy job is skipped automatically and only CI runs.
+
 Optional repository variables (Actions -> Variables):
 - `VPS_SSH_RETRY_ATTEMPTS` (default `3`)
 - `VPS_READY_RETRIES` (default `30`)
