@@ -24,12 +24,14 @@ export interface AnalysisQueueState {
   pending: PersistedAnalysisJob[];
   deferred: PersistedAnalysisJob[];
   transient: PersistedAnalysisJob[];
+  deadLetter: PersistedAnalysisJob[];
 }
 
 const EMPTY_ANALYSIS_QUEUE_STATE: AnalysisQueueState = {
   pending: [],
   deferred: [],
   transient: [],
+  deadLetter: [],
 };
 
 interface SnapshotRecord {
@@ -153,6 +155,7 @@ export async function loadAnalysisQueueState(): Promise<AnalysisQueueState> {
       pending: sanitizeAnalysisQueue(record.pending),
       deferred: sanitizeAnalysisQueue(record.deferred),
       transient: sanitizeAnalysisQueue(record.transient),
+      deadLetter: sanitizeAnalysisQueue(record.deadLetter),
     };
   } finally {
     db.close();
@@ -170,6 +173,7 @@ export async function saveAnalysisQueueState(state: AnalysisQueueState): Promise
         pending: state.pending,
         deferred: state.deferred,
         transient: state.transient,
+        deadLetter: state.deadLetter,
       } satisfies AnalysisQueueRecord);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error || new Error('Failed to save analysis queue state'));

@@ -145,11 +145,49 @@ function getDevOpenRouterKey(): string {
 }
 
 function getProvider(): Provider | null {
+  return getAvailableProviders()[0] || null;
+}
+
+function getAvailableProviders(): Provider[] {
+  const providers: Provider[] = [];
   const openRouter = getDevOpenRouterKey();
   const gemini = getDevGeminiKey();
-  if (openRouter) return 'openrouter';
-  if (gemini) return 'gemini';
-  return null;
+  if (openRouter) providers.push('openrouter');
+  if (gemini) providers.push('gemini');
+  return providers;
+}
+
+function shouldFallbackProvider(error: unknown): boolean {
+  if (!(error instanceof AIServiceError) || !error.retryable) return false;
+  return (
+    error.code === 'PROVIDER_UNAVAILABLE' ||
+    error.code === 'RATE_LIMITED' ||
+    error.code === 'TIMEOUT' ||
+    error.code === 'NETWORK'
+  );
+}
+
+async function withLocalProviderFallback<T>(handler: (provider: Provider) => Promise<T>): Promise<T> {
+  const providers = getAvailableProviders();
+  if (providers.length === 0) {
+    throw new AIServiceError('No API key configured for AI usage.', 'AUTH_REQUIRED', false);
+  }
+
+  let lastError: unknown = null;
+  for (let i = 0; i < providers.length; i++) {
+    const provider = providers[i];
+    try {
+      return await handler(provider);
+    } catch (error) {
+      lastError = error;
+      const hasFallback = i < providers.length - 1;
+      if (!hasFallback || !shouldFallbackProvider(error)) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new AIServiceError('AI request failed.', 'UNKNOWN', false);
 }
 
 async function loadGoogleGenAIModule(): Promise<GoogleGenAIModule> {
@@ -580,44 +618,41 @@ export const analyzeNote = async (
     return payload.result;
   }
 
-  const provider = getProvider();
-  if (!provider) {
-    throw new AIServiceError('No API key configured for AI analysis.', 'AUTH_REQUIRED', false);
-  }
-
   try {
-    if (provider === 'openrouter') {
-      const text = await openRouterChat(buildAnalyzePrompt(content), ANALYSIS_SCHEMA);
+    return await withLocalProviderFallback(async provider => {
+      if (provider === 'openrouter') {
+        const text = await openRouterChat(buildAnalyzePrompt(content), ANALYSIS_SCHEMA);
+        if (!text) return null;
+        return parseAnalysisResult(JSON.parse(text));
+      }
+
+      const gemini = await getGeminiRuntime();
+      if (!gemini) throw new AIServiceError('Gemini key missing.', 'AUTH_REQUIRED', false);
+      const { ai, Type } = gemini;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: buildAnalyzePrompt(content),
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+              type: { type: Type.STRING, enum: ['NOTE', 'TASK', 'IDEA'] },
+              dueDate: { type: Type.STRING, nullable: true },
+              priority: { type: Type.STRING, enum: ['urgent', 'normal', 'low'], nullable: true },
+            },
+            required: ['title', 'tags', 'type'],
+          },
+        },
+      });
+
+      const text = response.text;
       if (!text) return null;
       return parseAnalysisResult(JSON.parse(text));
-    }
-
-    const gemini = await getGeminiRuntime();
-    if (!gemini) throw new AIServiceError('Gemini key missing.', 'AUTH_REQUIRED', false);
-    const { ai, Type } = gemini;
-
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: buildAnalyzePrompt(content),
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            title: { type: Type.STRING },
-            tags: { type: Type.ARRAY, items: { type: Type.STRING } },
-            type: { type: Type.STRING, enum: ['NOTE', 'TASK', 'IDEA'] },
-            dueDate: { type: Type.STRING, nullable: true },
-            priority: { type: Type.STRING, enum: ['urgent', 'normal', 'low'], nullable: true },
-          },
-          required: ['title', 'tags', 'type'],
-        },
-      },
     });
-
-    const text = response.text;
-    if (!text) return null;
-    return parseAnalysisResult(JSON.parse(text));
   } catch (error) {
     if (error instanceof AIServiceError) throw error;
     throw new AIServiceError('Error analyzing note.', 'PROVIDER_UNAVAILABLE', true);
@@ -633,60 +668,57 @@ export const processBatchEntry = async (
     return payload.results;
   }
 
-  const provider = getProvider();
-  if (!provider) {
-    throw new AIServiceError('No API key configured for batch processing.', 'AUTH_REQUIRED', false);
-  }
-
   try {
-    if (provider === 'openrouter') {
-      const text = await openRouterChat(buildBatchPrompt(content), BATCH_SCHEMA);
-      if (!text) return [];
-      const parsed = JSON.parse(text);
-      const items = parsed.items || parsed;
-      return (items as Record<string, unknown>[]).map(r => ({
-        content: r.content as string,
-        title: r.title as string,
-        tags: r.tags as string[],
-        type: parseNoteType(r.type as string),
-      }));
-    }
+    return await withLocalProviderFallback(async provider => {
+      if (provider === 'openrouter') {
+        const text = await openRouterChat(buildBatchPrompt(content), BATCH_SCHEMA);
+        if (!text) return [];
+        const parsed = JSON.parse(text);
+        const items = parsed.items || parsed;
+        return (items as Record<string, unknown>[]).map(r => ({
+          content: r.content as string,
+          title: r.title as string,
+          tags: r.tags as string[],
+          type: parseNoteType(r.type as string),
+        }));
+      }
 
-    const gemini = await getGeminiRuntime();
-    if (!gemini) throw new AIServiceError('Gemini key missing.', 'AUTH_REQUIRED', false);
-    const { ai, Type } = gemini;
+      const gemini = await getGeminiRuntime();
+      if (!gemini) throw new AIServiceError('Gemini key missing.', 'AUTH_REQUIRED', false);
+      const { ai, Type } = gemini;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: buildBatchPrompt(content),
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              content: { type: Type.STRING },
-              title: { type: Type.STRING },
-              tags: { type: Type.ARRAY, items: { type: Type.STRING } },
-              type: { type: Type.STRING, enum: ['NOTE', 'TASK', 'IDEA'] },
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: buildBatchPrompt(content),
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                content: { type: Type.STRING },
+                title: { type: Type.STRING },
+                tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+                type: { type: Type.STRING, enum: ['NOTE', 'TASK', 'IDEA'] },
+              },
+              required: ['content', 'title', 'tags', 'type'],
             },
-            required: ['content', 'title', 'tags', 'type'],
           },
         },
-      },
+      });
+
+      const text = response.text;
+      if (!text) return [];
+
+      const results = JSON.parse(text);
+      return results.map((r: { content: string; title: string; tags: string[]; type: string }) => ({
+        content: r.content,
+        title: r.title,
+        tags: r.tags,
+        type: parseNoteType(r.type),
+      }));
     });
-
-    const text = response.text;
-    if (!text) return [];
-
-    const results = JSON.parse(text);
-    return results.map((r: { content: string; title: string; tags: string[]; type: string }) => ({
-      content: r.content,
-      title: r.title,
-      tags: r.tags,
-      type: parseNoteType(r.type),
-    }));
   } catch (error) {
     if (error instanceof AIServiceError) throw error;
     throw new AIServiceError('Error processing batch.', 'PROVIDER_UNAVAILABLE', true);
@@ -712,46 +744,43 @@ export const cleanupNoteDraft = async (
     return normalizeCleanupResult(trimmed, mode, payload.result);
   }
 
-  const provider = getProvider();
-  if (!provider) {
-    throw new AIServiceError('No API key configured for draft cleanup.', 'AUTH_REQUIRED', false);
-  }
-
   try {
-    if (provider === 'openrouter') {
-      const text = await openRouterChat(buildCleanupPrompt(trimmed, mode), CLEANUP_SCHEMA);
+    return await withLocalProviderFallback(async provider => {
+      if (provider === 'openrouter') {
+        const text = await openRouterChat(buildCleanupPrompt(trimmed, mode), CLEANUP_SCHEMA);
+        if (!text) {
+          return { cleanedText: trimmed };
+        }
+        return normalizeCleanupResult(trimmed, mode, JSON.parse(text));
+      }
+
+      const gemini = await getGeminiRuntime();
+      if (!gemini) throw new AIServiceError('Gemini key missing.', 'AUTH_REQUIRED', false);
+      const { ai, Type } = gemini;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: buildCleanupPrompt(trimmed, mode),
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              cleanedText: { type: Type.STRING },
+              items: { type: Type.ARRAY, items: { type: Type.STRING } },
+            },
+            required: ['cleanedText'],
+          },
+        },
+      });
+
+      const text = response.text;
       if (!text) {
         return { cleanedText: trimmed };
       }
+
       return normalizeCleanupResult(trimmed, mode, JSON.parse(text));
-    }
-
-    const gemini = await getGeminiRuntime();
-    if (!gemini) throw new AIServiceError('Gemini key missing.', 'AUTH_REQUIRED', false);
-    const { ai, Type } = gemini;
-
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: buildCleanupPrompt(trimmed, mode),
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            cleanedText: { type: Type.STRING },
-            items: { type: Type.ARRAY, items: { type: Type.STRING } },
-          },
-          required: ['cleanedText'],
-        },
-      },
     });
-
-    const text = response.text;
-    if (!text) {
-      return { cleanedText: trimmed };
-    }
-
-    return normalizeCleanupResult(trimmed, mode, JSON.parse(text));
   } catch (error) {
     if (error instanceof AIServiceError) throw error;
     throw new AIServiceError('Error cleaning note draft.', 'PROVIDER_UNAVAILABLE', true);
@@ -802,8 +831,7 @@ export const generateDailyBrief = async (notes: Note[], options?: RequestOptions
     return payload.result;
   }
 
-  const provider = getProvider();
-  if (!provider) {
+  if (getAvailableProviders().length === 0) {
     return 'I need an API key to generate your daily brief.';
   }
 
@@ -832,19 +860,21 @@ export const generateDailyBrief = async (notes: Note[], options?: RequestOptions
   const prompt = `You are a personal productivity assistant. Given these notes and tasks, write a brief 2-3 sentence daily briefing. Mention overdue tasks first, then today's priorities, then notable new captures. Be concise and actionable. Speak directly to the user.\n\n${context}`;
 
   try {
-    if (provider === 'openrouter') {
-      return (await openRouterChat(prompt)) || "Couldn't generate your daily brief right now.";
-    }
+    return await withLocalProviderFallback(async provider => {
+      if (provider === 'openrouter') {
+        return (await openRouterChat(prompt)) || "Couldn't generate your daily brief right now.";
+      }
 
-    const gemini = await getGeminiRuntime();
-    if (!gemini) return "Couldn't generate your daily brief right now.";
-    const { ai } = gemini;
+      const gemini = await getGeminiRuntime();
+      if (!gemini) throw new AIServiceError('Gemini key missing.', 'AUTH_REQUIRED', false);
+      const { ai } = gemini;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: prompt,
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+      });
+      return response.text || "Couldn't generate your daily brief right now.";
     });
-    return response.text || "Couldn't generate your daily brief right now.";
   } catch {
     return 'Sorry, I had trouble generating your daily brief.';
   }
@@ -863,8 +893,7 @@ export const askMyNotes = async (query: string, notes: Note[], options?: Request
     return payload.result;
   }
 
-  const provider = getProvider();
-  if (!provider) return 'I need an API key to help you search.';
+  if (getAvailableProviders().length === 0) return 'I need an API key to help you search.';
   const context = contextNotes
     .map(
       n =>
@@ -881,24 +910,26 @@ Here is the user's question: "${normalizedQuery}"
 Here are the user's notes:
 ${context}
 
-Answer the question based ONLY on the notes provided.
+  Answer the question based ONLY on the notes provided.
 If the answer isn't in the notes, say "I couldn't find that in your notes."
 Be concise and friendly.`;
 
   try {
-    if (provider === 'openrouter') {
-      return (await openRouterChat(prompt)) || 'No answer generated.';
-    }
+    return await withLocalProviderFallback(async provider => {
+      if (provider === 'openrouter') {
+        return (await openRouterChat(prompt)) || 'No answer generated.';
+      }
 
-    const gemini = await getGeminiRuntime();
-    if (!gemini) return 'No answer generated.';
-    const { ai } = gemini;
+      const gemini = await getGeminiRuntime();
+      if (!gemini) throw new AIServiceError('Gemini key missing.', 'AUTH_REQUIRED', false);
+      const { ai } = gemini;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: prompt,
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+      });
+      return response.text || 'No answer generated.';
     });
-    return response.text || 'No answer generated.';
   } catch {
     return 'Sorry, I had trouble reading your notes right now.';
   }

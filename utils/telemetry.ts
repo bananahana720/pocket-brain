@@ -2,6 +2,10 @@ export type ClientMetricName =
   | 'persist_writes'
   | 'persist_failures'
   | 'load_failures'
+  | 'storage_persist_granted'
+  | 'storage_persist_denied'
+  | 'analysis_queue_dropped'
+  | 'analysis_dead_lettered'
   | 'analysis_queue_persist_failures'
   | 'analysis_queue_recovered'
   | 'backup_writes'
@@ -26,6 +30,10 @@ const metrics: ClientMetrics = {
     persist_writes: 0,
     persist_failures: 0,
     load_failures: 0,
+    storage_persist_granted: 0,
+    storage_persist_denied: 0,
+    analysis_queue_dropped: 0,
+    analysis_dead_lettered: 0,
     analysis_queue_persist_failures: 0,
     analysis_queue_recovered: 0,
     backup_writes: 0,

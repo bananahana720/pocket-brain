@@ -14,6 +14,7 @@ interface KVNamespace {
 interface Env {
   AI_SESSIONS: KVNamespace;
   KEY_ENCRYPTION_SECRET: string;
+  KEY_ENCRYPTION_SECRET_PREV?: string;
   DEFAULT_MODEL?: string;
 }
 
@@ -313,6 +314,23 @@ async function decryptApiKey(payload: string, secret: string): Promise<string> {
   );
 
   return new TextDecoder().decode(plaintext);
+}
+
+async function decryptSessionApiKey(
+  payload: string,
+  env: Env
+): Promise<{ apiKey: string; usedPreviousSecret: boolean }> {
+  try {
+    const apiKey = await decryptApiKey(payload, env.KEY_ENCRYPTION_SECRET);
+    return { apiKey, usedPreviousSecret: false };
+  } catch (error) {
+    if (!env.KEY_ENCRYPTION_SECRET_PREV) {
+      throw error;
+    }
+
+    const apiKey = await decryptApiKey(payload, env.KEY_ENCRYPTION_SECRET_PREV);
+    return { apiKey, usedPreviousSecret: true };
+  }
 }
 
 function isTransientStatus(status: number): boolean {
@@ -677,13 +695,52 @@ async function requireSession(request: Request, env: Env): Promise<{ sessionId: 
     throw new ApiError(401, 'AUTH_REQUIRED', 'AI session missing. Please reconnect your key.');
   }
 
-  const record = JSON.parse(raw) as SessionRecord;
+  let record: SessionRecord;
+  try {
+    record = JSON.parse(raw) as SessionRecord;
+  } catch {
+    await env.AI_SESSIONS.delete(`session:${sessionId}`);
+    throw new ApiError(403, 'AUTH_EXPIRED', 'AI session is invalid. Reconnect your key to continue.');
+  }
+
   if (!record.expiresAt || record.expiresAt < Date.now()) {
     await env.AI_SESSIONS.delete(`session:${sessionId}`);
     throw new ApiError(403, 'AUTH_EXPIRED', 'AI session expired. Reconnect your key to continue.');
   }
 
-  const apiKey = await decryptApiKey(record.encryptedApiKey, env.KEY_ENCRYPTION_SECRET);
+  let apiKey = '';
+  let usedPreviousSecret = false;
+  try {
+    const decrypted = await decryptSessionApiKey(record.encryptedApiKey, env);
+    apiKey = decrypted.apiKey;
+    usedPreviousSecret = decrypted.usedPreviousSecret;
+  } catch {
+    await env.AI_SESSIONS.delete(`session:${sessionId}`);
+    throw new ApiError(403, 'AUTH_EXPIRED', 'AI session could not be decrypted. Reconnect your key to continue.');
+  }
+
+  if (usedPreviousSecret) {
+    try {
+      const encryptedApiKey = await encryptApiKey(apiKey, env.KEY_ENCRYPTION_SECRET);
+      const remainingTtlSeconds = Math.floor((record.expiresAt - Date.now()) / 1000);
+      if (remainingTtlSeconds <= 0) {
+        throw new Error('Session expired during secret migration');
+      }
+      await env.AI_SESSIONS.put(
+        `session:${sessionId}`,
+        JSON.stringify({
+          ...record,
+          encryptedApiKey,
+        }),
+        {
+          expirationTtl: remainingTtlSeconds,
+        }
+      );
+    } catch {
+      // Session still works with previous secret; avoid blocking current request.
+    }
+  }
+
   return {
     sessionId,
     provider: record.provider,

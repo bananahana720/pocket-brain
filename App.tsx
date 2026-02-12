@@ -37,7 +37,13 @@ import {
   saveAnalysisQueueState,
   saveOps,
 } from './storage/notesStore';
-import { createEncryptedBackupPayload, parseEncryptedBackupPayload } from './utils/encryptedExport';
+import {
+  clearAutoBackupKey,
+  createEncryptedBackupPayloadWithKey,
+  getOrCreateAutoBackupKey,
+  parseEncryptedBackupPayload,
+  parseEncryptedBackupPayloadWithKey,
+} from './utils/encryptedExport';
 import {
   incrementMetric,
   recordAiErrorCode,
@@ -50,11 +56,15 @@ const STORAGE_SHADOW_KEY = 'pocketbrain_notes_shadow';
 const BACKUP_RECORDED_KEY = 'pocketbrain_last_backup_at';
 const BACKUP_REMINDER_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 const AUTO_BACKUP_PAYLOAD_KEY = 'pocketbrain_auto_backup_payload';
-const AUTO_BACKUP_SECRET_KEY = 'pocketbrain_auto_backup_secret';
 const AUTO_BACKUP_LAST_AT_KEY = 'pocketbrain_auto_backup_last_at';
+const LEGACY_AUTO_BACKUP_SECRET_KEY = 'pocketbrain_auto_backup_secret';
 const AUTO_BACKUP_INTERVAL_MS = 30 * 60 * 1000;
 const AI_EXPIRY_WARN_MS = 15 * 60 * 1000;
 const OP_COMPACT_THRESHOLD = 200;
+const MAX_ANALYSIS_QUEUE_JOBS = 300;
+const MAX_ANALYSIS_RETRIES = 4;
+const MAX_ANALYSIS_DEAD_LETTER = 120;
+const DEAD_LETTER_REPLAY_BATCH = 20;
 
 const INITIAL_VISIBLE_NOTES = 60;
 const VISIBLE_NOTES_STEP = 40;
@@ -201,20 +211,6 @@ function toAiMessage(error: unknown): {
   };
 }
 
-function getOrCreateAutoBackupSecret(): string {
-  const existing = localStorage.getItem(AUTO_BACKUP_SECRET_KEY);
-  if (existing) return existing;
-
-  const bytes = crypto.getRandomValues(new Uint8Array(24));
-  let raw = '';
-  for (const byte of bytes) {
-    raw += String.fromCharCode(byte);
-  }
-  const generated = btoa(raw);
-  localStorage.setItem(AUTO_BACKUP_SECRET_KEY, generated);
-  return generated;
-}
-
 function normalizePersistedAnalysisQueue(
   state: AnalysisQueueState,
   notes: Note[]
@@ -240,6 +236,7 @@ function normalizePersistedAnalysisQueue(
       pending: sanitize(state.pending),
       deferred: sanitize(state.deferred),
       transient: sanitize(state.transient),
+      deadLetter: sanitize(state.deadLetter),
     },
     dropped,
   };
@@ -290,9 +287,11 @@ function App() {
   const pendingAnalysisRef = useRef<AnalysisJob[]>([]);
   const deferredAnalysisRef = useRef<AnalysisJob[]>([]);
   const transientReplayQueueRef = useRef<AnalysisJob[]>([]);
+  const deadLetterAnalysisRef = useRef<AnalysisJob[]>([]);
   const processingAnalysisRef = useRef(false);
   const backupReminderShownRef = useRef(false);
   const autoBackupInFlightRef = useRef(false);
+  const deadLetterToastShownRef = useRef(false);
   const aiExpiryWarnedForRef = useRef<number | null>(null);
   const loadMoreRef = useRef<HTMLDivElement>(null);
   const notesListRef = useRef<HTMLDivElement>(null);
@@ -314,11 +313,55 @@ function App() {
     setToasts(prev => prev.filter(t => t.id !== id));
   }, []);
 
+  const countQueuedAnalysisJobs = useCallback(
+    () =>
+      pendingAnalysisRef.current.length +
+      deferredAnalysisRef.current.length +
+      transientReplayQueueRef.current.length,
+    []
+  );
+
+  const removeJobsForNoteId = useCallback((noteId: string) => {
+    pendingAnalysisRef.current = pendingAnalysisRef.current.filter(job => job.noteId !== noteId);
+    deferredAnalysisRef.current = deferredAnalysisRef.current.filter(job => job.noteId !== noteId);
+    transientReplayQueueRef.current = transientReplayQueueRef.current.filter(job => job.noteId !== noteId);
+    deadLetterAnalysisRef.current = deadLetterAnalysisRef.current.filter(job => job.noteId !== noteId);
+  }, []);
+
+  const enforceAnalysisQueueBudget = useCallback(
+    (preserveNoteId?: string) => {
+      let dropped = 0;
+      while (countQueuedAnalysisJobs() > MAX_ANALYSIS_QUEUE_JOBS) {
+        let removed: AnalysisJob | undefined;
+
+        if (transientReplayQueueRef.current.length > 0) {
+          removed = transientReplayQueueRef.current.shift();
+        } else if (deferredAnalysisRef.current.length > 0) {
+          removed = deferredAnalysisRef.current.shift();
+        } else {
+          const idx = pendingAnalysisRef.current.findIndex(job => job.noteId !== preserveNoteId);
+          if (idx >= 0) {
+            removed = pendingAnalysisRef.current.splice(idx, 1)[0];
+          }
+        }
+
+        if (!removed) break;
+        dropped += 1;
+      }
+
+      if (dropped > 0) {
+        incrementMetric('analysis_queue_dropped', dropped);
+      }
+    },
+    [countQueuedAnalysisJobs]
+  );
+
   const snapshotAnalysisQueueState = useCallback(
     (): AnalysisQueueState => ({
       pending: pendingAnalysisRef.current.map(job => ({ ...job })),
       deferred: deferredAnalysisRef.current.map(job => ({ ...job })),
       transient: transientReplayQueueRef.current.map(job => ({ ...job })),
+      deadLetter: deadLetterAnalysisRef.current.map(job => ({ ...job })),
     }),
     []
   );
@@ -366,9 +409,9 @@ function App() {
 
       autoBackupInFlightRef.current = true;
       try {
-        const secret = getOrCreateAutoBackupSecret();
-        const payload = await createEncryptedBackupPayload(snapshotNotes, secret);
-        const restored = await parseEncryptedBackupPayload(payload, secret);
+        const key = await getOrCreateAutoBackupKey();
+        const payload = await createEncryptedBackupPayloadWithKey(snapshotNotes, key);
+        const restored = await parseEncryptedBackupPayloadWithKey(payload, key);
         if (!Array.isArray(restored) || restored.length !== snapshotNotes.length) {
           throw new Error('Auto-backup restore check failed');
         }
@@ -388,14 +431,28 @@ function App() {
 
   const tryRestoreAutoBackup = useCallback(async (): Promise<Note[] | null> => {
     const payload = localStorage.getItem(AUTO_BACKUP_PAYLOAD_KEY);
-    const secret = localStorage.getItem(AUTO_BACKUP_SECRET_KEY);
-    if (!payload || !secret) return null;
+    if (!payload) return null;
 
     try {
-      const restored = await parseEncryptedBackupPayload(payload, secret);
+      const key = await getOrCreateAutoBackupKey();
+      const restored = await parseEncryptedBackupPayloadWithKey(payload, key);
       return Array.isArray(restored) ? restored : null;
     } catch {
-      return null;
+      const legacySecret = localStorage.getItem(LEGACY_AUTO_BACKUP_SECRET_KEY);
+      if (!legacySecret) return null;
+
+      try {
+        const restored = await parseEncryptedBackupPayload(payload, legacySecret);
+        if (!Array.isArray(restored)) return null;
+
+        const key = await getOrCreateAutoBackupKey();
+        const migratedPayload = await createEncryptedBackupPayloadWithKey(restored, key);
+        localStorage.setItem(AUTO_BACKUP_PAYLOAD_KEY, migratedPayload);
+        localStorage.removeItem(LEGACY_AUTO_BACKUP_SECRET_KEY);
+        return restored;
+      } catch {
+        return null;
+      }
     }
   }, []);
 
@@ -421,12 +478,10 @@ function App() {
         controller.abort();
         analysisControllersRef.current.delete(noteId);
       }
-      pendingAnalysisRef.current = pendingAnalysisRef.current.filter(job => job.noteId !== noteId);
-      deferredAnalysisRef.current = deferredAnalysisRef.current.filter(job => job.noteId !== noteId);
-      transientReplayQueueRef.current = transientReplayQueueRef.current.filter(job => job.noteId !== noteId);
+      removeJobsForNoteId(noteId);
       persistAnalysisQueueStateSafely();
     },
-    [persistAnalysisQueueStateSafely]
+    [persistAnalysisQueueStateSafely, removeJobsForNoteId]
   );
 
   const runAnalysisQueue = useCallback(() => {
@@ -498,20 +553,55 @@ function App() {
         const retriedJob: AnalysisJob = { ...job, attempts: job.attempts + 1 };
 
         if (mapped.deferUntilConnected) {
+          removeJobsForNoteId(job.noteId);
           deferredAnalysisRef.current.push(retriedJob);
+          enforceAnalysisQueueBudget(job.noteId);
           persistAnalysisQueueStateSafely();
           return;
         }
 
-        if (mapped.retryable && job.attempts < 2) {
+        if (mapped.retryable && job.attempts < MAX_ANALYSIS_RETRIES) {
           window.setTimeout(() => {
+            removeJobsForNoteId(job.noteId);
             pendingAnalysisRef.current.push(retriedJob);
+            enforceAnalysisQueueBudget(job.noteId);
             persistAnalysisQueueStateSafely();
             runAnalysisQueue();
           }, 350 * Math.pow(2, job.attempts));
         } else if (mapped.retryable) {
-          transientReplayQueueRef.current.push(retriedJob);
+          removeJobsForNoteId(job.noteId);
+          deadLetterAnalysisRef.current.push(retriedJob);
+          if (deadLetterAnalysisRef.current.length > MAX_ANALYSIS_DEAD_LETTER) {
+            deadLetterAnalysisRef.current.splice(0, deadLetterAnalysisRef.current.length - MAX_ANALYSIS_DEAD_LETTER);
+          }
+          incrementMetric('analysis_dead_lettered');
           persistAnalysisQueueStateSafely();
+
+          if (!deadLetterToastShownRef.current) {
+            deadLetterToastShownRef.current = true;
+            addToast('Some AI analysis failed repeatedly.', 'info', {
+              label: 'Retry',
+              onClick: () => {
+                const replay = deadLetterAnalysisRef.current.splice(0, DEAD_LETTER_REPLAY_BATCH);
+                if (replay.length === 0) {
+                  addToast('No failed AI jobs to retry', 'info');
+                  return;
+                }
+                for (const queued of replay) {
+                  removeJobsForNoteId(queued.noteId);
+                  pendingAnalysisRef.current.push({
+                    ...queued,
+                    attempts: Math.max(0, queued.attempts - 1),
+                  });
+                }
+                deadLetterToastShownRef.current = false;
+                enforceAnalysisQueueBudget();
+                persistAnalysisQueueStateSafely();
+                runAnalysisQueue();
+                addToast(`Retrying ${replay.length} failed AI item${replay.length === 1 ? '' : 's'}`, 'info');
+              },
+            });
+          }
         }
       })
       .finally(() => {
@@ -520,15 +610,17 @@ function App() {
         persistAnalysisQueueStateSafely();
         runAnalysisQueue();
       });
-  }, [persistAnalysisQueueStateSafely]);
+  }, [addToast, enforceAnalysisQueueBudget, persistAnalysisQueueStateSafely, removeJobsForNoteId]);
 
   const enqueueAnalysis = useCallback(
     (job: AnalysisJob) => {
+      removeJobsForNoteId(job.noteId);
       pendingAnalysisRef.current.push(job);
+      enforceAnalysisQueueBudget(job.noteId);
       persistAnalysisQueueStateSafely();
       runAnalysisQueue();
     },
-    [persistAnalysisQueueStateSafely, runAnalysisQueue]
+    [enforceAnalysisQueueBudget, persistAnalysisQueueStateSafely, removeJobsForNoteId, runAnalysisQueue]
   );
 
   const recordBackupCompletion = useCallback(() => {
@@ -569,7 +661,8 @@ function App() {
         const recoveredQueueItems =
           normalizedQueue.state.pending.length +
           normalizedQueue.state.deferred.length +
-          normalizedQueue.state.transient.length;
+          normalizedQueue.state.transient.length +
+          normalizedQueue.state.deadLetter.length;
         if (recoveredQueueItems > 0) {
           incrementMetric('analysis_queue_recovered', recoveredQueueItems);
         }
@@ -577,8 +670,39 @@ function App() {
         pendingAnalysisRef.current = normalizedQueue.state.pending;
         deferredAnalysisRef.current = normalizedQueue.state.deferred;
         transientReplayQueueRef.current = normalizedQueue.state.transient;
+        deadLetterAnalysisRef.current = normalizedQueue.state.deadLetter;
+        enforceAnalysisQueueBudget();
         if (normalizedQueue.dropped > 0) {
           persistAnalysisQueueStateSafely();
+        }
+
+        if (normalizedQueue.state.deadLetter.length > 0) {
+          deadLetterToastShownRef.current = true;
+          addToast(
+            `${normalizedQueue.state.deadLetter.length} AI item${
+              normalizedQueue.state.deadLetter.length === 1 ? '' : 's'
+            } need manual retry.`,
+            'info',
+            {
+              label: 'Retry',
+              onClick: () => {
+                const replay = deadLetterAnalysisRef.current.splice(0, DEAD_LETTER_REPLAY_BATCH);
+                if (replay.length === 0) return;
+                for (const queued of replay) {
+                  removeJobsForNoteId(queued.noteId);
+                  pendingAnalysisRef.current.push({
+                    ...queued,
+                    attempts: Math.max(0, queued.attempts - 1),
+                  });
+                }
+                deadLetterToastShownRef.current = false;
+                enforceAnalysisQueueBudget();
+                persistAnalysisQueueStateSafely();
+                runAnalysisQueue();
+                addToast(`Retrying ${replay.length} failed AI item${replay.length === 1 ? '' : 's'}`, 'info');
+              },
+            }
+          );
         }
 
         if (cancelled) return;
@@ -625,7 +749,14 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [addToast, persistAnalysisQueueStateSafely, runAnalysisQueue, tryRestoreAutoBackup]);
+  }, [
+    addToast,
+    enforceAnalysisQueueBudget,
+    persistAnalysisQueueStateSafely,
+    removeJobsForNoteId,
+    runAnalysisQueue,
+    tryRestoreAutoBackup,
+  ]);
 
   useEffect(() => {
     if (!hasLoadedRef.current) return;
@@ -672,6 +803,39 @@ function App() {
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    const storage = navigator.storage;
+    if (!storage?.persist || !storage.persisted) {
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const alreadyPersisted = await storage.persisted();
+        if (cancelled) return;
+        if (alreadyPersisted) {
+          incrementMetric('storage_persist_granted');
+          return;
+        }
+
+        const granted = await storage.persist();
+        if (cancelled) return;
+        if (granted) {
+          incrementMetric('storage_persist_granted');
+        } else {
+          incrementMetric('storage_persist_denied');
+        }
+      } catch {
+        incrementMetric('storage_persist_denied');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -764,30 +928,45 @@ function App() {
 
   useEffect(() => {
     if (!aiAuth.connected || deferredAnalysisRef.current.length === 0) return;
-    pendingAnalysisRef.current.push(...deferredAnalysisRef.current.splice(0, deferredAnalysisRef.current.length));
+    const released = deferredAnalysisRef.current.splice(0, deferredAnalysisRef.current.length);
+    for (const job of released) {
+      removeJobsForNoteId(job.noteId);
+      pendingAnalysisRef.current.push(job);
+    }
+    enforceAnalysisQueueBudget();
     persistAnalysisQueueStateSafely();
     runAnalysisQueue();
-  }, [aiAuth.connected, persistAnalysisQueueStateSafely, runAnalysisQueue]);
+  }, [aiAuth.connected, enforceAnalysisQueueBudget, persistAnalysisQueueStateSafely, removeJobsForNoteId, runAnalysisQueue]);
 
   useEffect(() => {
     if (isOffline) return;
     if (transientReplayQueueRef.current.length === 0) return;
-    pendingAnalysisRef.current.push(...transientReplayQueueRef.current.splice(0, transientReplayQueueRef.current.length));
+    const replay = transientReplayQueueRef.current.splice(0, transientReplayQueueRef.current.length);
+    for (const job of replay) {
+      removeJobsForNoteId(job.noteId);
+      pendingAnalysisRef.current.push(job);
+    }
+    enforceAnalysisQueueBudget();
     persistAnalysisQueueStateSafely();
     runAnalysisQueue();
-  }, [isOffline, persistAnalysisQueueStateSafely, runAnalysisQueue]);
+  }, [enforceAnalysisQueueBudget, isOffline, persistAnalysisQueueStateSafely, removeJobsForNoteId, runAnalysisQueue]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
       if (isOffline) return;
       if (transientReplayQueueRef.current.length === 0) return;
-      pendingAnalysisRef.current.push(...transientReplayQueueRef.current.splice(0, transientReplayQueueRef.current.length));
+      const replay = transientReplayQueueRef.current.splice(0, transientReplayQueueRef.current.length);
+      for (const job of replay) {
+        removeJobsForNoteId(job.noteId);
+        pendingAnalysisRef.current.push(job);
+      }
+      enforceAnalysisQueueBudget();
       persistAnalysisQueueStateSafely();
       runAnalysisQueue();
     }, 60_000);
 
     return () => window.clearInterval(interval);
-  }, [isOffline, persistAnalysisQueueStateSafely, runAnalysisQueue]);
+  }, [enforceAnalysisQueueBudget, isOffline, persistAnalysisQueueStateSafely, removeJobsForNoteId, runAnalysisQueue]);
 
   useEffect(() => {
     if (backupReminderShownRef.current) return;
@@ -816,8 +995,8 @@ function App() {
       return;
     }
 
-    const prevById = new Map(prevNotes.map(note => [note.id, note]));
-    const nextById = new Map(notes.map(note => [note.id, note]));
+    const prevById = new Map<string, Note>(prevNotes.map(note => [note.id, note] as const));
+    const nextById = new Map<string, Note>(notes.map(note => [note.id, note] as const));
 
     for (const prevNote of prevNotes) {
       if (!nextById.has(prevNote.id)) {
@@ -1293,6 +1472,8 @@ function App() {
     pendingAnalysisRef.current = [];
     deferredAnalysisRef.current = [];
     transientReplayQueueRef.current = [];
+    deadLetterAnalysisRef.current = [];
+    deadLetterToastShownRef.current = false;
     persistAnalysisQueueStateSafely();
 
     setNotes([]);
@@ -1300,7 +1481,8 @@ function App() {
     localStorage.removeItem(STORAGE_SHADOW_KEY);
     localStorage.removeItem(AUTO_BACKUP_PAYLOAD_KEY);
     localStorage.removeItem(AUTO_BACKUP_LAST_AT_KEY);
-    localStorage.removeItem(AUTO_BACKUP_SECRET_KEY);
+    localStorage.removeItem(LEGACY_AUTO_BACKUP_SECRET_KEY);
+    void clearAutoBackupKey().catch(error => console.error('Failed to clear backup key', error));
     previousNotesRef.current = [];
     resetNotesStore().catch(error => console.error('Failed to clear IndexedDB store', error));
     addToast('All data cleared', 'info');
@@ -1517,11 +1699,16 @@ function App() {
       setAiAuth(status);
       setAiErrorMessage(null);
       setAiDegradedMessage(null);
-      pendingAnalysisRef.current.push(...deferredAnalysisRef.current.splice(0, deferredAnalysisRef.current.length));
+      const released = deferredAnalysisRef.current.splice(0, deferredAnalysisRef.current.length);
+      for (const job of released) {
+        removeJobsForNoteId(job.noteId);
+        pendingAnalysisRef.current.push(job);
+      }
+      enforceAnalysisQueueBudget();
       persistAnalysisQueueStateSafely();
       runAnalysisQueue();
     },
-    [persistAnalysisQueueStateSafely, runAnalysisQueue]
+    [enforceAnalysisQueueBudget, persistAnalysisQueueStateSafely, removeJobsForNoteId, runAnalysisQueue]
   );
 
   const handleDisconnectAI = useCallback(async () => {

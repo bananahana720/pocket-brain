@@ -5,6 +5,7 @@ This Worker secures AI provider keys by storing encrypted keys server-side and i
 ## Required secrets
 
 - `KEY_ENCRYPTION_SECRET`: High-entropy secret used to encrypt provider API keys at rest.
+- `KEY_ENCRYPTION_SECRET_PREV` (optional during rotation): previous secret kept temporarily so existing sessions can be decrypted and re-encrypted in-place.
 
 ## Required KV namespace
 
