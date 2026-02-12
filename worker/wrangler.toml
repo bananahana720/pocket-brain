@@ -20,6 +20,8 @@ new_sqlite_classes = ["ControlPlaneDO"]
 [vars]
 DEFAULT_MODEL = "google/gemini-2.5-flash"
 VPS_API_ORIGIN = "http://15.204.218.124.sslip.io:8080"
+VPS_PROXY_TIMEOUT_MS = "10000"
+VPS_PROXY_RETRIES = "2"
 CLERK_JWKS_URL = "https://positive-sturgeon-24.clerk.accounts.dev/.well-known/jwks.json"
 CLERK_ISSUER = "https://positive-sturgeon-24.clerk.accounts.dev"
 CLERK_AUDIENCE = "pocketbrain"

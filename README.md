@@ -107,9 +107,16 @@ Create a `.env.local` file in the project root.
    - `CLERK_SECRET_KEY`
    - `CLERK_PUBLISHABLE_KEY`
    - `ALLOW_INSECURE_DEV_AUTH=false`
+   - `STREAM_TICKET_SECRET`
+   - `STREAM_TICKET_TTL_SECONDS=60`
+   - `MAINTENANCE_INTERVAL_MS=600000`
+   - `TOMBSTONE_RETENTION_MS=2592000000`
+   - `SYNC_BATCH_LIMIT=100`
+   - `SYNC_PULL_LIMIT=500`
 6. Create/connect your API key from the in-app drawer (`Menu > AI Security`).
 
 If Worker Clerk vars are partial/missing while a bearer token is provided, the Worker responds with `AUTH_CONFIG_INVALID`.
+If you are rolling out from an older server build that still has the compatibility toggle, set `ALLOW_LEGACY_SSE_QUERY_TOKEN=false` permanently before cutover. Current stream-ticket-only builds no longer use that flag.
 
 Worker bootstrap commands:
 
@@ -127,6 +134,7 @@ In this mode, provider keys are not stored in frontend code or browser storage.
 - Sync is enabled only when signed in. If not signed in, the app runs in local-only mode.
 - Local edits are queued and retried automatically when connectivity returns.
 - Pull/push is cursor-based and idempotent via request IDs.
+- Realtime sync stream uses short-lived HttpOnly stream tickets (`POST /api/v2/events/ticket` then `GET /api/v2/events`).
 - Field-level conflicts are handled safely:
   - disjoint local/server field changes are auto-merged and retried once
   - true field collisions are surfaced in the conflict modal for manual resolution
@@ -186,6 +194,8 @@ bash scripts/deploy-vps.sh
 Options:
 - `--with-worker`: also runs `npm run worker:deploy` after backend health checks.
 - `--skip-pull`: skips `git pull --ff-only`.
+
+Deploy script validates backend readiness via `GET /ready` (DB required, Redis status reported).
 
 Prerequisites:
 - run from repo root on VPS

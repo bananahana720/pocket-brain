@@ -48,8 +48,17 @@ services:
       KEY_ENCRYPTION_SECRET: ${KEY_ENCRYPTION_SECRET:-replace-with-32-byte-secret}
       CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
       CLERK_PUBLISHABLE_KEY: ${CLERK_PUBLISHABLE_KEY:-}
+      STREAM_TICKET_SECRET: ${STREAM_TICKET_SECRET:-replace-with-stream-ticket-secret}
+      STREAM_TICKET_TTL_SECONDS: ${STREAM_TICKET_TTL_SECONDS:-60}
+      MAINTENANCE_INTERVAL_MS: ${MAINTENANCE_INTERVAL_MS:-600000}
+      TOMBSTONE_RETENTION_MS: ${TOMBSTONE_RETENTION_MS:-2592000000}
     ports:
       - "8788:8788"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8788/ready >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   nginx:
     image: nginx:1.27-alpine

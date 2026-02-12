@@ -17,6 +17,12 @@ Set these together for Clerk JWT verification:
 
 Set `ALLOW_INSECURE_DEV_AUTH=false` in production. Keep insecure auth enabled only for loopback/local development when explicitly needed.
 
+## Optional proxy vars
+
+- `VPS_API_ORIGIN` (required for `/api/v2/*` passthrough, for example `http://127.0.0.1:8788` locally)
+- `VPS_PROXY_TIMEOUT_MS` (default `10000`): timeout for Worker `/api/v2/*` upstream calls.
+- `VPS_PROXY_RETRIES` (default `2`): retry attempts for transient `/api/v2/*` failures (except `/api/v2/events` stream handshake).
+
 ## Required KV namespace
 
 - `AI_SESSIONS`: Stores encrypted API key sessions with 24-hour TTL.
@@ -48,6 +54,9 @@ Or run manual sub-steps with:
 cp worker/.dev.vars.example worker/.dev.vars
 npm run worker:dev
 ```
+
+For local JWT bypass, keep `ALLOW_INSECURE_DEV_AUTH=true` in `.dev.vars`.
+For local JWT verification, set `ALLOW_INSECURE_DEV_AUTH=false` and provide all Clerk vars (`CLERK_JWKS_URL`, `CLERK_ISSUER`, `CLERK_AUDIENCE`).
 
 In a second terminal (app):
 

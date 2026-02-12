@@ -6,6 +6,7 @@ import rateLimit from '@fastify/rate-limit';
 import { env } from './config/env.js';
 import { connectInfra, closeInfra } from './db/client.js';
 import { requireAuth } from './auth/clerk.js';
+import { consumeStreamTicket, StreamTicketError, STREAM_TICKET_COOKIE_NAME } from './auth/streamTicket.js';
 import { ensureUser } from './services/users.js';
 import { assertDeviceActive, upsertDevice } from './services/devices.js';
 import { registerHealthRoutes } from './routes/health.js';
@@ -14,6 +15,7 @@ import { registerDeviceRoutes } from './routes/devices.js';
 import { registerEventRoutes } from './routes/events.js';
 import { registerAiAuthRoutes } from './routes/aiAuth.js';
 import { initRealtimeHub } from './realtime/hub.js';
+import { startMaintenanceLoop } from './services/maintenance.js';
 
 const DEVICE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -28,6 +30,15 @@ export async function buildServer() {
   const app = Fastify({
     logger: {
       level: env.LOG_LEVEL,
+      redact: {
+        paths: [
+          'req.headers.authorization',
+          'req.headers.cookie',
+          'req.query.shared_note',
+          'res.headers.set-cookie',
+        ],
+        censor: '[REDACTED]',
+      },
     },
     trustProxy: env.TRUST_PROXY,
     requestIdHeader: 'x-request-id',
@@ -47,22 +58,71 @@ export async function buildServer() {
   });
 
   app.addHook('preHandler', async (request, reply) => {
-    if (request.routeOptions.url === '/health') return;
+    const routeUrl = request.routeOptions.url;
+    if (routeUrl === '/health' || routeUrl === '/ready') return;
 
-    await requireAuth(request, reply);
-    if (reply.sent) return;
+    let auth = request.auth;
+    let forcedDeviceId: string | undefined;
+    const isEventStreamRoute = routeUrl === '/api/v2/events';
+    const rawStreamTicket = request.cookies?.[STREAM_TICKET_COOKIE_NAME];
 
-    const user = await ensureUser(request.auth.clerkUserId);
+    if (isEventStreamRoute) {
+      if (!rawStreamTicket) {
+        reply.code(401).send({
+          error: {
+            code: 'STREAM_TICKET_REQUIRED',
+            message: 'Stream ticket required before opening events stream',
+            retryable: false,
+          },
+        });
+        return;
+      }
+
+      try {
+        const claims = await consumeStreamTicket(rawStreamTicket);
+        auth = {
+          clerkUserId: claims.sub,
+          tokenSub: claims.sub,
+          authMode: 'clerk',
+        };
+        forcedDeviceId = claims.deviceId;
+        reply.clearCookie(STREAM_TICKET_COOKIE_NAME, {
+          path: '/api/v2/events',
+        });
+      } catch (error) {
+        if (error instanceof StreamTicketError) {
+          if (error.code === 'STREAM_TICKET_STORAGE_UNAVAILABLE') {
+            request.log.error({ err: error }, 'stream ticket replay store unavailable');
+          }
+          reply.code(error.statusCode).send({
+            error: {
+              code: error.code,
+              message: error.message,
+              retryable: error.retryable,
+            },
+          });
+          return;
+        }
+        throw error;
+      }
+    } else {
+      await requireAuth(request, reply);
+      if (reply.sent) return;
+      auth = request.auth;
+    }
+
+    request.auth = auth;
+    const user = await ensureUser(auth.clerkUserId);
     request.appUserId = user.id;
 
     const requestedDeviceId = request.headers['x-device-id'];
-    const deviceId = Array.isArray(requestedDeviceId)
+    const headerDeviceId = Array.isArray(requestedDeviceId)
       ? requestedDeviceId[0]
       : typeof requestedDeviceId === 'string'
-      ? requestedDeviceId
-      : undefined;
+        ? requestedDeviceId
+        : undefined;
 
-    request.deviceId = resolveDeviceId(deviceId);
+    request.deviceId = forcedDeviceId || resolveDeviceId(headerDeviceId);
     reply.header('x-device-id', request.deviceId);
 
     await upsertDevice({
@@ -112,8 +172,10 @@ async function start() {
   await initRealtimeHub();
 
   const app = await buildServer();
+  const stopMaintenance = startMaintenanceLoop(app.log);
 
   const close = async () => {
+    stopMaintenance();
     await app.close();
     await closeInfra();
     process.exit(0);

@@ -1,5 +1,5 @@
 import { DeviceSession, Note, SyncBootstrapState, SyncConflict, SyncOp, SyncPushResponse } from '../types';
-import { apiFetch, getAuthToken } from './apiClient';
+import { apiFetch } from './apiClient';
 
 function mapError(status: number, payload: any): Error {
   const message = payload?.error?.message || `Request failed with ${status}`;
@@ -78,15 +78,28 @@ export function openSyncEventStream(
   onError: () => void
 ): () => void {
   let source: EventSource | null = null;
+  let reconnectTimer: number | null = null;
   let closed = false;
 
-  void (async () => {
-    const token = await getAuthToken();
+  const connect = async () => {
+    try {
+      await apiFetch('/api/v2/events/ticket', {
+        method: 'POST',
+      });
+    } catch {
+      onError();
+      if (!closed && reconnectTimer === null) {
+        reconnectTimer = window.setTimeout(() => {
+          reconnectTimer = null;
+          void connect();
+        }, 3000);
+      }
+      return;
+    }
+
     if (closed) return;
 
-    const streamUrl = token ? `/api/v2/events?token=${encodeURIComponent(token)}` : '/api/v2/events';
-    source = new EventSource(streamUrl, { withCredentials: true });
-
+    source = new EventSource('/api/v2/events', { withCredentials: true });
     source.addEventListener('sync', event => {
       try {
         const data = JSON.parse((event as MessageEvent<string>).data) as { cursor?: number };
@@ -99,12 +112,27 @@ export function openSyncEventStream(
     });
 
     source.onerror = () => {
+      source?.close();
+      source = null;
       onError();
+
+      if (!closed && reconnectTimer === null) {
+        reconnectTimer = window.setTimeout(() => {
+          reconnectTimer = null;
+          void connect();
+        }, 3000);
+      }
     };
-  })();
+  };
+
+  void connect();
 
   return () => {
     closed = true;
+    if (reconnectTimer !== null) {
+      window.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     source?.close();
   };
 }

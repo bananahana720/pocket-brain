@@ -19,7 +19,8 @@ export type ClientMetricName =
   | 'analysis_queue_stale_pruned'
   | 'capture_write_through_success'
   | 'capture_write_through_failure'
-  | 'capture_retry_clicked';
+  | 'capture_retry_clicked'
+  | 'sync_conflict_loop_blocks';
 
 interface ClientMetrics {
   counters: Record<ClientMetricName, number>;
@@ -56,6 +57,7 @@ const metrics: ClientMetrics = {
     capture_write_through_success: 0,
     capture_write_through_failure: 0,
     capture_retry_clicked: 0,
+    sync_conflict_loop_blocks: 0,
   },
   aiErrorCodes: {},
   latencies: {

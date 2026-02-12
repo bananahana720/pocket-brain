@@ -17,6 +17,9 @@ export const redis = new Redis(env.REDIS_URL, {
   maxRetriesPerRequest: 2,
   lazyConnect: true,
 });
+redis.on('error', () => {
+  // Optional dependency; callers handle degraded mode.
+});
 
 export async function connectInfra(): Promise<void> {
   await pool.query('select 1');
@@ -29,4 +32,35 @@ export async function connectInfra(): Promise<void> {
 
 export async function closeInfra(): Promise<void> {
   await Promise.allSettled([pool.end(), redis.quit()]);
+}
+
+export async function checkDatabaseReady(): Promise<boolean> {
+  try {
+    await pool.query('select 1');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function checkRedisReady(): Promise<{
+  ok: boolean;
+  status: string;
+}> {
+  try {
+    if (redis.status === 'wait') {
+      await redis.connect();
+    }
+
+    const pong = await redis.ping();
+    return {
+      ok: pong === 'PONG',
+      status: redis.status,
+    };
+  } catch {
+    return {
+      ok: false,
+      status: redis.status,
+    };
+  }
 }

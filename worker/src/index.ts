@@ -42,6 +42,8 @@ interface Env {
   CLERK_ISSUER?: string;
   CLERK_AUDIENCE?: string;
   ALLOW_INSECURE_DEV_AUTH?: string;
+  VPS_PROXY_TIMEOUT_MS?: string;
+  VPS_PROXY_RETRIES?: string;
 }
 
 type AIProvider = 'gemini' | 'openrouter';
@@ -83,6 +85,9 @@ interface Metrics {
   timeouts: number;
   rateLimited: number;
   circuitOpens: number;
+  vpsProxyFailures: number;
+  vpsProxyTimeouts: number;
+  vpsProxyRetries: number;
 }
 
 const SESSION_COOKIE_NAME = 'pb_ai_session';
@@ -103,6 +108,8 @@ const RATE_LIMIT_MAX_REQUESTS = 45;
 const RATE_LIMIT_BLOCK_MS = 60_000;
 const CIRCUIT_FAILURE_THRESHOLD = 5;
 const CIRCUIT_OPEN_MS = 30_000;
+const DEFAULT_VPS_PROXY_TIMEOUT_MS = 10_000;
+const DEFAULT_VPS_PROXY_RETRIES = 2;
 
 type RateLimitEntry = {
   windowStart: number;
@@ -159,6 +166,9 @@ const metrics: Metrics = {
   timeouts: 0,
   rateLimited: 0,
   circuitOpens: 0,
+  vpsProxyFailures: 0,
+  vpsProxyTimeouts: 0,
+  vpsProxyRetries: 0,
 };
 
 const rateLimits = new Map<string, RateLimitEntry>();
@@ -378,6 +388,18 @@ async function proxyToVps(request: Request, env: Env, pathname: string): Promise
     throw new ApiError(503, 'SERVICE_UNAVAILABLE', 'VPS API origin is not configured', true);
   }
 
+  const timeoutMs = (() => {
+    const parsed = Number(env.VPS_PROXY_TIMEOUT_MS || '');
+    if (!Number.isFinite(parsed)) return DEFAULT_VPS_PROXY_TIMEOUT_MS;
+    return Math.min(30_000, Math.max(1_000, Math.floor(parsed)));
+  })();
+  const retries = (() => {
+    const parsed = Number(env.VPS_PROXY_RETRIES || '');
+    if (!Number.isFinite(parsed)) return DEFAULT_VPS_PROXY_RETRIES;
+    return Math.min(5, Math.max(0, Math.floor(parsed)));
+  })();
+  const shouldRetry = pathname !== '/api/v2/events';
+
   const url = new URL(request.url);
   const target = new URL(`${origin}${pathname}${url.search}`);
 
@@ -394,18 +416,79 @@ async function proxyToVps(request: Request, env: Env, pathname: string): Promise
   forwardHeader('accept');
   forwardHeader('cache-control');
 
-  const init: RequestInit = {
-    method: request.method,
-    headers,
-    body: request.method === 'GET' || request.method === 'HEAD' ? undefined : request.body,
-  };
+  const method = request.method.toUpperCase();
+  const hasBody = method !== 'GET' && method !== 'HEAD';
+  const bodyBuffer = hasBody ? await request.arrayBuffer() : null;
 
-  const response = await fetch(target.toString(), init);
-  const passthroughHeaders = new Headers(response.headers);
-  return new Response(response.body, {
-    status: response.status,
-    headers: passthroughHeaders,
-  });
+  const attempts = shouldRetry ? retries + 1 : 1;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const { signal, cleanup } = timeoutSignal(timeoutMs);
+    const init: RequestInit = {
+      method,
+      headers,
+      signal,
+      body: hasBody ? bodyBuffer?.slice(0) : undefined,
+    };
+
+    try {
+      const response = await fetch(target.toString(), init);
+
+      if (response.status >= 500) {
+        if (attempt < attempts - 1) {
+          metrics.vpsProxyRetries += 1;
+          await wait(Math.min(1200, 180 * Math.pow(2, attempt)) + Math.floor(Math.random() * 80));
+          continue;
+        }
+
+        metrics.vpsProxyFailures += 1;
+        throw new ApiError(
+          503,
+          'SERVICE_UNAVAILABLE',
+          'Sync service is temporarily unavailable. Please retry shortly.',
+          true
+        );
+      }
+
+      const passthroughHeaders = new Headers(response.headers);
+      return new Response(response.body, {
+        status: response.status,
+        headers: passthroughHeaders,
+      });
+    } catch (error) {
+      const isTimeout = error instanceof DOMException && error.name === 'TimeoutError';
+      if (isTimeout) {
+        metrics.vpsProxyTimeouts += 1;
+      }
+
+      if (error instanceof ApiError) {
+        throw error;
+      }
+
+      if (attempt < attempts - 1) {
+        metrics.vpsProxyRetries += 1;
+        await wait(Math.min(1200, 180 * Math.pow(2, attempt)) + Math.floor(Math.random() * 80));
+        continue;
+      }
+
+      metrics.vpsProxyFailures += 1;
+      throw new ApiError(
+        503,
+        'SERVICE_UNAVAILABLE',
+        'Sync service is temporarily unavailable. Please retry shortly.',
+        true
+      );
+    } finally {
+      cleanup();
+    }
+  }
+
+  metrics.vpsProxyFailures += 1;
+  throw new ApiError(
+    503,
+    'SERVICE_UNAVAILABLE',
+    'Sync service is temporarily unavailable. Please retry shortly.',
+    true
+  );
 }
 
 function parseCookies(request: Request): Record<string, string> {
@@ -1532,7 +1615,7 @@ export default {
       }
 
       if (pathname.startsWith('/api/v2/')) {
-        return proxyToVps(request, env, pathname);
+        return await proxyToVps(request, env, pathname);
       }
 
       if (pathname === '/api/v1/auth/status' && request.method === 'GET') {

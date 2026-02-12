@@ -31,6 +31,10 @@ const envSchema = z.object({
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   AUTH_DEV_USER_ID: z.string().default('dev-user-local'),
   ALLOW_INSECURE_DEV_AUTH: optionalBooleanFromEnv,
+  STREAM_TICKET_SECRET: z.string().optional(),
+  STREAM_TICKET_TTL_SECONDS: z.coerce.number().int().min(15).max(900).default(60),
+  MAINTENANCE_INTERVAL_MS: z.coerce.number().int().min(60_000).default(600_000),
+  TOMBSTONE_RETENTION_MS: z.coerce.number().int().min(24 * 60 * 60 * 1000).default(30 * 24 * 60 * 60 * 1000),
   SYNC_BATCH_LIMIT: z.coerce.number().int().min(1).max(500).default(100),
   SYNC_PULL_LIMIT: z.coerce.number().int().min(1).max(2000).default(500),
 });
@@ -43,13 +47,23 @@ if (!parsed.success) {
 }
 
 const allowInsecureDevAuth = parsed.data.ALLOW_INSECURE_DEV_AUTH ?? parsed.data.NODE_ENV !== 'production';
+const streamTicketSecret = (parsed.data.STREAM_TICKET_SECRET || parsed.data.KEY_ENCRYPTION_SECRET).trim();
 
 if (parsed.data.NODE_ENV === 'production' && allowInsecureDevAuth) {
   throw new Error('Invalid environment:\nALLOW_INSECURE_DEV_AUTH must be false in production.');
 }
 
+if (!allowInsecureDevAuth && !parsed.data.CLERK_SECRET_KEY) {
+  throw new Error('Invalid environment:\nCLERK_SECRET_KEY is required when ALLOW_INSECURE_DEV_AUTH is false.');
+}
+
+if (streamTicketSecret.length < 16) {
+  throw new Error('Invalid environment:\nSTREAM_TICKET_SECRET must be at least 16 characters.');
+}
+
 export const env = {
   ...parsed.data,
   ALLOW_INSECURE_DEV_AUTH: allowInsecureDevAuth,
+  STREAM_TICKET_SECRET: streamTicketSecret,
 };
 export type AppEnv = typeof env;

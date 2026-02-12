@@ -27,8 +27,21 @@ cp server/.env.example server/.env
 - `CLERK_SECRET_KEY`
 - `CLERK_PUBLISHABLE_KEY`
 - `ALLOW_INSECURE_DEV_AUTH=true` only for local development
+- `STREAM_TICKET_SECRET` (HMAC secret for short-lived SSE stream tickets)
+- `STREAM_TICKET_TTL_SECONDS` (default `60`)
+- `MAINTENANCE_INTERVAL_MS` (default `600000`)
+- `TOMBSTONE_RETENTION_MS` (default `2592000000`)
+- `SYNC_BATCH_LIMIT` (default `100`)
+- `SYNC_PULL_LIMIT` (default `500`)
 
 For production, set `ALLOW_INSECURE_DEV_AUTH=false`.
+When `ALLOW_INSECURE_DEV_AUTH=false`, `CLERK_SECRET_KEY` is required.
+If you are still on a pre-cutover release with legacy SSE query-token compatibility, set `ALLOW_LEGACY_SSE_QUERY_TOKEN=false` permanently before deploying stream-ticket-only clients.
+
+## Health endpoints
+
+- `GET /health`: liveness check.
+- `GET /ready`: readiness check (DB required, Redis status included).
 
 5. Start server:
 

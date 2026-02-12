@@ -24,6 +24,7 @@ import {
   removeQueuedSyncOps,
   setSyncCursor,
 } from '../storage/notesStore';
+import { incrementMetric } from '../utils/telemetry';
 
 export type SyncStatus = 'disabled' | 'syncing' | 'synced' | 'offline' | 'conflict' | 'degraded';
 
@@ -47,6 +48,8 @@ const SYNC_FIELD_KEYS: Array<keyof Note> = [
 const AUTO_MERGE_ALLOWED_FIELDS = new Set<string>(
   SYNC_FIELD_KEYS.filter(field => field !== 'deletedAt').map(field => String(field))
 );
+const CONFLICT_LOOP_WINDOW_MS = 5 * 60 * 1000;
+const CONFLICT_LOOP_THRESHOLD = 2;
 
 function isArrayEqual(a: unknown[], b: unknown[]): boolean {
   if (a.length !== b.length) return false;
@@ -180,6 +183,7 @@ export function useSyncEngine(args: {
   const prevNotesRef = useRef<Note[]>(notes);
   const notesRef = useRef<Note[]>(notes);
   const conflictsRef = useRef<SyncConflict[]>([]);
+  const conflictLoopRef = useRef<Map<string, number[]>>(new Map());
 
   useEffect(() => {
     notesRef.current = notes;
@@ -245,6 +249,9 @@ export function useSyncEngine(args: {
 
         if (response.applied.length > 0) {
           const appliedIds = response.applied.map(item => item.requestId);
+          for (const applied of response.applied) {
+            conflictLoopRef.current.delete(applied.note.id);
+          }
           const state = await removeQueuedSyncOps(appliedIds);
           queueRef.current = state.queue;
           cursorRef.current = Math.max(cursorRef.current, response.nextCursor);
@@ -269,12 +276,22 @@ export function useSyncEngine(args: {
           queueRef.current = state.queue;
 
           for (const conflict of response.conflicts) {
+            const now = Date.now();
+            const history = conflictLoopRef.current.get(conflict.noteId) || [];
+            const recent = history.filter(ts => now - ts <= CONFLICT_LOOP_WINDOW_MS);
+            recent.push(now);
+            conflictLoopRef.current.set(conflict.noteId, recent);
+            const isConflictLoop = recent.length >= CONFLICT_LOOP_THRESHOLD;
+
             const sourceOp = batch.find(op => op.requestId === conflict.requestId);
-            const retryOp = sourceOp ? buildSafeAutoMergeRetryOp(conflict, sourceOp) : null;
+            const retryOp = !isConflictLoop && sourceOp ? buildSafeAutoMergeRetryOp(conflict, sourceOp) : null;
 
             if (retryOp) {
               retryOps.push(retryOp);
             } else {
+              if (isConflictLoop) {
+                incrementMetric('sync_conflict_loop_blocks');
+              }
               manualConflicts.push(conflict);
             }
           }
@@ -342,6 +359,7 @@ export function useSyncEngine(args: {
       initializedUserRef.current = null;
       queueRef.current = [];
       cursorRef.current = 0;
+      conflictLoopRef.current.clear();
       setConflicts([]);
       setDevices([]);
       setCurrentDeviceId(null);

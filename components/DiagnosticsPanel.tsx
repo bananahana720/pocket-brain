@@ -9,6 +9,9 @@ interface WorkerMetrics {
   timeouts: number;
   rateLimited: number;
   circuitOpens: number;
+  vpsProxyFailures: number;
+  vpsProxyTimeouts: number;
+  vpsProxyRetries: number;
 }
 
 const DiagnosticsPanel: React.FC = () => {
@@ -44,6 +47,7 @@ const DiagnosticsPanel: React.FC = () => {
         <p>Capture write-through success: {clientMetrics.counters.capture_write_through_success}</p>
         <p>Capture write-through failure: {clientMetrics.counters.capture_write_through_failure}</p>
         <p>Capture retries clicked: {clientMetrics.counters.capture_retry_clicked}</p>
+        <p>Sync conflict-loop blocks: {clientMetrics.counters.sync_conflict_loop_blocks}</p>
         <p>Avg capture visible: {clientMetrics.latencyAverages.captureVisibleMs}ms</p>
         <p>Avg capture write-through: {clientMetrics.latencyAverages.captureWriteMs}ms</p>
         <p>Stale drops: {clientMetrics.counters.stale_analysis_drops}</p>
@@ -72,6 +76,9 @@ const DiagnosticsPanel: React.FC = () => {
           <p>Worker timeouts: {workerMetrics.timeouts}</p>
           <p>Worker rate-limited: {workerMetrics.rateLimited}</p>
           <p>Worker circuit opens: {workerMetrics.circuitOpens}</p>
+          <p>Worker VPS proxy failures: {workerMetrics.vpsProxyFailures}</p>
+          <p>Worker VPS proxy timeouts: {workerMetrics.vpsProxyTimeouts}</p>
+          <p>Worker VPS proxy retries: {workerMetrics.vpsProxyRetries}</p>
         </div>
       )}
     </aside>

@@ -28,19 +28,8 @@ function extractBearerToken(request: FastifyRequest): string | null {
   return token;
 }
 
-function extractQueryToken(request: FastifyRequest): string | null {
-  try {
-    const origin = request.headers.host ? `http://${request.headers.host}` : 'http://localhost';
-    const url = new URL(request.raw.url || '/', origin);
-    const token = url.searchParams.get('token');
-    return token && token.trim() ? token : null;
-  } catch {
-    return null;
-  }
-}
-
 export async function resolveIdentity(request: FastifyRequest): Promise<{ clerkUserId: string; tokenSub: string; authMode: 'clerk' | 'dev' }> {
-  const token = extractBearerToken(request) || extractQueryToken(request);
+  const token = extractBearerToken(request);
   const allowDevAuth = env.NODE_ENV !== 'production' && env.ALLOW_INSECURE_DEV_AUTH;
 
   if (token) {

@@ -26,6 +26,7 @@ describe('env config parsing', () => {
       NODE_ENV: 'production',
       ALLOW_INSECURE_DEV_AUTH: 'false',
       TRUST_PROXY: 'false',
+      CLERK_SECRET_KEY: 'sk_test_123',
     });
 
     const module = await import('../src/config/env.js');

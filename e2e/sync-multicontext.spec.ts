@@ -44,6 +44,7 @@ test.describe('sync multi-context', () => {
     const notes = new Map<string, SyncNote>();
     const changes: Array<{ cursor: number; op: 'upsert' | 'delete'; note: SyncNote; requestId: string }> = [];
     const seenDevices = new Set<string>();
+    const eventStreamUrls: string[] = [];
     let cursor = 0;
 
     const handleApiRoute = async (route: Route) => {
@@ -173,7 +174,15 @@ test.describe('sync multi-context', () => {
         });
       }
 
+      if (pathname === '/api/v2/events/ticket' && request.method() === 'POST') {
+        return json(route, {
+          ok: true,
+          expiresAt: Date.now() + 60_000,
+        });
+      }
+
       if (pathname === '/api/v2/events' && request.method() === 'GET') {
+        eventStreamUrls.push(request.url());
         return route.fulfill({
           status: 200,
           headers: {
@@ -231,6 +240,11 @@ test.describe('sync multi-context', () => {
 
       await desktop.reload();
       await expect(desktop.getByText('Mobile offline replay note')).toBeVisible();
+      expect(eventStreamUrls.length).toBeGreaterThan(0);
+      for (const streamUrl of eventStreamUrls) {
+        const parsed = new URL(streamUrl);
+        expect(parsed.searchParams.has('token')).toBe(false);
+      }
     } finally {
       await Promise.allSettled([desktopContext.close(), mobileContext.close()]);
     }

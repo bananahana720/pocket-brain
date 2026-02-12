@@ -2,3 +2,18 @@
 # Copy to worker/.dev.vars and fill real values.
 
 KEY_ENCRYPTION_SECRET=replace-with-a-long-random-secret
+
+# Local proxy target for /api/v2 passthrough
+VPS_API_ORIGIN=http://127.0.0.1:8788
+
+# Local auth mode: set false only when all Clerk vars below are set.
+ALLOW_INSECURE_DEV_AUTH=true
+
+# Optional Clerk JWT verification tuple (must be set together when enabled)
+CLERK_JWKS_URL=
+CLERK_ISSUER=
+CLERK_AUDIENCE=
+
+# Optional proxy tunables for /api/v2 passthrough
+VPS_PROXY_TIMEOUT_MS=10000
+VPS_PROXY_RETRIES=2

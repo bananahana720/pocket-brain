@@ -36,10 +36,10 @@ docker compose up -d --build
 echo "==> Applying database schema"
 docker compose exec -T postgres psql -U postgres -d pocketbrain < server/drizzle/0000_initial.sql
 
-echo "==> Health check: http://127.0.0.1:8080/health"
+echo "==> Readiness check: http://127.0.0.1:8080/ready"
 HEALTH_STATUS=""
 for attempt in {1..30}; do
-  HEALTH_STATUS="$(curl -s -o /tmp/pocketbrain-health.json -w "%{http_code}" http://127.0.0.1:8080/health || true)"
+  HEALTH_STATUS="$(curl -s -o /tmp/pocketbrain-health.json -w "%{http_code}" http://127.0.0.1:8080/ready || true)"
   if [[ "$HEALTH_STATUS" == "200" ]]; then
     break
   fi
