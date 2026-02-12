@@ -39,6 +39,13 @@ To capture your first note:
 
 That is it. The note appears instantly at the top of your list. Within a second or two, PocketBrain's AI analyzes your note in the background and adds a title, tags, a type classification, and (if relevant) a due date and priority level.
 
+Before AI features work, connect an AI key once:
+1. Open **Menu**.
+2. In **AI Security**, choose Gemini or OpenRouter.
+3. Paste your key and tap **Connect key securely**.
+
+The key is sent to the secure proxy and not stored in browser-accessible storage.
+
 The header at the top contains:
 - The **PocketBrain** logo and name on the left.
 - A **Today** button (calendar icon) on the right.
@@ -409,6 +416,8 @@ Open the side drawer, scroll to "Data Management," and tap **Export**. A dropdow
 
 **JSON:** Downloads a `pocketbrain_backup.json` file containing all your notes as a JSON array. This is the most complete format and the only one that can be re-imported.
 
+**Encrypted Backup:** Downloads `pocketbrain_backup.encrypted.json` encrypted with your passphrase (AES-GCM). This is the recommended backup format for sensitive notes.
+
 **Markdown:** Downloads a `pocketbrain_export.md` file. Each note is formatted with its title as a heading, the content as body text, and metadata (type, tags, creation date) on a separate line.
 
 **CSV:** Downloads a `pocketbrain_export.csv` file with columns for title, content, type, tags, created date, due date, priority, and completion status. Useful for opening in spreadsheet applications.
@@ -427,7 +436,7 @@ If the file is not valid JSON or contains no valid notes, you will see an error 
 
 ### Clear All Data
 
-At the bottom of the Data Management section, the **Clear All Data** button deletes all notes and clears localStorage. A confirmation dialog appears first. This action cannot be undone.
+At the bottom of the Data Management section, the **Clear All Data** button deletes all notes and clears local browser note storage (IndexedDB and legacy localStorage). A confirmation dialog appears first. This action cannot be undone.
 
 ---
 
@@ -465,7 +474,7 @@ Note: Cmd is used on macOS, Ctrl on Windows and Linux.
 
 **Re-analyze after major edits.** If you significantly change a note's content, use the Re-analyze option from the menu to get updated tags, title, and classification.
 
-**Export regularly.** Use JSON export as a backup. If anything goes wrong with localStorage, you have your data.
+**Export regularly.** Use Encrypted Backup export as your primary backup.
 
 **Watch for the red dot.** A red dot on the Today button means you have overdue tasks. Do not ignore it.
 
@@ -488,29 +497,27 @@ If the Voice pill and microphone button do not appear at all, your browser does 
 
 ### AI features are not working
 
-AI features (classification, Magic Batch, AI search, daily briefing) require a valid API key. PocketBrain supports two AI providers:
+AI features (classification, Magic Batch, AI search, daily briefing) require a valid connected key in **Menu > AI Security**.
 
-**Option A: Google Gemini (default)**
-- Add `GEMINI_API_KEY=your_key_here` to your `.env.local` file.
+**Option A: Google Gemini**
 - Get a key at [Google AI Studio](https://aistudio.google.com/apikey).
+- Paste it into **AI Security** and connect.
 
 **Option B: OpenRouter**
-- Add `OPENROUTER_API_KEY=your_key_here` to your `.env.local` file.
 - Get a key at [OpenRouter](https://openrouter.ai/keys).
-- OpenRouter routes requests to the same `gemini-2.5-flash` model by default, but you can change the model in `services/geminiService.ts` to any OpenRouter-supported model (Claude, GPT-4, Llama, etc.).
-- If both keys are present, OpenRouter takes priority.
+- Paste it into **AI Security** and connect.
 
 General troubleshooting:
-- Restart the dev server after adding or changing a key (`npm run dev`).
-- Check the browser console for error messages. "API Key not found" means no key is being injected.
-- Verify your API key is valid with the respective provider.
+- Disconnect and reconnect if the status is expired.
+- If you see a capture-only banner, AI is temporarily unavailable but notes still save normally.
+- Verify your provider key is valid with the respective provider.
 
 If AI features fail intermittently, it may be a rate limit or network issue. Notes are still saved locally even when AI processing fails -- they just will not get auto-titles and tags.
 
 ### Storage full warning
 
-PocketBrain stores all data in browser localStorage, which is typically limited to 5-10 MB depending on the browser. If you see a "Storage full" warning:
-- Export your data as JSON first (as a backup).
+PocketBrain stores notes in browser IndexedDB. If you see a storage warning:
+- Export your data as Encrypted Backup first.
 - Archive or delete notes you no longer need.
 - Clear old data from other sites using your browser's storage settings.
 
@@ -524,8 +531,8 @@ This usually means the AI analysis failed silently. The note itself is saved; it
 
 ### Offline behavior
 
-When you lose internet connectivity, a yellow banner appears at the top: "Offline -- notes saved locally." You can continue capturing notes normally. AI features (classification, search, batch, daily brief) will not work until you reconnect, but all captures are safely stored in localStorage.
+When you lose internet connectivity, a yellow banner appears at the top: "Offline -- notes saved locally." You can continue capturing notes normally. AI features (classification, search, batch, daily brief) will not work until you reconnect, but all captures are safely stored locally.
 
 ### Data disappeared after clearing browser data
 
-PocketBrain stores everything in localStorage. If you clear your browser's site data, storage, or cookies, your notes are permanently deleted. To protect against this, use the JSON export feature regularly as a backup. You can re-import the JSON file at any time to restore your notes.
+PocketBrain stores notes in browser-local storage. If you clear site data/storage, your local notes are permanently deleted. To protect against this, use Encrypted Backup export regularly. You can re-import JSON backups anytime.

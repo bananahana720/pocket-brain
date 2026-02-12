@@ -11,6 +11,9 @@ node_modules
 dist
 dist-ssr
 *.local
+worker/.dev.vars
+worker/.wrangler/
+.wrangler-home/
 playwright-report/
 test-results/
 .claude/

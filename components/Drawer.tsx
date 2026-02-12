@@ -1,8 +1,27 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { X, Settings, Download, Trash2, Database, PieChart, FileText, CheckSquare, Lightbulb, Tag, Sun, Moon, Archive, Flame, Upload, ChevronDown, FileJson, FileText as FileMarkdown, Table } from 'lucide-react';
-import { Note, NoteType } from '../types';
+import {
+  X,
+  Download,
+  Trash2,
+  Tag,
+  Sun,
+  Moon,
+  Archive,
+  Flame,
+  Upload,
+  ChevronDown,
+  FileJson,
+  FileText as FileMarkdown,
+  Table,
+  Shield,
+  KeyRound,
+  Link2,
+  Unplug,
+} from 'lucide-react';
+import { AIAuthState, AIProvider, Note, NoteType } from '../types';
 import { useTheme } from '../contexts/ThemeContext';
 import { exportAsMarkdown, exportAsCSV, validateImport } from '../utils/exporters';
+import { createEncryptedBackupPayload } from '../utils/encryptedExport';
 
 interface DrawerProps {
   isOpen: boolean;
@@ -16,11 +35,37 @@ interface DrawerProps {
   onExitArchived: () => void;
   onImportNotes?: (notes: Note[]) => void;
   addToast?: (message: string, type: 'success' | 'error' | 'info') => void;
+  aiAuth: AIAuthState;
+  aiErrorMessage?: string | null;
+  onConnectAI: (provider: AIProvider, apiKey: string) => Promise<void>;
+  onDisconnectAI: () => Promise<void>;
+  onBackupRecorded: () => void;
 }
 
-const Drawer: React.FC<DrawerProps> = ({ isOpen, onClose, notes, onExport, onClearData, onTagClick, onShowArchived, showArchived, onExitArchived, onImportNotes, addToast }) => {
+const Drawer: React.FC<DrawerProps> = ({
+  isOpen,
+  onClose,
+  notes,
+  onExport,
+  onClearData,
+  onTagClick,
+  onShowArchived,
+  showArchived,
+  onExitArchived,
+  onImportNotes,
+  addToast,
+  aiAuth,
+  aiErrorMessage,
+  onConnectAI,
+  onDisconnectAI,
+  onBackupRecorded,
+}) => {
   const { theme, toggle } = useTheme();
   const [showExportOptions, setShowExportOptions] = useState(false);
+  const [isConnectingAI, setIsConnectingAI] = useState(false);
+  const [isDisconnectingAI, setIsDisconnectingAI] = useState(false);
+  const [provider, setProvider] = useState<AIProvider>('gemini');
+  const [apiKeyInput, setApiKeyInput] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const {
@@ -177,6 +222,55 @@ const Drawer: React.FC<DrawerProps> = ({ isOpen, onClose, notes, onExport, onCle
     URL.revokeObjectURL(url);
   };
 
+  const handleConnectAI = async () => {
+    const trimmed = apiKeyInput.trim();
+    if (!trimmed) {
+      addToast?.('Paste an API key first', 'error');
+      return;
+    }
+
+    setIsConnectingAI(true);
+    try {
+      await onConnectAI(provider, trimmed);
+      setApiKeyInput('');
+      addToast?.('AI key connected securely', 'success');
+    } catch {
+      addToast?.('Unable to connect AI key', 'error');
+    } finally {
+      setIsConnectingAI(false);
+    }
+  };
+
+  const handleDisconnectAI = async () => {
+    setIsDisconnectingAI(true);
+    try {
+      await onDisconnectAI();
+      addToast?.('AI key disconnected', 'info');
+    } catch {
+      addToast?.('Unable to disconnect AI key', 'error');
+    } finally {
+      setIsDisconnectingAI(false);
+    }
+  };
+
+  const handleEncryptedExport = async () => {
+    const passphrase = window.prompt('Set a passphrase for this encrypted backup:');
+    if (!passphrase) return;
+    if (passphrase.length < 8) {
+      addToast?.('Use at least 8 characters for backup passphrase', 'error');
+      return;
+    }
+
+    try {
+      const payload = await createEncryptedBackupPayload(notes, passphrase);
+      downloadFile(payload, 'pocketbrain_backup.encrypted.json', 'application/json');
+      onBackupRecorded();
+      addToast?.('Encrypted backup downloaded', 'success');
+    } catch {
+      addToast?.('Failed to create encrypted backup', 'error');
+    }
+  };
+
   const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -234,6 +328,82 @@ const Drawer: React.FC<DrawerProps> = ({ isOpen, onClose, notes, onExport, onCle
             <div className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow transition-transform ${theme === 'dark' ? 'translate-x-5' : 'translate-x-1'}`} />
           </div>
         </button>
+
+        {/* AI Security */}
+        <div className="mb-6 rounded-xl border border-zinc-100 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800/80">
+          <div className="mb-3 flex items-center gap-2">
+            <Shield className="h-4 w-4 text-brand-500" />
+            <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">AI Security</h3>
+          </div>
+
+          {aiAuth.connected ? (
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-zinc-700 dark:text-zinc-200">
+                Connected via {aiAuth.provider === 'openrouter' ? 'OpenRouter' : 'Gemini'}
+              </p>
+              {aiAuth.expiresAt && (
+                <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                  Expires {new Date(aiAuth.expiresAt).toLocaleString()}
+                </p>
+              )}
+              <button
+                onClick={handleDisconnectAI}
+                disabled={isDisconnectingAI}
+                className="mt-1 inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-semibold text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-60 dark:border-zinc-600 dark:text-zinc-200 dark:hover:bg-zinc-700"
+              >
+                <Unplug className="h-3.5 w-3.5" />
+                {isDisconnectingAI ? 'Disconnecting...' : 'Disconnect'}
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex gap-2">
+                {(['gemini', 'openrouter'] as AIProvider[]).map(p => (
+                  <button
+                    key={p}
+                    onClick={() => setProvider(p)}
+                    className={`rounded-full px-3 py-1 text-[11px] font-semibold transition-colors ${
+                      provider === p
+                        ? 'bg-brand-600 text-white'
+                        : 'bg-white text-zinc-600 hover:bg-zinc-100 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600'
+                    }`}
+                  >
+                    {p === 'openrouter' ? 'OpenRouter' : 'Gemini'}
+                  </button>
+                ))}
+              </div>
+              <div className="relative">
+                <KeyRound className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-zinc-400" />
+                <input
+                  value={apiKeyInput}
+                  onChange={e => setApiKeyInput(e.target.value)}
+                  placeholder="Paste API key"
+                  type="password"
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="w-full rounded-lg border border-zinc-200 bg-white py-2 pl-8 pr-2 text-xs text-zinc-700 outline-none focus:border-brand-500 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-100"
+                />
+              </div>
+              <button
+                onClick={handleConnectAI}
+                disabled={isConnectingAI}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-brand-700 disabled:opacity-60"
+              >
+                <Link2 className="h-3.5 w-3.5" />
+                {isConnectingAI ? 'Connecting...' : 'Connect key securely'}
+              </button>
+              <p className="text-[10px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+                Keys are sent once to the secure AI proxy and bound to an HttpOnly session.
+              </p>
+            </div>
+          )}
+
+          {aiErrorMessage && (
+            <p className="mt-2 rounded-lg bg-rose-50 px-2 py-1 text-[10px] font-medium text-rose-600 dark:bg-rose-900/20 dark:text-rose-300">
+              {aiErrorMessage}
+            </p>
+          )}
+        </div>
 
         {/* Productivity Stats */}
         <div className="space-y-4 mb-6">
@@ -418,6 +588,12 @@ const Drawer: React.FC<DrawerProps> = ({ isOpen, onClose, notes, onExport, onCle
                   className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-400 text-xs font-medium transition-colors text-left"
                 >
                   <FileJson className="w-3.5 h-3.5" /> JSON
+                </button>
+                <button
+                  onClick={handleEncryptedExport}
+                  className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-400 text-xs font-medium transition-colors text-left"
+                >
+                  <Shield className="w-3.5 h-3.5" /> Encrypted Backup
                 </button>
                 <button
                   onClick={handleExportMarkdown}

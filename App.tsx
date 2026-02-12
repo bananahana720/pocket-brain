@@ -1,29 +1,174 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { Search, Sparkles, Menu, Zap, BrainCircuit, X, Archive, Calendar, WifiOff } from 'lucide-react';
-import { Note, NoteType, UndoAction } from './types';
-import { analyzeNote, askMyNotes, processBatchEntry, generateDailyBrief } from './services/geminiService';
+import { AIAuthState, AIProvider, Note, NoteType, UndoAction } from './types';
+import {
+  AIServiceError,
+  analyzeNote,
+  askMyNotes,
+  connectAIProvider,
+  disconnectAIProvider,
+  generateDailyBrief,
+  getAIAuthStatus,
+  isProxyEnabled,
+  processBatchEntry,
+} from './services/geminiService';
 import NoteCard from './components/NoteCard';
 import InputArea, { InputAreaHandle } from './components/InputArea';
 import TodayView from './components/TodayView';
 import Drawer from './components/Drawer';
 import ErrorBoundary from './components/ErrorBoundary';
+import DiagnosticsPanel from './components/DiagnosticsPanel';
 import { ToastContainer, ToastMessage, ToastAction } from './components/Toast';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { trackEvent } from './utils/analytics';
+import { hashContent } from './utils/hash';
+import { useDebouncedValue } from './hooks/useDebouncedValue';
+import {
+  NoteOp,
+  compactSnapshot,
+  migrateFromLocalStorage,
+  resetNotesStore,
+  saveOps,
+} from './storage/notesStore';
+import {
+  incrementMetric,
+  recordAiErrorCode,
+  recordAiLatency,
+  recordPersistLatency,
+} from './utils/telemetry';
 
 const STORAGE_KEY = 'pocketbrain_notes';
+const BACKUP_RECORDED_KEY = 'pocketbrain_last_backup_at';
+const BACKUP_REMINDER_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+const OP_COMPACT_THRESHOLD = 200;
+
 const INITIAL_VISIBLE_NOTES = 60;
 const VISIBLE_NOTES_STEP = 40;
+const LARGE_DATASET_THRESHOLD = 500;
+const VIRTUAL_ROW_HEIGHT = 210;
+const VIRTUAL_OVERSCAN = 12;
+
+interface AnalysisJob {
+  noteId: string;
+  content: string;
+  version: number;
+  contentHash: string;
+  attempts: number;
+}
+
+function noteEqual(a: Note, b: Note): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function buildOps(prevNotes: Note[], nextNotes: Note[]): NoteOp[] {
+  const ops: NoteOp[] = [];
+
+  const prevById = new Map(prevNotes.map(note => [note.id, note]));
+  const nextById = new Map(nextNotes.map(note => [note.id, note]));
+
+  for (const note of nextNotes) {
+    const prev = prevById.get(note.id);
+    if (!prev || !noteEqual(prev, note)) {
+      ops.push({ type: 'upsert', note });
+    }
+  }
+
+  for (const note of prevNotes) {
+    if (!nextById.has(note.id)) {
+      ops.push({ type: 'delete', id: note.id });
+    }
+  }
+
+  return ops;
+}
+
+function toAiMessage(error: unknown): {
+  code: string;
+  message: string;
+  degradedMessage: string;
+  retryable: boolean;
+  deferUntilConnected: boolean;
+} {
+  if (error instanceof AIServiceError) {
+    switch (error.code) {
+      case 'AUTH_REQUIRED':
+        return {
+          code: error.code,
+          message: 'Connect an AI key to use AI features.',
+          degradedMessage: 'Capture-only mode — connect an AI key in Settings.',
+          retryable: false,
+          deferUntilConnected: true,
+        };
+      case 'AUTH_EXPIRED':
+        return {
+          code: error.code,
+          message: 'AI session expired. Reconnect your key.',
+          degradedMessage: 'Capture-only mode — AI session expired.',
+          retryable: false,
+          deferUntilConnected: true,
+        };
+      case 'RATE_LIMITED':
+        return {
+          code: error.code,
+          message: 'AI rate-limited. Retrying shortly.',
+          degradedMessage: 'AI degraded — provider is rate-limiting requests.',
+          retryable: true,
+          deferUntilConnected: false,
+        };
+      case 'TIMEOUT':
+        return {
+          code: error.code,
+          message: 'AI request timed out. Retrying.',
+          degradedMessage: 'AI degraded — provider timeout.',
+          retryable: true,
+          deferUntilConnected: false,
+        };
+      case 'NETWORK':
+        return {
+          code: error.code,
+          message: 'Network issue contacting AI service.',
+          degradedMessage: 'AI degraded — network issue.',
+          retryable: true,
+          deferUntilConnected: false,
+        };
+      case 'PROVIDER_UNAVAILABLE':
+        return {
+          code: error.code,
+          message: 'AI provider unavailable right now.',
+          degradedMessage: 'AI degraded — provider unavailable.',
+          retryable: true,
+          deferUntilConnected: false,
+        };
+      default:
+        return {
+          code: error.code,
+          message: error.message || 'AI request failed.',
+          degradedMessage: 'AI degraded — request failed.',
+          retryable: error.retryable,
+          deferUntilConnected: false,
+        };
+    }
+  }
+
+  return {
+    code: 'UNKNOWN',
+    message: 'Unexpected AI error.',
+    degradedMessage: 'AI degraded — unexpected error.',
+    retryable: false,
+    deferUntilConnected: false,
+  };
+}
 
 function App() {
   const [notes, setNotes] = useState<Note[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
+  const debouncedSearchQuery = useDebouncedValue(searchQuery, 120);
   const [isAiSearch, setIsAiSearch] = useState(false);
   const [aiAnswer, setAiAnswer] = useState<string | null>(null);
   const [isAiThinking, setIsAiThinking] = useState(false);
   const [filter, setFilter] = useState<NoteType | 'ALL'>('ALL');
   const [isProcessingBatch, setIsProcessingBatch] = useState(false);
-  
+
   // UI State
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -35,6 +180,10 @@ function App() {
   const [aiBrief, setAiBrief] = useState<string | null>(null);
   const [isLoadingBrief, setIsLoadingBrief] = useState(false);
   const [visibleNotesCount, setVisibleNotesCount] = useState(INITIAL_VISIBLE_NOTES);
+  const [virtualRange, setVirtualRange] = useState({ start: 0, end: 0 });
+  const [aiAuth, setAiAuth] = useState<AIAuthState>({ connected: false });
+  const [aiErrorMessage, setAiErrorMessage] = useState<string | null>(null);
+  const [aiDegradedMessage, setAiDegradedMessage] = useState<string | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
   const inputAreaRef = useRef<InputAreaHandle>(null);
@@ -43,38 +192,220 @@ function App() {
   const isDrawerOpenRef = useRef(false);
 
   const hasLoadedRef = useRef(false);
-  const lastSerializedNotesRef = useRef<string | null>(null);
+  const previousNotesRef = useRef<Note[]>([]);
+  const persistChainRef = useRef<Promise<void>>(Promise.resolve());
+  const analysisControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const pendingAnalysisRef = useRef<AnalysisJob[]>([]);
+  const deferredAnalysisRef = useRef<AnalysisJob[]>([]);
+  const transientReplayQueueRef = useRef<AnalysisJob[]>([]);
+  const processingAnalysisRef = useRef(false);
+  const backupReminderShownRef = useRef(false);
   const loadMoreRef = useRef<HTMLDivElement>(null);
+  const notesListRef = useRef<HTMLDivElement>(null);
 
-  // --- Load/Save Logic ---
-  useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        setNotes(JSON.parse(saved));
-        lastSerializedNotesRef.current = saved;
-      } catch (e) {
-        console.error('Failed to parse notes', e);
+  // --- Toast System ---
+  const addToast = useCallback(
+    (message: string, type: 'success' | 'error' | 'info' = 'success', action?: ToastAction) => {
+      const id = Date.now().toString() + Math.random();
+      setToasts(prev => [...prev, { id, message, type, action }]);
+      setTimeout(() => {
+        setToasts(prev => prev.filter(t => t.id !== id));
+      }, action ? 5000 : 3000);
+    },
+    []
+  );
+
+  const removeToast = useCallback((id: string) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  }, []);
+
+  const refreshAiAuth = useCallback(async () => {
+    try {
+      const status = await getAIAuthStatus();
+      setAiAuth(status);
+      if (!status.connected && isProxyEnabled()) {
+        setAiDegradedMessage('Capture-only mode — connect an AI key in Settings.');
+      }
+    } catch {
+      setAiAuth({ connected: false });
+      if (isProxyEnabled()) {
+        setAiDegradedMessage('Capture-only mode — AI auth service unavailable.');
       }
     }
-    const id = requestAnimationFrame(() => {
-      hasLoadedRef.current = true;
-    });
-    return () => cancelAnimationFrame(id);
   }, []);
+
+  const cancelAnalysisForNote = useCallback((noteId: string) => {
+    const controller = analysisControllersRef.current.get(noteId);
+    if (controller) {
+      controller.abort();
+      analysisControllersRef.current.delete(noteId);
+    }
+    pendingAnalysisRef.current = pendingAnalysisRef.current.filter(job => job.noteId !== noteId);
+    deferredAnalysisRef.current = deferredAnalysisRef.current.filter(job => job.noteId !== noteId);
+    transientReplayQueueRef.current = transientReplayQueueRef.current.filter(job => job.noteId !== noteId);
+  }, []);
+
+  const runAnalysisQueue = useCallback(() => {
+    if (processingAnalysisRef.current) return;
+    const job = pendingAnalysisRef.current.shift();
+    if (!job) return;
+
+    processingAnalysisRef.current = true;
+
+    const controller = new AbortController();
+    analysisControllersRef.current.set(job.noteId, controller);
+
+    const startedAt = performance.now();
+    incrementMetric('ai_requests');
+
+    analyzeNote(job.content, { signal: controller.signal })
+      .then(analysis => {
+        recordAiLatency(performance.now() - startedAt);
+        setAiErrorMessage(null);
+        setAiDegradedMessage(null);
+
+        setNotes(prev =>
+          prev.map(note => {
+            if (note.id !== job.noteId) return note;
+            if (note.analysisVersion !== job.version || note.contentHash !== job.contentHash) {
+              incrementMetric('stale_analysis_drops');
+              return note;
+            }
+
+            return {
+              ...note,
+              title: analysis?.title || 'Quick Note',
+              tags: analysis?.tags || [],
+              type: analysis?.type || NoteType.NOTE,
+              isProcessed: true,
+              analysisState: 'complete',
+              lastAnalyzedAt: Date.now(),
+              ...(analysis?.dueDate ? { dueDate: new Date(analysis.dueDate).getTime() } : {}),
+              ...(analysis?.priority ? { priority: analysis.priority } : {}),
+            };
+          })
+        );
+      })
+      .catch(error => {
+        if (controller.signal.aborted) return;
+
+        const mapped = toAiMessage(error);
+        incrementMetric('ai_failures');
+        recordAiErrorCode(mapped.code);
+
+        setAiErrorMessage(mapped.message);
+        setAiDegradedMessage(mapped.degradedMessage);
+
+        setNotes(prev =>
+          prev.map(note => {
+            if (note.id !== job.noteId) return note;
+            if (note.analysisVersion !== job.version || note.contentHash !== job.contentHash) {
+              incrementMetric('stale_analysis_drops');
+              return note;
+            }
+            return {
+              ...note,
+              analysisState: 'failed',
+            };
+          })
+        );
+
+        const retriedJob: AnalysisJob = { ...job, attempts: job.attempts + 1 };
+
+        if (mapped.deferUntilConnected) {
+          deferredAnalysisRef.current.push(retriedJob);
+          return;
+        }
+
+        if (mapped.retryable && job.attempts < 2) {
+          window.setTimeout(() => {
+            pendingAnalysisRef.current.push(retriedJob);
+            runAnalysisQueue();
+          }, 350 * Math.pow(2, job.attempts));
+        } else if (mapped.retryable) {
+          transientReplayQueueRef.current.push(retriedJob);
+        }
+      })
+      .finally(() => {
+        analysisControllersRef.current.delete(job.noteId);
+        processingAnalysisRef.current = false;
+        runAnalysisQueue();
+      });
+  }, []);
+
+  const enqueueAnalysis = useCallback(
+    (job: AnalysisJob) => {
+      pendingAnalysisRef.current.push(job);
+      runAnalysisQueue();
+    },
+    [runAnalysisQueue]
+  );
+
+  const recordBackupCompletion = useCallback(() => {
+    localStorage.setItem(BACKUP_RECORDED_KEY, String(Date.now()));
+  }, []);
+
+  // --- Load/Save Logic (IndexedDB + migration) ---
+  useEffect(() => {
+    let cancelled = false;
+
+    const bootstrap = async () => {
+      try {
+        let loaded = await migrateFromLocalStorage(STORAGE_KEY);
+        if (!loaded.length) {
+          const localFallback = localStorage.getItem(STORAGE_KEY);
+          if (localFallback) {
+            loaded = JSON.parse(localFallback) as Note[];
+          }
+        }
+
+        if (cancelled) return;
+        setNotes(loaded);
+        previousNotesRef.current = loaded;
+      } catch (error) {
+        console.error('Failed to load notes from IndexedDB', error);
+        addToast('Unable to load saved notes', 'error');
+      } finally {
+        if (!cancelled) {
+          hasLoadedRef.current = true;
+        }
+      }
+    };
+
+    bootstrap();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [addToast]);
 
   useEffect(() => {
     if (!hasLoadedRef.current) return;
-    const serialized = JSON.stringify(notes);
-    if (serialized === lastSerializedNotesRef.current) return;
-    try {
-      localStorage.setItem(STORAGE_KEY, serialized);
-      lastSerializedNotesRef.current = serialized;
-    } catch (e) {
-      console.error('Failed to save notes', e);
-      addToast('Storage full — some changes may not be saved', 'error');
-    }
-  }, [notes]);
+
+    const prev = previousNotesRef.current;
+    const next = notes;
+    const ops = buildOps(prev, next);
+
+    previousNotesRef.current = next;
+    if (ops.length === 0) return;
+
+    persistChainRef.current = persistChainRef.current
+      .then(async () => {
+        const started = performance.now();
+        const { opCount } = await saveOps(ops);
+        incrementMetric('persist_writes');
+        recordPersistLatency(performance.now() - started);
+
+        if (opCount >= OP_COMPACT_THRESHOLD) {
+          await compactSnapshot(next);
+        }
+      })
+      .catch(error => {
+        console.error('Failed to persist notes', error);
+        incrementMetric('persist_failures');
+        addToast('Storage issue — some changes may not be saved', 'error');
+      });
+  }, [notes, addToast]);
 
   // --- Offline Detection ---
   useEffect(() => {
@@ -99,20 +430,53 @@ function App() {
     const query = params.toString();
     const nextUrl = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`;
     window.history.replaceState({}, '', nextUrl);
-  }, []);
+  }, [addToast]);
 
-  // --- Toast System ---
-  const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'success', action?: ToastAction) => {
-    const id = Date.now().toString() + Math.random();
-    setToasts(prev => [...prev, { id, message, type, action }]);
-    setTimeout(() => {
-        setToasts(prev => prev.filter(t => t.id !== id));
-    }, action ? 5000 : 3000);
-  }, []);
+  useEffect(() => {
+    refreshAiAuth();
+    const interval = window.setInterval(refreshAiAuth, 5 * 60 * 1000);
+    return () => window.clearInterval(interval);
+  }, [refreshAiAuth]);
 
-  const removeToast = useCallback((id: string) => {
-    setToasts(prev => prev.filter(t => t.id !== id));
-  }, []);
+  useEffect(() => {
+    if (!aiAuth.connected || deferredAnalysisRef.current.length === 0) return;
+    pendingAnalysisRef.current.push(...deferredAnalysisRef.current.splice(0, deferredAnalysisRef.current.length));
+    runAnalysisQueue();
+  }, [aiAuth.connected, runAnalysisQueue]);
+
+  useEffect(() => {
+    if (isOffline) return;
+    if (transientReplayQueueRef.current.length === 0) return;
+    pendingAnalysisRef.current.push(...transientReplayQueueRef.current.splice(0, transientReplayQueueRef.current.length));
+    runAnalysisQueue();
+  }, [isOffline, runAnalysisQueue]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      if (isOffline) return;
+      if (transientReplayQueueRef.current.length === 0) return;
+      pendingAnalysisRef.current.push(...transientReplayQueueRef.current.splice(0, transientReplayQueueRef.current.length));
+      runAnalysisQueue();
+    }, 60_000);
+
+    return () => window.clearInterval(interval);
+  }, [isOffline, runAnalysisQueue]);
+
+  useEffect(() => {
+    if (backupReminderShownRef.current) return;
+    if (!hasLoadedRef.current) return;
+    if (notes.length === 0) return;
+
+    const raw = localStorage.getItem(BACKUP_RECORDED_KEY);
+    const lastBackup = raw ? Number(raw) : 0;
+    if (!lastBackup || Date.now() - lastBackup > BACKUP_REMINDER_INTERVAL_MS) {
+      backupReminderShownRef.current = true;
+      addToast('Backup reminder: create an encrypted export from Menu > Export', 'info', {
+        label: 'Open',
+        onClick: () => setIsDrawerOpen(true),
+      });
+    }
+  }, [notes.length, addToast]);
 
   useEffect(() => {
     isAiSearchRef.current = isAiSearch;
@@ -165,7 +529,7 @@ function App() {
       if (last.type === 'DELETE') {
         setNotes(n => [last.noteSnapshot, ...n]);
       } else if (last.type === 'TOGGLE_COMPLETE' || last.type === 'ARCHIVE') {
-        setNotes(n => n.map(note => note.id === last.noteSnapshot.id ? last.noteSnapshot : note));
+        setNotes(n => n.map(note => (note.id === last.noteSnapshot.id ? last.noteSnapshot : note)));
       }
       addToast('Action undone', 'success');
       return prev.slice(0, -1);
@@ -178,156 +542,237 @@ function App() {
 
   // --- Tag Filtering ---
   const handleTagClick = useCallback((tag: string) => {
-    setActiveTag(prev => prev === tag ? null : tag);
+    setActiveTag(prev => (prev === tag ? null : tag));
   }, []);
 
   // --- Note Actions ---
-  const processNoteAnalysis = useCallback(async (noteId: string, content: string) => {
-     const analysis = await analyzeNote(content);
-    
-    setNotes((prev) => prev.map(n => {
-      if (n.id === noteId) {
-        return {
-          ...n,
-          title: analysis?.title || 'Quick Note',
-          tags: analysis?.tags || [],
-          type: analysis?.type || NoteType.NOTE,
-          isProcessed: true,
-          ...(analysis?.dueDate ? { dueDate: new Date(analysis.dueDate).getTime() } : {}),
-          ...(analysis?.priority ? { priority: analysis.priority } : {}),
-        };
+  const handleAddNote = useCallback(
+    (content: string, presetType?: NoteType) => {
+      const id = `${Date.now()}${Math.random().toString().slice(2, 6)}`;
+      const now = Date.now();
+      const contentSignature = hashContent(content);
+      const analysisVersion = presetType ? 0 : 1;
+
+      const newNote: Note = {
+        id,
+        content,
+        createdAt: now,
+        isProcessed: !!presetType,
+        analysisVersion,
+        contentHash: contentSignature,
+        analysisState: presetType ? 'complete' : 'pending',
+        ...(presetType ? { type: presetType, title: content.slice(0, 50) } : {}),
+      };
+
+      setNotes(prev => [newNote, ...prev]);
+      addToast('Note captured', 'success');
+
+      if (!presetType) {
+        enqueueAnalysis({
+          noteId: id,
+          content,
+          version: analysisVersion,
+          contentHash: contentSignature,
+          attempts: 0,
+        });
       }
-      return n;
-    }));
-  }, []);
+    },
+    [addToast, enqueueAnalysis]
+  );
 
-  const handleAddNote = useCallback((content: string, presetType?: NoteType) => {
-    const newNote: Note = {
-      id: Date.now().toString(),
-      content,
-      createdAt: Date.now(),
-      isProcessed: !!presetType,
-      ...(presetType ? { type: presetType, title: content.slice(0, 50) } : {}),
-    };
+  const handleBatchNote = useCallback(
+    async (content: string) => {
+      setIsProcessingBatch(true);
+      addToast('AI processing batch...', 'info');
 
-    setNotes((prev) => [newNote, ...prev]);
-    addToast('Note captured', 'success');
+      try {
+        const startedAt = performance.now();
+        incrementMetric('ai_requests');
+        const results = await processBatchEntry(content);
+        recordAiLatency(performance.now() - startedAt);
 
-    // Background Processing (skip if type was preset)
-    if (!presetType) {
-      processNoteAnalysis(newNote.id, content);
-    }
-  }, [addToast, processNoteAnalysis]);
-
-  // Handle "Magic Split" Batch Entry
-  const handleBatchNote = useCallback(async (content: string) => {
-    setIsProcessingBatch(true);
-    addToast('AI processing batch...', 'info');
-    
-    const results = await processBatchEntry(content);
-    
-    if (results.length === 0) {
-        addToast('Failed to split notes. Saving as single note.', 'error');
-        handleAddNote(content);
-        setIsProcessingBatch(false);
-        return;
-    }
-
-    const newNotes: Note[] = results.map(r => ({
-        id: Date.now().toString() + Math.random().toString().slice(2,6),
-        content: r.content as string || content, // Fallback
-        createdAt: Date.now(),
-        isProcessed: true,
-        title: r.title,
-        tags: r.tags,
-        type: r.type
-    }));
-
-    setNotes((prev) => [...newNotes, ...prev]);
-    addToast(`Created ${newNotes.length} notes from batch`, 'success');
-    setIsProcessingBatch(false);
-  }, [addToast, handleAddNote]);
-
-  const handleUpdateNote = useCallback((id: string, newContent: string) => {
-    setNotes((prev) => prev.map(n => {
-      if (n.id === id) {
-        return { ...n, content: newContent };
-      }
-      return n;
-    }));
-    addToast('Note updated', 'success');
-  }, [addToast]);
-
-  const handleDeleteNote = useCallback((id: string) => {
-    const note = notes.find(n => n.id === id);
-    if (note) {
-      pushUndo({ type: 'DELETE', noteSnapshot: { ...note }, timestamp: Date.now() });
-    }
-    setNotes((prev) => prev.filter(n => n.id !== id));
-    // Dismiss any existing undo toasts before showing new one (LIFO undo)
-    setToasts(prev => prev.filter(t => !t.action));
-    addToast('Note deleted', 'info', { label: 'Undo', onClick: handleUndo });
-  }, [notes, pushUndo, addToast, handleUndo]);
-
-  const handleCopyNote = useCallback((content: string) => {
-    navigator.clipboard.writeText(content);
-    addToast('Copied to clipboard', 'success');
-  }, [addToast]);
-
-  const handleToggleComplete = useCallback((id: string) => {
-    const note = notes.find(n => n.id === id);
-    if (note) {
-      pushUndo({ type: 'TOGGLE_COMPLETE', noteSnapshot: { ...note }, timestamp: Date.now() });
-    }
-    setNotes((prev) => prev.map(n => {
-        if (n.id === id) {
-            return { ...n, isCompleted: !n.isCompleted };
+        if (results.length === 0) {
+          addToast('Failed to split notes. Saving as single note.', 'error');
+          handleAddNote(content);
+          return;
         }
-        return n;
-    }));
-  }, [notes, pushUndo]);
 
-  const handleReanalyze = useCallback((id: string) => {
-    const note = notes.find(n => n.id === id);
-    if(note) {
-        setNotes(prev => prev.map(n => n.id === id ? { ...n, isProcessed: false } : n));
-        addToast('Re-analyzing...', 'info');
-        processNoteAnalysis(id, note.content);
-    }
-  }, [notes, addToast, processNoteAnalysis]);
+        const now = Date.now();
+        const newNotes: Note[] = results.map((result, idx) => ({
+          id: `${now}${idx}${Math.random().toString().slice(2, 6)}`,
+          content: (result.content as string) || content,
+          createdAt: now,
+          isProcessed: true,
+          title: result.title,
+          tags: result.tags,
+          type: result.type,
+          analysisVersion: 1,
+          contentHash: hashContent((result.content as string) || content),
+          analysisState: 'complete',
+          lastAnalyzedAt: Date.now(),
+        }));
 
-  // --- Pin & Archive ---
+        setNotes(prev => [...newNotes, ...prev]);
+        setAiErrorMessage(null);
+        setAiDegradedMessage(null);
+        addToast(`Created ${newNotes.length} notes from batch`, 'success');
+      } catch (error) {
+        const mapped = toAiMessage(error);
+        incrementMetric('ai_failures');
+        recordAiErrorCode(mapped.code);
+        setAiErrorMessage(mapped.message);
+        setAiDegradedMessage(mapped.degradedMessage);
+        addToast('Batch AI unavailable. Saved as single note instead.', 'error');
+        handleAddNote(content);
+      } finally {
+        setIsProcessingBatch(false);
+      }
+    },
+    [addToast, handleAddNote]
+  );
+
+  const handleUpdateNote = useCallback(
+    (id: string, newContent: string) => {
+      const existing = notes.find(note => note.id === id);
+      if (!existing) return;
+
+      cancelAnalysisForNote(id);
+
+      const nextVersion = (existing.analysisVersion || 0) + 1;
+      const nextHash = hashContent(newContent);
+
+      setNotes(prev =>
+        prev.map(note =>
+          note.id === id
+            ? {
+                ...note,
+                content: newContent,
+                isProcessed: false,
+                analysisVersion: nextVersion,
+                contentHash: nextHash,
+                analysisState: 'pending',
+              }
+            : note
+        )
+      );
+
+      enqueueAnalysis({
+        noteId: id,
+        content: newContent,
+        version: nextVersion,
+        contentHash: nextHash,
+        attempts: 0,
+      });
+
+      addToast('Note updated', 'success');
+    },
+    [notes, cancelAnalysisForNote, enqueueAnalysis, addToast]
+  );
+
+  const handleDeleteNote = useCallback(
+    (id: string) => {
+      cancelAnalysisForNote(id);
+      const note = notes.find(n => n.id === id);
+      if (note) {
+        pushUndo({ type: 'DELETE', noteSnapshot: { ...note }, timestamp: Date.now() });
+      }
+      setNotes(prev => prev.filter(n => n.id !== id));
+      setToasts(prev => prev.filter(t => !t.action));
+      addToast('Note deleted', 'info', { label: 'Undo', onClick: handleUndo });
+    },
+    [cancelAnalysisForNote, notes, pushUndo, addToast, handleUndo]
+  );
+
+  const handleCopyNote = useCallback(
+    (content: string) => {
+      navigator.clipboard.writeText(content);
+      addToast('Copied to clipboard', 'success');
+    },
+    [addToast]
+  );
+
+  const handleToggleComplete = useCallback(
+    (id: string) => {
+      const note = notes.find(n => n.id === id);
+      if (note) {
+        pushUndo({ type: 'TOGGLE_COMPLETE', noteSnapshot: { ...note }, timestamp: Date.now() });
+      }
+      setNotes(prev => prev.map(n => (n.id === id ? { ...n, isCompleted: !n.isCompleted } : n)));
+    },
+    [notes, pushUndo]
+  );
+
+  const handleReanalyze = useCallback(
+    (id: string) => {
+      const note = notes.find(n => n.id === id);
+      if (!note) return;
+
+      cancelAnalysisForNote(id);
+
+      const version = (note.analysisVersion || 0) + 1;
+      const signature = hashContent(note.content);
+
+      setNotes(prev =>
+        prev.map(n =>
+          n.id === id
+            ? {
+                ...n,
+                isProcessed: false,
+                analysisVersion: version,
+                contentHash: signature,
+                analysisState: 'pending',
+              }
+            : n
+        )
+      );
+      addToast('Re-analyzing...', 'info');
+      enqueueAnalysis({ noteId: id, content: note.content, version, contentHash: signature, attempts: 0 });
+    },
+    [notes, cancelAnalysisForNote, addToast, enqueueAnalysis]
+  );
+
   const handlePinNote = useCallback((id: string) => {
-    setNotes((prev) => prev.map(n => n.id === id ? { ...n, isPinned: !n.isPinned } : n));
+    setNotes(prev => prev.map(n => (n.id === id ? { ...n, isPinned: !n.isPinned } : n)));
   }, []);
 
-  const handleArchiveNote = useCallback((id: string) => {
-    const note = notes.find(n => n.id === id);
-    if (note) {
-      pushUndo({ type: 'ARCHIVE', noteSnapshot: { ...note }, timestamp: Date.now() });
-    }
-    setNotes((prev) => prev.map(n => n.id === id ? { ...n, isArchived: !n.isArchived } : n));
-    setToasts(prev => prev.filter(t => !t.action));
-    addToast(note?.isArchived ? 'Note unarchived' : 'Note archived', 'info', { label: 'Undo', onClick: handleUndo });
-  }, [notes, pushUndo, addToast, handleUndo]);
+  const handleArchiveNote = useCallback(
+    (id: string) => {
+      const note = notes.find(n => n.id === id);
+      if (note) {
+        pushUndo({ type: 'ARCHIVE', noteSnapshot: { ...note }, timestamp: Date.now() });
+      }
+      setNotes(prev => prev.map(n => (n.id === id ? { ...n, isArchived: !n.isArchived } : n)));
+      setToasts(prev => prev.filter(t => !t.action));
+      addToast(note?.isArchived ? 'Note unarchived' : 'Note archived', 'info', { label: 'Undo', onClick: handleUndo });
+    },
+    [notes, pushUndo, addToast, handleUndo]
+  );
 
-  // --- Due Dates & Priority ---
   const handleSetDueDate = useCallback((id: string, date: number | undefined) => {
-    setNotes((prev) => prev.map(n => n.id === id ? { ...n, dueDate: date } : n));
+    setNotes(prev => prev.map(n => (n.id === id ? { ...n, dueDate: date } : n)));
   }, []);
 
   const handleSetPriority = useCallback((id: string, priority: 'urgent' | 'normal' | 'low' | undefined) => {
-    setNotes((prev) => prev.map(n => n.id === id ? { ...n, priority } : n));
+    setNotes(prev => prev.map(n => (n.id === id ? { ...n, priority } : n)));
   }, []);
 
-  // --- Today View ---
   const handleEnterTodayView = useCallback(async () => {
     setViewMode('today');
     setIsLoadingBrief(true);
     setAiBrief(null);
-    const brief = await generateDailyBrief(notes);
-    setAiBrief(brief);
-    setIsLoadingBrief(false);
+    try {
+      const brief = await generateDailyBrief(notes);
+      setAiBrief(brief);
+      setAiErrorMessage(null);
+      setAiDegradedMessage(null);
+    } catch (error) {
+      const mapped = toAiMessage(error);
+      setAiErrorMessage(mapped.message);
+      setAiDegradedMessage(mapped.degradedMessage);
+      setAiBrief('AI briefing unavailable right now.');
+    } finally {
+      setIsLoadingBrief(false);
+    }
   }, [notes]);
 
   const hasOverdueTasks = useMemo(() => {
@@ -339,46 +784,46 @@ function App() {
     });
   }, [notes]);
 
-  const handleShareTodayBrief = useCallback(async (
-    brief: string,
-    stats: { overdue: number; dueToday: number; capturedToday: number }
-  ) => {
-    const shareUrl = `${window.location.origin}${window.location.pathname}?via=daily_brief_share`;
-    const summary = `Overdue: ${stats.overdue} | Due today: ${stats.dueToday} | Captured today: ${stats.capturedToday}`;
-    const shareText = `My PocketBrain daily brief:\n${brief}\n\n${summary}\n\nTry PocketBrain: ${shareUrl}`;
+  const handleShareTodayBrief = useCallback(
+    async (brief: string, stats: { overdue: number; dueToday: number; capturedToday: number }) => {
+      const shareUrl = `${window.location.origin}${window.location.pathname}?via=daily_brief_share`;
+      const summary = `Overdue: ${stats.overdue} | Due today: ${stats.dueToday} | Captured today: ${stats.capturedToday}`;
+      const shareText = `My PocketBrain daily brief:\n${brief}\n\n${summary}\n\nTry PocketBrain: ${shareUrl}`;
 
-    trackEvent('daily_brief_share_clicked', stats);
+      trackEvent('daily_brief_share_clicked', stats);
 
-    if (navigator.share) {
-      try {
-        await navigator.share({
-          title: 'My PocketBrain Daily Brief',
-          text: shareText,
-          url: shareUrl,
-        });
-        addToast('Daily brief shared', 'success');
-        return;
-      } catch (error) {
-        if (error instanceof DOMException && error.name === 'AbortError') {
-          addToast('Share canceled', 'info');
+      if (navigator.share) {
+        try {
+          await navigator.share({
+            title: 'My PocketBrain Daily Brief',
+            text: shareText,
+            url: shareUrl,
+          });
+          addToast('Daily brief shared', 'success');
           return;
+        } catch (error) {
+          if (error instanceof DOMException && error.name === 'AbortError') {
+            addToast('Share canceled', 'info');
+            return;
+          }
         }
       }
-    }
 
-    try {
-      await navigator.clipboard.writeText(shareText);
-      addToast('Brief copied — ready to paste', 'success');
-    } catch {
-      addToast('Unable to share brief on this device', 'error');
-    }
-  }, [addToast]);
+      try {
+        await navigator.clipboard.writeText(shareText);
+        addToast('Brief copied — ready to paste', 'success');
+      } catch {
+        addToast('Unable to share brief on this device', 'error');
+      }
+    },
+    [addToast]
+  );
 
   const handleExportData = useCallback(() => {
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(notes, null, 2));
+    const dataStr = `data:text/json;charset=utf-8,${encodeURIComponent(JSON.stringify(notes, null, 2))}`;
     const downloadAnchorNode = document.createElement('a');
-    downloadAnchorNode.setAttribute("href", dataStr);
-    downloadAnchorNode.setAttribute("download", "pocketbrain_backup.json");
+    downloadAnchorNode.setAttribute('href', dataStr);
+    downloadAnchorNode.setAttribute('download', 'pocketbrain_backup.json');
     document.body.appendChild(downloadAnchorNode);
     downloadAnchorNode.click();
     downloadAnchorNode.remove();
@@ -388,11 +833,11 @@ function App() {
   const handleClearData = useCallback(() => {
     setNotes([]);
     localStorage.removeItem(STORAGE_KEY);
-    lastSerializedNotesRef.current = null;
+    previousNotesRef.current = [];
+    resetNotesStore().catch(error => console.error('Failed to clear IndexedDB store', error));
     addToast('All data cleared', 'info');
   }, [addToast]);
 
-  // --- Import ---
   const handleImportNotes = useCallback((newNotes: Note[]) => {
     setNotes(prev => {
       const existingIds = new Set(prev.map(n => n.id));
@@ -401,45 +846,69 @@ function App() {
     });
   }, []);
 
-  // --- Search Logic ---
-  const handleSearch = useCallback(async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!searchQuery.trim()) return;
+  const handleSearch = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (!searchQuery.trim()) return;
 
-    if (isAiSearch) {
-      setIsAiThinking(true);
-      setAiAnswer(null);
-      const answer = await askMyNotes(searchQuery, notes);
-      setAiAnswer(answer);
-      setIsAiThinking(false);
+      if (isAiSearch) {
+        setIsAiThinking(true);
+        setAiAnswer(null);
+        try {
+          const answer = await askMyNotes(searchQuery, notes);
+          setAiAnswer(answer);
+          setAiErrorMessage(null);
+          setAiDegradedMessage(null);
+        } catch (error) {
+          const mapped = toAiMessage(error);
+          setAiErrorMessage(mapped.message);
+          setAiDegradedMessage(mapped.degradedMessage);
+          setAiAnswer('AI search is temporarily unavailable.');
+        } finally {
+          setIsAiThinking(false);
+        }
+      }
+    },
+    [searchQuery, isAiSearch, notes]
+  );
+
+  const indexedViews = useMemo(() => {
+    const searchText = new Map<string, string>();
+    const tags = new Map<string, Set<string>>();
+
+    for (const note of notes) {
+      searchText.set(
+        note.id,
+        `${note.content} ${note.title || ''} ${(note.tags || []).join(' ')}`.toLowerCase()
+      );
+      for (const tag of note.tags || []) {
+        const key = tag.toLowerCase();
+        if (!tags.has(key)) tags.set(key, new Set());
+        tags.get(key)!.add(note.id);
+      }
     }
-  }, [searchQuery, isAiSearch, notes]);
+
+    return { searchText, tags };
+  }, [notes]);
 
   const filteredNotes = useMemo(() => {
     const activeTagLower = activeTag?.toLowerCase() || null;
-    const lowerQ = !isAiSearch && searchQuery ? searchQuery.toLowerCase() : null;
+    const lowerQ = !isAiSearch && debouncedSearchQuery ? debouncedSearchQuery.toLowerCase() : null;
+    const activeTagSet = activeTagLower ? indexedViews.tags.get(activeTagLower) : null;
 
     return notes
       .filter(note => {
-        // Archive filter: hide archived unless viewing archived
         if (!showArchived && note.isArchived) return false;
         if (showArchived && !note.isArchived) return false;
         if (filter !== 'ALL' && note.type !== filter) return false;
-        if (activeTagLower && !note.tags?.some(t => t.toLowerCase() === activeTagLower)) return false;
-        if (lowerQ) {
-          return (
-            note.content.toLowerCase().includes(lowerQ) ||
-            note.title?.toLowerCase().includes(lowerQ) ||
-            note.tags?.some(t => t.toLowerCase().includes(lowerQ))
-          );
-        }
+
+        if (activeTagSet && !activeTagSet.has(note.id)) return false;
+        if (lowerQ && !(indexedViews.searchText.get(note.id) || '').includes(lowerQ)) return false;
         return true;
       })
       .sort((a, b) => {
-        // Pinned notes first
         if (a.isPinned && !b.isPinned) return -1;
         if (!a.isPinned && b.isPinned) return 1;
-        // For TASK filter: sort by due date (overdue first, then upcoming)
         if (filter === NoteType.TASK) {
           const aDue = a.dueDate ?? Infinity;
           const bDue = b.dueDate ?? Infinity;
@@ -447,31 +916,76 @@ function App() {
         }
         return 0;
       });
-  }, [notes, showArchived, filter, activeTag, isAiSearch, searchQuery]);
+  }, [notes, showArchived, filter, activeTag, isAiSearch, debouncedSearchQuery, indexedViews]);
 
-  const visibleNotes = useMemo(
-    () => filteredNotes.slice(0, visibleNotesCount),
-    [filteredNotes, visibleNotesCount]
-  );
+  const isVirtualized = viewMode === 'all' && filteredNotes.length > LARGE_DATASET_THRESHOLD;
 
-  const hasMoreVisibleNotes = visibleNotesCount < filteredNotes.length;
+  const visibleNotes = useMemo(() => {
+    if (isVirtualized) {
+      const fallbackEnd = Math.min(filteredNotes.length, 40);
+      const start = virtualRange.start;
+      const end = virtualRange.end > 0 ? virtualRange.end : fallbackEnd;
+      return filteredNotes.slice(start, end);
+    }
+    return filteredNotes.slice(0, visibleNotesCount);
+  }, [isVirtualized, filteredNotes, virtualRange, visibleNotesCount]);
+
+  const virtualTopSpacing = isVirtualized ? virtualRange.start * VIRTUAL_ROW_HEIGHT : 0;
+  const virtualBottomSpacing = isVirtualized
+    ? Math.max(0, (filteredNotes.length - (virtualRange.end || visibleNotes.length)) * VIRTUAL_ROW_HEIGHT)
+    : 0;
+
+  const hasMoreVisibleNotes = !isVirtualized && visibleNotesCount < filteredNotes.length;
 
   useEffect(() => {
     setVisibleNotesCount(INITIAL_VISIBLE_NOTES);
-  }, [filter, activeTag, searchQuery, showArchived, isAiSearch, viewMode]);
+  }, [filter, activeTag, debouncedSearchQuery, showArchived, isAiSearch, viewMode]);
 
   useEffect(() => {
+    if (isVirtualized) return;
     setVisibleNotesCount(prev => Math.min(prev, Math.max(filteredNotes.length, INITIAL_VISIBLE_NOTES)));
-  }, [filteredNotes.length]);
+  }, [filteredNotes.length, isVirtualized]);
 
   useEffect(() => {
+    if (!isVirtualized) {
+      setVirtualRange({ start: 0, end: 0 });
+      return;
+    }
+
+    const updateRange = () => {
+      const listElement = notesListRef.current;
+      if (!listElement) return;
+
+      const listTop = listElement.getBoundingClientRect().top + window.scrollY;
+      const viewportTop = window.scrollY;
+      const relativeTop = Math.max(0, viewportTop - listTop);
+
+      const start = Math.max(0, Math.floor(relativeTop / VIRTUAL_ROW_HEIGHT) - VIRTUAL_OVERSCAN);
+      const visibleRows = Math.ceil(window.innerHeight / VIRTUAL_ROW_HEIGHT) + VIRTUAL_OVERSCAN * 2;
+      const end = Math.min(filteredNotes.length, start + visibleRows);
+
+      setVirtualRange({ start, end });
+    };
+
+    updateRange();
+    window.addEventListener('scroll', updateRange, { passive: true });
+    window.addEventListener('resize', updateRange);
+
+    return () => {
+      window.removeEventListener('scroll', updateRange);
+      window.removeEventListener('resize', updateRange);
+    };
+  }, [isVirtualized, filteredNotes.length]);
+
+  useEffect(() => {
+    if (isVirtualized) return;
     if (viewMode !== 'all') return;
     if (!hasMoreVisibleNotes) return;
     const sentinel = loadMoreRef.current;
     if (!sentinel) return;
 
     const observer = new IntersectionObserver(
-      (entries) => {
+      entries => {
         const entry = entries[0];
         if (!entry?.isIntersecting) return;
         setVisibleNotesCount(prev => Math.min(prev + VISIBLE_NOTES_STEP, filteredNotes.length));
@@ -481,7 +995,7 @@ function App() {
 
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasMoreVisibleNotes, filteredNotes.length, viewMode]);
+  }, [hasMoreVisibleNotes, filteredNotes.length, viewMode, isVirtualized]);
 
   const handleOpenDrawer = useCallback(() => setIsDrawerOpen(true), []);
   const handleCloseDrawer = useCallback(() => setIsDrawerOpen(false), []);
@@ -514,82 +1028,102 @@ function App() {
     setActiveTag(null);
   }, []);
 
+  const handleConnectAI = useCallback(
+    async (provider: AIProvider, apiKey: string) => {
+      const status = await connectAIProvider(provider, apiKey);
+      setAiAuth(status);
+      setAiErrorMessage(null);
+      setAiDegradedMessage(null);
+      pendingAnalysisRef.current.push(...deferredAnalysisRef.current.splice(0, deferredAnalysisRef.current.length));
+      runAnalysisQueue();
+    },
+    [runAnalysisQueue]
+  );
+
+  const handleDisconnectAI = useCallback(async () => {
+    const status = await disconnectAIProvider();
+    setAiAuth(status);
+    setAiDegradedMessage('Capture-only mode — AI key disconnected.');
+  }, []);
+
   return (
     <ThemeProvider>
-    <div className="min-h-screen bg-subtle dark:bg-zinc-900 relative overflow-hidden transition-colors duration-200">
+      <div className="min-h-screen bg-subtle dark:bg-zinc-900 relative overflow-hidden transition-colors duration-200">
+        <ToastContainer toasts={toasts} removeToast={removeToast} />
 
-      <ToastContainer toasts={toasts} removeToast={removeToast} />
+        <Drawer
+          isOpen={isDrawerOpen}
+          onClose={handleCloseDrawer}
+          notes={notes}
+          onExport={handleExportData}
+          onClearData={handleClearData}
+          onTagClick={handleTagClick}
+          onShowArchived={handleShowArchived}
+          showArchived={showArchived}
+          onExitArchived={handleExitArchived}
+          onImportNotes={handleImportNotes}
+          addToast={addToast}
+          aiAuth={aiAuth}
+          aiErrorMessage={aiErrorMessage}
+          onConnectAI={handleConnectAI}
+          onDisconnectAI={handleDisconnectAI}
+          onBackupRecorded={recordBackupCompletion}
+        />
 
-      <Drawer
-        isOpen={isDrawerOpen}
-        onClose={handleCloseDrawer}
-        notes={notes}
-        onExport={handleExportData}
-        onClearData={handleClearData}
-        onTagClick={handleTagClick}
-        onShowArchived={handleShowArchived}
-        showArchived={showArchived}
-        onExitArchived={handleExitArchived}
-        onImportNotes={handleImportNotes}
-        addToast={addToast}
-      />
-
-      {/* Processing Overlay */}
-      {isProcessingBatch && (
-        <div className="fixed inset-0 z-[70] bg-white/80 dark:bg-zinc-900/80 backdrop-blur-sm flex flex-col items-center justify-center animate-fade-in">
+        {isProcessingBatch && (
+          <div className="fixed inset-0 z-[70] bg-white/80 dark:bg-zinc-900/80 backdrop-blur-sm flex flex-col items-center justify-center animate-fade-in">
             <div className="bg-white dark:bg-zinc-800 p-6 rounded-2xl shadow-xl border border-violet-100 dark:border-zinc-700 flex flex-col items-center">
-                <BrainCircuit className="w-10 h-10 text-brand-600 animate-pulse mb-4" />
-                <h3 className="text-lg font-bold text-zinc-800 dark:text-zinc-100">Organizing thoughts...</h3>
-                <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-2">Splitting your batch entry into atomic notes.</p>
-            </div>
-        </div>
-      )}
-
-      {/* Header */}
-      <header className="sticky top-0 z-40 bg-white/80 dark:bg-zinc-900/80 backdrop-blur-xl border-b border-zinc-200/50 dark:border-zinc-700/50 pt-safe transition-colors duration-200">
-        <div className="max-w-2xl mx-auto px-4 py-3">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2.5">
-              <div className="bg-brand-600 text-white p-2 rounded-xl shadow-lg shadow-brand-600/20">
-                <Zap className="w-4 h-4 fill-current" />
-              </div>
-              <h1 className="text-lg font-bold text-zinc-800 dark:text-zinc-100 tracking-tight">PocketBrain</h1>
-            </div>
-            <div className="flex items-center gap-1">
-              <button
-                onClick={handleTodayToggle}
-                className={`relative p-2 rounded-full transition-colors flex items-center gap-1.5 ${
-                  viewMode === 'today'
-                    ? 'bg-brand-100 dark:bg-brand-900/50 text-brand-700 dark:text-brand-300'
-                    : 'text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800'
-                }`}
-                title="Today view"
-              >
-                <Calendar className="w-4 h-4" />
-                <span className="text-xs font-semibold hidden sm:inline">Today</span>
-                {hasOverdueTasks && viewMode !== 'today' && (
-                  <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-rose-500 rounded-full border-2 border-white dark:border-zinc-900" />
-                )}
-              </button>
-              <button
-                  onClick={handleOpenDrawer}
-                  className="p-2 -mr-2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-full transition-colors"
-              >
-                <Menu className="w-5 h-5" />
-              </button>
+              <BrainCircuit className="w-10 h-10 text-brand-600 animate-pulse mb-4" />
+              <h3 className="text-lg font-bold text-zinc-800 dark:text-zinc-100">Organizing thoughts...</h3>
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-2">Splitting your batch entry into atomic notes.</p>
             </div>
           </div>
+        )}
 
-          <div className="relative group">
-             <div className={`absolute inset-0 rounded-xl transition-all duration-300 ${isAiSearch ? 'bg-brand-500/10 blur-md' : 'bg-transparent'}`} />
-             <form onSubmit={handleSearch} className="relative flex items-center">
+        <header className="sticky top-0 z-40 bg-white/80 dark:bg-zinc-900/80 backdrop-blur-xl border-b border-zinc-200/50 dark:border-zinc-700/50 pt-safe transition-colors duration-200">
+          <div className="max-w-2xl mx-auto px-4 py-3">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2.5">
+                <div className="bg-brand-600 text-white p-2 rounded-xl shadow-lg shadow-brand-600/20">
+                  <Zap className="w-4 h-4 fill-current" />
+                </div>
+                <h1 className="text-lg font-bold text-zinc-800 dark:text-zinc-100 tracking-tight">PocketBrain</h1>
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={handleTodayToggle}
+                  className={`relative p-2 rounded-full transition-colors flex items-center gap-1.5 ${
+                    viewMode === 'today'
+                      ? 'bg-brand-100 dark:bg-brand-900/50 text-brand-700 dark:text-brand-300'
+                      : 'text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                  }`}
+                  title="Today view"
+                >
+                  <Calendar className="w-4 h-4" />
+                  <span className="text-xs font-semibold hidden sm:inline">Today</span>
+                  {hasOverdueTasks && viewMode !== 'today' && (
+                    <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-rose-500 rounded-full border-2 border-white dark:border-zinc-900" />
+                  )}
+                </button>
+                <button
+                  onClick={handleOpenDrawer}
+                  className="p-2 -mr-2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-full transition-colors"
+                >
+                  <Menu className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="relative group">
+              <div className={`absolute inset-0 rounded-xl transition-all duration-300 ${isAiSearch ? 'bg-brand-500/10 blur-md' : 'bg-transparent'}`} />
+              <form onSubmit={handleSearch} className="relative flex items-center">
                 <Search className={`absolute left-3.5 w-4 h-4 ${isAiSearch ? 'text-brand-600' : 'text-zinc-400'}`} />
                 <input
                   ref={searchInputRef}
                   type="text"
                   value={searchQuery}
                   onChange={handleSearchInputChange}
-                  placeholder={isAiSearch ? "Ask your second brain..." : "Search your thoughts..."}
+                  placeholder={isAiSearch ? 'Ask your second brain...' : 'Search your thoughts...'}
                   className={`w-full pl-10 pr-20 py-3 rounded-xl text-sm font-medium transition-all outline-none border shadow-sm ${
                     isAiSearch
                       ? 'bg-white dark:bg-zinc-800 border-brand-200 dark:border-brand-700 text-brand-900 dark:text-brand-100 placeholder-brand-300 dark:placeholder-brand-500 focus:ring-2 focus:ring-brand-500/20'
@@ -608,159 +1142,173 @@ function App() {
                   <Sparkles className={`w-3 h-3 ${isAiSearch ? 'fill-brand-700' : ''}`} />
                   AI
                 </button>
-             </form>
-          </div>
-
-          {!isAiSearch && !aiAnswer && (
-            <div className="flex gap-2 mt-4 overflow-x-auto no-scrollbar pb-1">
-              {(['ALL', NoteType.NOTE, NoteType.TASK, NoteType.IDEA] as const).map((t) => (
-                <button
-                  key={t}
-                  onClick={() => setFilter(t)}
-                  className={`px-4 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition-all border ${
-                    filter === t
-                      ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 border-zinc-900 dark:border-zinc-100 shadow-md'
-                      : 'bg-white dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border-zinc-200 dark:border-zinc-700 hover:border-zinc-300 dark:hover:border-zinc-600 hover:bg-zinc-50 dark:hover:bg-zinc-700'
-                  }`}
-                >
-                  {t === 'ALL' ? 'All' : t.charAt(0) + t.slice(1).toLowerCase() + 's'}
-                </button>
-              ))}
+              </form>
             </div>
-          )}
 
-          {activeTag && (
-            <div className="flex items-center gap-2 mt-3">
-              <span className="inline-flex items-center gap-1.5 bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-400 rounded-full px-3 py-1 text-xs font-medium">
-                #{activeTag}
-                <button
-                  onClick={() => setActiveTag(null)}
-                  className="ml-0.5 hover:text-violet-900 transition-colors"
-                >
-                  <X className="w-3 h-3" />
-                </button>
-              </span>
-            </div>
-          )}
-        </div>
-      </header>
-
-      {/* Offline Banner */}
-      {isOffline && (
-        <div className="bg-amber-50 dark:bg-amber-900/20 border-b border-amber-200 dark:border-amber-800/50 transition-colors">
-          <div className="max-w-2xl mx-auto px-4 py-2 flex items-center gap-2 text-amber-700 dark:text-amber-400 text-xs font-medium">
-            <WifiOff className="w-3.5 h-3.5" />
-            Offline — notes saved locally
-          </div>
-        </div>
-      )}
-
-      <main className="max-w-2xl mx-auto px-4 py-6 pb-40 space-y-6">
-        <ErrorBoundary>
-        {viewMode === 'today' ? (
-          <TodayView
-            notes={notes}
-            onUpdate={handleUpdateNote}
-            onDelete={handleDeleteNote}
-            onCopy={handleCopyNote}
-            onToggleComplete={handleToggleComplete}
-            onReanalyze={handleReanalyze}
-            onPin={handlePinNote}
-            onArchive={handleArchiveNote}
-            onSetDueDate={handleSetDueDate}
-            onSetPriority={handleSetPriority}
-            onTagClick={handleTagClick}
-            aiBrief={aiBrief}
-            isLoadingBrief={isLoadingBrief}
-            onShareBrief={handleShareTodayBrief}
-          />
-        ) : (
-          <>
-            {showArchived && (
-              <div className="flex items-center justify-between bg-zinc-100 dark:bg-zinc-800 rounded-xl px-4 py-3 animate-fade-in">
-                <div className="flex items-center gap-2 text-zinc-600 dark:text-zinc-300 text-sm font-medium">
-                  <Archive className="w-4 h-4" />
-                  Viewing archived notes
-                </div>
-                <button
-                  onClick={handleExitArchived}
-                  className="text-xs font-medium text-brand-600 hover:underline"
-                >
-                  Back to notes
-                </button>
-              </div>
-            )}
-
-            {isAiSearch && (isAiThinking || aiAnswer) && (
-              <div className="bg-white dark:bg-zinc-800 rounded-2xl p-6 shadow-lg shadow-brand-500/5 border border-brand-100 dark:border-zinc-700 animate-fade-in transition-colors duration-200">
-                <div className="flex items-center gap-2 mb-3 text-brand-600 font-bold text-xs uppercase tracking-wider">
-                  <Sparkles className="w-4 h-4" />
-                  Insight
-                </div>
-                {isAiThinking ? (
-                   <div className="space-y-2">
-                     <div className="h-4 bg-brand-50 dark:bg-brand-900/30 rounded w-3/4 animate-pulse"></div>
-                     <div className="h-4 bg-brand-50 dark:bg-brand-900/30 rounded w-1/2 animate-pulse delay-75"></div>
-                   </div>
-                ) : (
-                  <p className="text-zinc-700 dark:text-zinc-300 text-sm leading-relaxed">{aiAnswer}</p>
-                )}
-              </div>
-            )}
-
-            {notes.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-20 text-zinc-400 animate-fade-in">
-                <div className="bg-white dark:bg-zinc-800 p-6 rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] dark:shadow-[0_8px_30px_rgb(0,0,0,0.2)] mb-6">
-                  <Sparkles className="w-12 h-12 text-brand-200 dark:text-brand-400" />
-                </div>
-                <h3 className="text-lg font-semibold text-zinc-700 dark:text-zinc-200 mb-2">Your mind is clear</h3>
-                <p className="text-sm text-zinc-400 text-center max-w-xs leading-relaxed">
-                  Capture ideas, tasks, and notes instantly.
-                  <br/>Use <span className="text-violet-500 font-bold">Magic Batch</span> to split brain dumps.
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {visibleNotes.map(note => (
-                  <NoteCard
-                    key={note.id}
-                    note={note}
-                    onUpdate={handleUpdateNote}
-                    onDelete={handleDeleteNote}
-                    onCopy={handleCopyNote}
-                    onToggleComplete={handleToggleComplete}
-                    onReanalyze={handleReanalyze}
-                    onTagClick={handleTagClick}
-                    onPin={handlePinNote}
-                    onArchive={handleArchiveNote}
-                    onSetDueDate={handleSetDueDate}
-                    onSetPriority={handleSetPriority}
-                  />
+            {!isAiSearch && !aiAnswer && (
+              <div className="flex gap-2 mt-4 overflow-x-auto no-scrollbar pb-1">
+                {(['ALL', NoteType.NOTE, NoteType.TASK, NoteType.IDEA] as const).map(t => (
+                  <button
+                    key={t}
+                    onClick={() => setFilter(t)}
+                    className={`px-4 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition-all border ${
+                      filter === t
+                        ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 border-zinc-900 dark:border-zinc-100 shadow-md'
+                        : 'bg-white dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border-zinc-200 dark:border-zinc-700 hover:border-zinc-300 dark:hover:border-zinc-600 hover:bg-zinc-50 dark:hover:bg-zinc-700'
+                    }`}
+                  >
+                    {t === 'ALL' ? 'All' : t.charAt(0) + t.slice(1).toLowerCase() + 's'}
+                  </button>
                 ))}
-                {hasMoreVisibleNotes && (
-                  <div ref={loadMoreRef} className="py-3 text-center">
-                    <span className="text-[11px] font-medium text-zinc-400">
-                      Loading more notes...
-                    </span>
-                  </div>
-                )}
-                {filteredNotes.length === 0 && (
-                  <div className="text-center py-12">
-                     <p className="text-zinc-400 text-sm">No notes found matching your criteria.</p>
-                     <button onClick={handleClearFilters} className="mt-2 text-brand-600 text-xs font-medium hover:underline">Clear filters</button>
-                  </div>
-                )}
               </div>
             )}
-          </>
-        )}
-        </ErrorBoundary>
-      </main>
 
-      <ErrorBoundary>
-        <InputArea ref={inputAreaRef} onSave={handleAddNote} onBatchSave={handleBatchNote} />
-      </ErrorBoundary>
-    </div>
+            {activeTag && (
+              <div className="flex items-center gap-2 mt-3">
+                <span className="inline-flex items-center gap-1.5 bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-400 rounded-full px-3 py-1 text-xs font-medium">
+                  #{activeTag}
+                  <button onClick={() => setActiveTag(null)} className="ml-0.5 hover:text-violet-900 transition-colors">
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              </div>
+            )}
+          </div>
+        </header>
+
+        {isOffline && (
+          <div className="bg-amber-50 dark:bg-amber-900/20 border-b border-amber-200 dark:border-amber-800/50 transition-colors">
+            <div className="max-w-2xl mx-auto px-4 py-2 flex items-center gap-2 text-amber-700 dark:text-amber-400 text-xs font-medium">
+              <WifiOff className="w-3.5 h-3.5" />
+              Offline — notes saved locally
+            </div>
+          </div>
+        )}
+
+        {aiDegradedMessage && (
+          <div className="bg-rose-50 dark:bg-rose-900/20 border-b border-rose-200 dark:border-rose-800/50 transition-colors">
+            <div className="max-w-2xl mx-auto px-4 py-2 text-xs font-medium text-rose-700 dark:text-rose-300">
+              {aiDegradedMessage}
+            </div>
+          </div>
+        )}
+
+        <main className="max-w-2xl mx-auto px-4 py-6 pb-40 space-y-6">
+          <ErrorBoundary>
+            {viewMode === 'today' ? (
+              <TodayView
+                notes={notes}
+                onUpdate={handleUpdateNote}
+                onDelete={handleDeleteNote}
+                onCopy={handleCopyNote}
+                onToggleComplete={handleToggleComplete}
+                onReanalyze={handleReanalyze}
+                onPin={handlePinNote}
+                onArchive={handleArchiveNote}
+                onSetDueDate={handleSetDueDate}
+                onSetPriority={handleSetPriority}
+                onTagClick={handleTagClick}
+                aiBrief={aiBrief}
+                isLoadingBrief={isLoadingBrief}
+                onShareBrief={handleShareTodayBrief}
+              />
+            ) : (
+              <>
+                {showArchived && (
+                  <div className="flex items-center justify-between bg-zinc-100 dark:bg-zinc-800 rounded-xl px-4 py-3 animate-fade-in">
+                    <div className="flex items-center gap-2 text-zinc-600 dark:text-zinc-300 text-sm font-medium">
+                      <Archive className="w-4 h-4" />
+                      Viewing archived notes
+                    </div>
+                    <button onClick={handleExitArchived} className="text-xs font-medium text-brand-600 hover:underline">
+                      Back to notes
+                    </button>
+                  </div>
+                )}
+
+                {isAiSearch && (isAiThinking || aiAnswer) && (
+                  <div className="bg-white dark:bg-zinc-800 rounded-2xl p-6 shadow-lg shadow-brand-500/5 border border-brand-100 dark:border-zinc-700 animate-fade-in transition-colors duration-200">
+                    <div className="flex items-center gap-2 mb-3 text-brand-600 font-bold text-xs uppercase tracking-wider">
+                      <Sparkles className="w-4 h-4" />
+                      Insight
+                    </div>
+                    {isAiThinking ? (
+                      <div className="space-y-2">
+                        <div className="h-4 bg-brand-50 dark:bg-brand-900/30 rounded w-3/4 animate-pulse"></div>
+                        <div className="h-4 bg-brand-50 dark:bg-brand-900/30 rounded w-1/2 animate-pulse delay-75"></div>
+                      </div>
+                    ) : (
+                      <p className="text-zinc-700 dark:text-zinc-300 text-sm leading-relaxed">{aiAnswer}</p>
+                    )}
+                  </div>
+                )}
+
+                {notes.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-20 text-zinc-400 animate-fade-in">
+                    <div className="bg-white dark:bg-zinc-800 p-6 rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] dark:shadow-[0_8px_30px_rgb(0,0,0,0.2)] mb-6">
+                      <Sparkles className="w-12 h-12 text-brand-200 dark:text-brand-400" />
+                    </div>
+                    <h3 className="text-lg font-semibold text-zinc-700 dark:text-zinc-200 mb-2">Your mind is clear</h3>
+                    <p className="text-sm text-zinc-400 text-center max-w-xs leading-relaxed">
+                      Capture ideas, tasks, and notes instantly.
+                      <br />
+                      Use <span className="text-violet-500 font-bold">Magic Batch</span> to split brain dumps.
+                    </p>
+                  </div>
+                ) : (
+                  <div ref={notesListRef} className="space-y-4">
+                    {isVirtualized && virtualTopSpacing > 0 && (
+                      <div style={{ height: `${virtualTopSpacing}px` }} aria-hidden="true" />
+                    )}
+
+                    {visibleNotes.map(note => (
+                      <NoteCard
+                        key={note.id}
+                        note={note}
+                        onUpdate={handleUpdateNote}
+                        onDelete={handleDeleteNote}
+                        onCopy={handleCopyNote}
+                        onToggleComplete={handleToggleComplete}
+                        onReanalyze={handleReanalyze}
+                        onTagClick={handleTagClick}
+                        onPin={handlePinNote}
+                        onArchive={handleArchiveNote}
+                        onSetDueDate={handleSetDueDate}
+                        onSetPriority={handleSetPriority}
+                      />
+                    ))}
+
+                    {isVirtualized && virtualBottomSpacing > 0 && (
+                      <div style={{ height: `${virtualBottomSpacing}px` }} aria-hidden="true" />
+                    )}
+
+                    {hasMoreVisibleNotes && (
+                      <div ref={loadMoreRef} className="py-3 text-center">
+                        <span className="text-[11px] font-medium text-zinc-400">Loading more notes...</span>
+                      </div>
+                    )}
+
+                    {filteredNotes.length === 0 && (
+                      <div className="text-center py-12">
+                        <p className="text-zinc-400 text-sm">No notes found matching your criteria.</p>
+                        <button onClick={handleClearFilters} className="mt-2 text-brand-600 text-xs font-medium hover:underline">
+                          Clear filters
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </ErrorBoundary>
+        </main>
+
+        <ErrorBoundary>
+          <InputArea ref={inputAreaRef} onSave={handleAddNote} onBatchSave={handleBatchNote} />
+        </ErrorBoundary>
+
+        {import.meta.env.DEV && <DiagnosticsPanel />}
+      </div>
     </ThemeProvider>
   );
 }

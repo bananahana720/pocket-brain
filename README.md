@@ -2,7 +2,7 @@
 
 **Your instant-access personal copilot.**
 
-PocketBrain is an AI-powered note-taking app that captures your thoughts, tasks, and ideas -- then automatically organizes them for you. Type or speak a note, and Gemini AI classifies it, generates a title, extracts due dates, assigns priority, and tags it. Dump an entire stream of consciousness and let Magic Batch split it into atomic notes. Ask questions about your own notes with AI search. All data stays in your browser via localStorage.
+PocketBrain is an AI-powered note-taking app that captures your thoughts, tasks, and ideas -- then automatically organizes them for you. Type or speak a note, and AI classifies it, generates a title, extracts due dates, assigns priority, and tags it. Dump an entire stream of consciousness and let Magic Batch split it into atomic notes. Ask questions about your own notes with AI search. Notes are persisted locally in IndexedDB with migration from legacy localStorage.
 
 <!-- screenshot -->
 
@@ -50,7 +50,7 @@ PocketBrain is an AI-powered note-taking app that captures your thoughts, tasks,
 - **Export** -- JSON, Markdown, or CSV
 - **Import** -- JSON file import with validation and deduplication
 - **Dark mode** -- auto-detects system preference, manual toggle in drawer
-- **Offline support** -- notes save to localStorage, offline banner when disconnected
+- **Offline support** -- notes save locally in IndexedDB, offline banner when disconnected
 - **Undo** -- undo delete, complete, and archive actions (Cmd+Z or toast button)
 
 ---
@@ -62,10 +62,10 @@ PocketBrain is an AI-powered note-taking app that captures your thoughts, tasks,
 | Framework | React 19 |
 | Language | TypeScript 5.8 |
 | Build Tool | Vite 6 |
-| AI | Google Gemini 2.5 Flash (`@google/genai`) or OpenRouter |
+| AI | Cloudflare Worker proxy + Gemini/OpenRouter providers |
 | Icons | Lucide React |
 | Styling | Tailwind CSS |
-| Storage | Browser localStorage |
+| Storage | Browser IndexedDB (+ operation log + snapshots) |
 
 ---
 
@@ -91,21 +91,50 @@ npm install
 
 Create a `.env.local` file in the project root.
 
-**Option A: Google Gemini (default)**
+**Recommended production setup (secure):**
 
+1. Deploy the Cloudflare Worker in `/worker` and route `/api/*` to it.
+2. Set Worker secret: `KEY_ENCRYPTION_SECRET`.
+3. Create/connect your API key from the in-app drawer (`Menu > AI Security`).
+
+Worker bootstrap commands:
+
+```bash
+export CLOUDFLARE_API_TOKEN=...
+export CLOUDFLARE_ACCOUNT_ID=...
+export KEY_ENCRYPTION_SECRET="$(openssl rand -hex 32)"
+npm run worker:bootstrap
+```
+
+In this mode, provider keys are not stored in frontend code or browser storage.
+
+**Local development fallback (optional):**
+
+Option A: Google Gemini
 ```
 GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
-**Option B: OpenRouter**
+Option B: OpenRouter
 
 ```
 OPENROUTER_API_KEY=your_openrouter_api_key_here
 ```
 
-If both keys are present, OpenRouter takes priority. The app uses the `google/gemini-2.5-flash` model by default -- OpenRouter routes this to the same Gemini model via their API, or you can modify the model string in `services/geminiService.ts` to use any OpenRouter-supported model.
+If both keys are present, OpenRouter takes priority. These env keys are used only for local development fallback; production should use the Worker proxy path.
 
-The Vite config reads these variables and injects them at build time.
+**Local proxy simulation (recommended for testing secure path):**
+
+```bash
+cp worker/.dev.vars.example worker/.dev.vars
+npm run worker:dev
+```
+
+In another terminal:
+
+```bash
+npm run dev:proxy
+```
 
 ### Run
 
@@ -141,7 +170,12 @@ pocket-brain/
 │   ├── Toast.tsx            # Toast notification system
 │   └── ErrorBoundary.tsx    # React error boundary with recovery UI
 ├── services/
-│   └── geminiService.ts     # All Gemini AI calls (analyze, batch, search, daily brief)
+│   └── geminiService.ts     # AI client (proxy-first; dev fallback)
+├── storage/
+│   └── notesStore.ts        # IndexedDB persistence (ops log + snapshots + migration)
+├── worker/
+│   ├── src/index.ts         # Cloudflare Worker AI proxy + auth/session APIs
+│   └── wrangler.toml        # Worker config
 ├── contexts/
 │   └── ThemeContext.tsx      # Dark/light/system theme provider
 ├── utils/

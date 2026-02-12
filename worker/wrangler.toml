@@ -1,0 +1,12 @@
+name = "pocketbrain-ai-proxy"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+account_id = "c3941b01e85131cba914b73b037ffef7"
+workers_dev = true
+
+[[kv_namespaces]]
+binding = "AI_SESSIONS"
+id = "23450b2f1c9342c6a1bde8a4eaead79f"
+
+[vars]
+DEFAULT_MODEL = "google/gemini-2.5-flash"

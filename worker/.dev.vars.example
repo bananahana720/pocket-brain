@@ -1,0 +1,4 @@
+# Local worker secrets for `npm run worker:dev`
+# Copy to worker/.dev.vars and fill real values.
+
+KEY_ENCRYPTION_SECRET=replace-with-a-long-random-secret

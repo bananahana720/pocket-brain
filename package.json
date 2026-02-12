@@ -5,10 +5,16 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:proxy": "VITE_USE_AI_PROXY=true VITE_DEV_PROXY_WORKER=true vite",
     "build": "vite build",
     "preview": "vite preview",
     "test": "playwright test",
-    "test:ui": "playwright test --ui"
+    "test:ui": "playwright test --ui",
+    "worker:dev": "WRANGLER_SEND_METRICS=false XDG_CONFIG_HOME=.wrangler-home npx wrangler dev --local --show-interactive-dev-session=false --config worker/wrangler.toml --port 8787",
+    "worker:deploy": "WRANGLER_SEND_METRICS=false XDG_CONFIG_HOME=.wrangler-home npx wrangler deploy --config worker/wrangler.toml",
+    "worker:kv:create": "WRANGLER_SEND_METRICS=false XDG_CONFIG_HOME=.wrangler-home npx wrangler kv namespace create AI_SESSIONS --config worker/wrangler.toml",
+    "worker:secret:set": "WRANGLER_SEND_METRICS=false XDG_CONFIG_HOME=.wrangler-home npx wrangler secret put KEY_ENCRYPTION_SECRET --config worker/wrangler.toml",
+    "worker:bootstrap": "bash scripts/bootstrap-worker.sh"
   },
   "dependencies": {
     "@google/genai": "^1.30.0",
@@ -21,6 +27,7 @@
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
     "typescript": "~5.8.2",
-    "vite": "^6.2.0"
+    "vite": "^6.2.0",
+    "wrangler": "^4.64.0"
   }
 }

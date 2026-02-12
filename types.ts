@@ -4,6 +4,14 @@ export enum NoteType {
   IDEA = 'IDEA',
 }
 
+export type AIProvider = 'gemini' | 'openrouter';
+
+export interface AIAuthState {
+  connected: boolean;
+  provider?: AIProvider;
+  expiresAt?: number;
+}
+
 export interface Note {
   id: string;
   content: string;
@@ -21,6 +29,11 @@ export interface Note {
   // Due dates & Priority
   dueDate?: number;  // timestamp
   priority?: 'urgent' | 'normal' | 'low';
+  // AI processing metadata for race-safe async updates.
+  analysisVersion?: number;
+  contentHash?: string;
+  analysisState?: 'pending' | 'complete' | 'failed';
+  lastAnalyzedAt?: number;
 }
 
 export interface AIAnalysisResult {
