@@ -194,9 +194,13 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
     }
   };
 
+  const cardStyle = !isEditing && !showMenu && !showDatePicker && !showPriorityPicker
+    ? { contentVisibility: 'auto' as const }
+    : undefined;
+
   return (
     <div
-      style={{ contentVisibility: 'auto' }}
+      style={cardStyle}
       className={`group relative bg-white dark:bg-zinc-800 rounded-2xl p-5 border transition-all duration-200 animate-slide-up ${getPriorityBorder()} ${
         note.isCompleted
         ? 'opacity-60 shadow-none border-zinc-100 dark:border-zinc-700 bg-zinc-50/50 dark:bg-zinc-800/50'

@@ -43,6 +43,25 @@ test.describe('Notes CRUD', () => {
     await expect(page.getByText('To be deleted')).not.toBeVisible();
   });
 
+  test('menu actions remain clickable with content visibility optimization', async ({ page }) => {
+    const note = makeNote({ title: 'Menu Visibility', content: 'Delete via menu' });
+    await gotoWithNotes(page, [note]);
+
+    const card = page
+      .getByRole('heading', { name: 'Menu Visibility' })
+      .locator('xpath=ancestor::div[contains(@class,"rounded-2xl")]')
+      .first();
+
+    await expect.poll(async () => card.evaluate(el => getComputedStyle(el).contentVisibility)).toBe('auto');
+
+    await openNoteMenu(page);
+    await expect(page.getByRole('button', { name: 'Delete' })).toBeVisible();
+    await expect.poll(async () => card.evaluate(el => getComputedStyle(el).contentVisibility)).toBe('visible');
+
+    await page.getByRole('button', { name: 'Delete' }).click();
+    await expect(page.getByText('Note deleted')).toBeVisible();
+  });
+
   test('copy note content via menu', async ({ page }) => {
     const note = makeNote({ content: 'Copy this text' });
     await gotoWithNotes(page, [note]);

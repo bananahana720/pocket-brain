@@ -2,7 +2,7 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { AIAnalysisResult, AIAuthState, AIProvider, Note, NoteType } from '../types';
 
 const OPENROUTER_MODEL = 'google/gemini-2.5-flash';
-const USE_AI_PROXY = import.meta.env.PROD || import.meta.env.VITE_USE_AI_PROXY === 'true';
+const USE_AI_PROXY = !!(import.meta.env?.PROD || import.meta.env?.VITE_USE_AI_PROXY === 'true');
 const PROXY_TIMEOUT_MS = 12000;
 const PROXY_RETRIES = 2;
 

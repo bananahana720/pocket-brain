@@ -3,7 +3,7 @@ import { gotoWithNotes, makeNote, makeTask } from './helpers';
 
 const openDrawer = async (page: import('@playwright/test').Page) => {
   await page.locator('.lucide-menu').locator('xpath=ancestor::button').click();
-  await expect(page.getByText('Menu')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Menu' })).toBeVisible();
 };
 
 test.describe('Drawer & Stats', () => {
@@ -58,7 +58,7 @@ test.describe('Drawer & Stats', () => {
     await openDrawer(page);
 
     await page.locator('.lucide-x').first().locator('xpath=ancestor::button').click();
-    await expect(page.getByText('Menu')).not.toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Menu' })).not.toBeVisible();
   });
 
   test('drawer close via backdrop click', async ({ page }) => {
@@ -67,6 +67,6 @@ test.describe('Drawer & Stats', () => {
 
     // Click the backdrop overlay
     await page.locator('.backdrop-blur-sm').click({ force: true });
-    await expect(page.getByText('Menu')).not.toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Menu' })).not.toBeVisible();
   });
 });
