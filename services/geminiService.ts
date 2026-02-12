@@ -32,6 +32,13 @@ interface RequestOptions {
   signal?: AbortSignal;
 }
 
+export type DraftCleanupMode = 'single' | 'batch';
+
+export interface DraftCleanupResult {
+  cleanedText: string;
+  items?: string[];
+}
+
 function getDevGeminiKey(): string {
   return process.env.GEMINI_API_KEY || '';
 }
@@ -255,6 +262,30 @@ function parseAnalysisResult(result: Record<string, unknown>): AIAnalysisResult 
   };
 }
 
+function normalizeCleanupResult(
+  source: string,
+  mode: DraftCleanupMode,
+  result: unknown
+): DraftCleanupResult {
+  const parsed = result && typeof result === 'object' ? (result as Record<string, unknown>) : {};
+  const rawItems = Array.isArray(parsed.items) ? parsed.items : [];
+  const items = rawItems
+    .map(item => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean)
+    .slice(0, 25);
+
+  const cleaned = typeof parsed.cleanedText === 'string' ? parsed.cleanedText.trim() : '';
+
+  if (mode === 'batch') {
+    const cleanedText = cleaned || items.join('\n') || source.trim();
+    return items.length > 0 ? { cleanedText, items } : { cleanedText };
+  }
+
+  return {
+    cleanedText: cleaned || items[0] || source.trim(),
+  };
+}
+
 function buildAnalyzePrompt(content: string): string {
   const today = new Date().toISOString().split('T')[0];
   return `Analyze the following note content. Classify it as a NOTE, TASK, or IDEA.
@@ -283,6 +314,33 @@ For EACH item, provide:
 - type: one of NOTE, TASK, or IDEA
 
 Respond with a JSON array only.
+
+Input Text: "${content}"`;
+}
+
+function buildCleanupPrompt(content: string, mode: DraftCleanupMode): string {
+  if (mode === 'batch') {
+    return `You are cleaning up a rough notes draft before the user reviews it.
+Split the text into distinct, atomic lines and clean each line for clarity.
+Do not add new facts. Preserve intent and tone.
+
+Respond with JSON only using this shape:
+{
+  "cleanedText": "all cleaned items joined with newline characters",
+  "items": ["cleaned item 1", "cleaned item 2"]
+}
+
+Input Text: "${content}"`;
+  }
+
+  return `You are cleaning up a rough notes draft before the user reviews it.
+Fix grammar, punctuation, and clarity while preserving the exact meaning.
+Do not add new facts or remove important details.
+
+Respond with JSON only using this shape:
+{
+  "cleanedText": "cleaned draft text"
+}
 
 Input Text: "${content}"`;
 }
@@ -319,6 +377,19 @@ const BATCH_SCHEMA = {
     },
   },
   required: ['items'],
+  additionalProperties: false,
+};
+
+const CLEANUP_SCHEMA = {
+  type: 'object',
+  properties: {
+    cleanedText: { type: 'string' },
+    items: {
+      type: 'array',
+      items: { type: 'string' },
+    },
+  },
+  required: ['cleanedText'],
   additionalProperties: false,
 };
 
@@ -476,6 +547,70 @@ export const processBatchEntry = async (
   } catch (error) {
     if (error instanceof AIServiceError) throw error;
     throw new AIServiceError('Error processing batch.', 'PROVIDER_UNAVAILABLE', true);
+  }
+};
+
+export const cleanupNoteDraft = async (
+  content: string,
+  mode: DraftCleanupMode = 'single',
+  options?: RequestOptions
+): Promise<DraftCleanupResult> => {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return { cleanedText: '' };
+  }
+
+  if (hasProxy()) {
+    const payload = await proxyPost<{ result: DraftCleanupResult }>(
+      '/api/v1/ai/cleanup',
+      { content: trimmed, mode },
+      options
+    );
+    return normalizeCleanupResult(trimmed, mode, payload.result);
+  }
+
+  const provider = getProvider();
+  if (!provider) {
+    throw new AIServiceError('No API key configured for draft cleanup.', 'AUTH_REQUIRED', false);
+  }
+
+  try {
+    if (provider === 'openrouter') {
+      const text = await openRouterChat(buildCleanupPrompt(trimmed, mode), CLEANUP_SCHEMA);
+      if (!text) {
+        return { cleanedText: trimmed };
+      }
+      return normalizeCleanupResult(trimmed, mode, JSON.parse(text));
+    }
+
+    const ai = getGeminiClient();
+    if (!ai) throw new AIServiceError('Gemini key missing.', 'AUTH_REQUIRED', false);
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: buildCleanupPrompt(trimmed, mode),
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            cleanedText: { type: Type.STRING },
+            items: { type: Type.ARRAY, items: { type: Type.STRING } },
+          },
+          required: ['cleanedText'],
+        },
+      },
+    });
+
+    const text = response.text;
+    if (!text) {
+      return { cleanedText: trimmed };
+    }
+
+    return normalizeCleanupResult(trimmed, mode, JSON.parse(text));
+  } catch (error) {
+    if (error instanceof AIServiceError) throw error;
+    throw new AIServiceError('Error cleaning note draft.', 'PROVIDER_UNAVAILABLE', true);
   }
 };
 

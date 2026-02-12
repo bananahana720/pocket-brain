@@ -58,18 +58,53 @@ declare global {
 interface InputAreaProps {
   onSave: (content: string, presetType?: NoteType) => void;
   onBatchSave: (content: string) => void;
+  onCleanupDraft: (content: string, mode: 'single' | 'batch') => Promise<{ cleanedText: string; items?: string[] }>;
 }
 
 export interface InputAreaHandle {
   focus: () => void;
 }
 
-const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatchSave }, ref) => {
+interface DraftDiffLine {
+  lineNumber: number;
+  original: string;
+  cleaned: string;
+  changed: boolean;
+}
+
+interface CleanupPreviewState {
+  mode: 'single' | 'batch';
+  originalText: string;
+  cleanedText: string;
+  lines: DraftDiffLine[];
+  changedCount: number;
+}
+
+function buildDraftDiff(originalText: string, cleanedText: string): DraftDiffLine[] {
+  const originalLines = originalText.split('\n');
+  const cleanedLines = cleanedText.split('\n');
+  const maxLines = Math.max(originalLines.length, cleanedLines.length, 1);
+
+  return Array.from({ length: maxLines }, (_, index) => {
+    const original = originalLines[index] || '';
+    const cleaned = cleanedLines[index] || '';
+    return {
+      lineNumber: index + 1,
+      original,
+      cleaned,
+      changed: original !== cleaned,
+    };
+  });
+}
+
+const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatchSave, onCleanupDraft }, ref) => {
   const [text, setText] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [presetType, setPresetType] = useState<NoteType | null>(null);
   const [isFocused, setIsFocused] = useState(false);
   const [isBatchMode, setIsBatchMode] = useState(false);
+  const [isCleaning, setIsCleaning] = useState(false);
+  const [cleanupPreview, setCleanupPreview] = useState<CleanupPreviewState | null>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -111,8 +146,35 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
       };
 
       recognitionRef.current = recognition;
+
+      return () => {
+        try {
+          recognition.stop();
+        } catch {
+          // no-op: stopping an inactive recognizer can throw on some browsers.
+        }
+      };
     }
   }, []);
+
+  const resizeTextarea = (expanded = false) => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    const maxHeight = expanded || isBatchMode ? 240 : 160;
+    textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
+  };
+
+  const stopListening = () => {
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        // no-op: recognizer may already be stopped.
+      }
+    }
+    setIsListening(false);
+  };
 
   const toggleListening = () => {
     if (!recognitionRef.current) {
@@ -121,8 +183,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
     }
 
     if (isListening) {
-      recognitionRef.current.stop();
-      setIsListening(false);
+      stopListening();
     } else {
       try {
         recognitionRef.current.start();
@@ -134,7 +195,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
   };
 
   const handleSave = () => {
-    if (!text.trim()) return;
+    if (!text.trim() || isCleaning || cleanupPreview) return;
     if (isBatchMode) {
       onBatchSave(text);
     } else {
@@ -144,15 +205,17 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
   };
 
   const handleBatchSave = () => {
-    if (!text.trim()) return;
+    if (!text.trim() || isCleaning || cleanupPreview) return;
     onBatchSave(text);
     resetInput();
   };
 
   const resetInput = () => {
+    stopListening();
     setText('');
     setPresetType(null);
     setIsBatchMode(false);
+    setCleanupPreview(null);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
       textareaRef.current.focus();
@@ -176,13 +239,76 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
       setIsBatchMode(prev => !prev);
       setPresetType(null);
       textareaRef.current?.focus();
-      if (textareaRef.current) {
-        textareaRef.current.style.height = '120px';
-      }
+      requestAnimationFrame(() => resizeTextarea(!isBatchMode));
     }
   };
 
+  const handleCleanup = async () => {
+    const content = text.trim();
+    if (!content || isCleaning || cleanupPreview) return;
+
+    if (isListening) {
+      stopListening();
+    }
+
+    setIsCleaning(true);
+    try {
+      const mode = isBatchMode ? 'batch' : 'single';
+      const result = await onCleanupDraft(content, mode);
+      const nextText =
+        mode === 'batch' && result.items?.length
+          ? result.items.join('\n')
+          : result.cleanedText.trim() || content;
+      const lines = buildDraftDiff(content, nextText);
+      const changedCount = lines.reduce((count, line) => count + (line.changed ? 1 : 0), 0);
+      setCleanupPreview({
+        mode,
+        originalText: content,
+        cleanedText: nextText,
+        lines,
+        changedCount,
+      });
+    } catch (error) {
+      console.error('Draft clean-up failed:', error);
+    } finally {
+      setIsCleaning(false);
+    }
+  };
+
+  const closeCleanupPreview = () => {
+    setCleanupPreview(null);
+    textareaRef.current?.focus();
+  };
+
+  const applyCleanupPreview = (action: 'replace' | 'keep-both') => {
+    if (!cleanupPreview) return;
+    const preview = cleanupPreview;
+    setCleanupPreview(null);
+
+    if (action === 'keep-both' && preview.originalText.trim()) {
+      onSave(preview.originalText, !isBatchMode ? presetType ?? undefined : undefined);
+    }
+
+    setText(preview.cleanedText);
+    requestAnimationFrame(() => resizeTextarea(preview.mode === 'batch'));
+    textareaRef.current?.focus();
+  };
+
+  useEffect(() => {
+    if (!cleanupPreview) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeCleanupPreview();
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [cleanupPreview]);
+
   const getPlaceholder = () => {
+    if (isCleaning) return "Cleaning draft...";
     if (isListening) return "Listening...";
     if (presetType === NoteType.TASK) return "Creating a Task...";
     if (presetType === NoteType.IDEA) return "Creating an Idea...";
@@ -199,8 +325,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setText(e.target.value);
-    e.target.style.height = 'auto';
-    e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`;
+    resizeTextarea();
   };
 
   return (
@@ -242,7 +367,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
                   : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700'
               }`}
             >
-              <Mic className="w-3.5 h-3.5" /> Voice
+              <Mic className="w-3.5 h-3.5" /> Dictate
             </button>
             )}
             <button
@@ -317,6 +442,19 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
             {/* Actions container (switches based on input) */}
             {text.trim().length > 5 ? (
                 <>
+                    <button
+                        onClick={handleCleanup}
+                        disabled={isCleaning || !!cleanupPreview}
+                        title={isBatchMode ? "Clean + split draft for review" : "Clean draft for review"}
+                        className={`h-12 w-12 rounded-full flex items-center justify-center transition-all duration-300 border shadow-sm disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100 ${
+                          isBatchMode
+                            ? 'bg-violet-50 dark:bg-violet-900/30 border-violet-200 dark:border-violet-800 text-violet-600'
+                            : 'bg-amber-50 dark:bg-amber-900/30 border-amber-200 dark:border-amber-800 text-amber-600'
+                        } hover:scale-105`}
+                    >
+                        <Sparkles className={`w-5 h-5 ${isCleaning ? 'animate-spin' : ''}`} />
+                    </button>
+
                    {/* Magic Batch Split (hidden when already in batch mode) */}
                    {!isBatchMode && (
                      <button
@@ -331,8 +469,9 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
                     {/* Standard Save */}
                     <button
                         onClick={handleSave}
+                        disabled={isCleaning || !!cleanupPreview}
                         title={isBatchMode ? "Batch Split (⌘+Enter)" : "Save (⌘+Enter)"}
-                        className={`h-12 w-12 rounded-full flex items-center justify-center transition-all duration-300 hover:scale-105 shadow-md ${
+                        className={`h-12 w-12 rounded-full flex items-center justify-center transition-all duration-300 hover:scale-105 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100 shadow-md ${
                           isBatchMode
                             ? 'bg-violet-600 border border-violet-500 text-white hover:bg-violet-700 shadow-violet-500/30'
                             : 'bg-brand-600 border border-brand-500 text-white hover:bg-brand-700 shadow-brand-500/30'
@@ -353,6 +492,96 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
           </div>
         </div>
       </div>
+
+      {cleanupPreview && (
+        <div
+          className="fixed inset-0 z-[80] bg-zinc-900/45 backdrop-blur-sm p-4 sm:p-6 flex items-end sm:items-center justify-center"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeCleanupPreview();
+            }
+          }}
+        >
+          <div className="w-full max-w-5xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-2xl shadow-2xl animate-fade-in">
+            <div className="px-5 pt-5 pb-3 border-b border-zinc-200 dark:border-zinc-700">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-bold text-zinc-800 dark:text-zinc-100">Review Cleaned Draft</h3>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+                    {cleanupPreview.changedCount === 0
+                      ? 'No text changes detected. You can still apply the cleaned draft.'
+                      : `${cleanupPreview.changedCount} line${cleanupPreview.changedCount === 1 ? '' : 's'} changed.`}
+                  </p>
+                </div>
+                <span className="text-[10px] font-semibold uppercase tracking-wide px-2 py-1 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400">
+                  {cleanupPreview.mode === 'batch' ? 'Batch Cleanup' : 'Draft Cleanup'}
+                </span>
+              </div>
+            </div>
+
+            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[54vh] overflow-y-auto">
+              <div className="rounded-xl border border-zinc-200 dark:border-zinc-700 overflow-hidden">
+                <div className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 bg-zinc-50 dark:bg-zinc-800/70 border-b border-zinc-200 dark:border-zinc-700">
+                  Original
+                </div>
+                <div className="p-2 font-mono text-xs leading-6">
+                  {cleanupPreview.lines.map(line => (
+                    <div
+                      key={`orig-${line.lineNumber}`}
+                      className={`grid grid-cols-[28px_1fr] gap-2 px-2 rounded ${line.changed ? 'bg-rose-50/80 dark:bg-rose-900/20' : ''}`}
+                    >
+                      <span className="text-zinc-400 select-none">{line.lineNumber}</span>
+                      <span className="text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-words">
+                        {line.original || ' '}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-zinc-200 dark:border-zinc-700 overflow-hidden">
+                <div className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 bg-zinc-50 dark:bg-zinc-800/70 border-b border-zinc-200 dark:border-zinc-700">
+                  Cleaned
+                </div>
+                <div className="p-2 font-mono text-xs leading-6">
+                  {cleanupPreview.lines.map(line => (
+                    <div
+                      key={`clean-${line.lineNumber}`}
+                      className={`grid grid-cols-[28px_1fr] gap-2 px-2 rounded ${line.changed ? 'bg-emerald-50/80 dark:bg-emerald-900/20' : ''}`}
+                    >
+                      <span className="text-zinc-400 select-none">{line.lineNumber}</span>
+                      <span className="text-zinc-800 dark:text-zinc-100 whitespace-pre-wrap break-words">
+                        {line.cleaned || ' '}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="px-5 pb-5 pt-2 flex flex-wrap gap-2 justify-end border-t border-zinc-200 dark:border-zinc-700">
+              <button
+                onClick={closeCleanupPreview}
+                className="px-3 py-2 rounded-lg text-xs font-semibold text-zinc-600 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => applyCleanupPreview('keep-both')}
+                className="px-3 py-2 rounded-lg text-xs font-semibold text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/30"
+              >
+                Keep Original + Cleaned Copy
+              </button>
+              <button
+                onClick={() => applyCleanupPreview('replace')}
+                className="px-3 py-2 rounded-lg text-xs font-semibold text-white bg-brand-600 border border-brand-500 hover:bg-brand-700"
+              >
+                Apply Cleaned Draft
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 });

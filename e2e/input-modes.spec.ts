@@ -42,4 +42,13 @@ test.describe('Input modes', () => {
     await textarea.press('Meta+Enter');
     await expect(textarea).toHaveValue('');
   });
+
+  test('clean draft keeps text in editor and does not submit', async ({ page }) => {
+    await gotoWithNotes(page);
+    const textarea = page.locator('.fixed.bottom-0 textarea');
+    await textarea.fill('this is a rough thought to clean before submit');
+    await page.getByTitle('Clean draft for review').click();
+    await expect(textarea).toHaveValue(/rough thought/);
+    await expect(page.getByText('Your mind is clear')).toBeVisible();
+  });
 });

@@ -5,6 +5,7 @@ import {
   AIServiceError,
   analyzeNote,
   askMyNotes,
+  cleanupNoteDraft,
   connectAIProvider,
   disconnectAIProvider,
   generateDailyBrief,
@@ -691,6 +692,40 @@ function App() {
       }
     },
     [addToast, handleAddNote]
+  );
+
+  const handleCleanupDraft = useCallback(
+    async (content: string, mode: 'single' | 'batch') => {
+      try {
+        const startedAt = performance.now();
+        incrementMetric('ai_requests');
+        const result = await cleanupNoteDraft(content, mode);
+        recordAiLatency(performance.now() - startedAt);
+        setAiErrorMessage(null);
+        setAiDegradedMessage(null);
+        if (mode === 'batch') {
+          const itemCount = result.items?.length || 0;
+          addToast(
+            itemCount > 0
+              ? `Prepared ${itemCount} cleaned lines for review`
+              : 'Draft cleaned and ready for review',
+            'success'
+          );
+        } else {
+          addToast('Draft cleaned and ready for review', 'success');
+        }
+        return result;
+      } catch (error) {
+        const mapped = toAiMessage(error);
+        incrementMetric('ai_failures');
+        recordAiErrorCode(mapped.code);
+        setAiErrorMessage(mapped.message);
+        setAiDegradedMessage(mapped.degradedMessage);
+        addToast('AI clean-up unavailable. Keeping your original draft.', 'error');
+        throw error;
+      }
+    },
+    [addToast]
   );
 
   const handleUpdateNote = useCallback(
@@ -1398,7 +1433,12 @@ function App() {
         </main>
 
         <ErrorBoundary>
-          <InputArea ref={inputAreaRef} onSave={handleAddNote} onBatchSave={handleBatchNote} />
+          <InputArea
+            ref={inputAreaRef}
+            onSave={handleAddNote}
+            onBatchSave={handleBatchNote}
+            onCleanupDraft={handleCleanupDraft}
+          />
         </ErrorBoundary>
 
         {import.meta.env.DEV && <DiagnosticsPanel />}

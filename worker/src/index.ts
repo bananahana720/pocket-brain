@@ -18,6 +18,7 @@ interface Env {
 }
 
 type AIProvider = 'gemini' | 'openrouter';
+type CleanupMode = 'single' | 'batch';
 
 type Note = {
   id: string;
@@ -249,6 +250,11 @@ function parseProvider(body: any): AIProvider {
   throw new ApiError(400, 'BAD_REQUEST', 'Provider must be gemini or openrouter');
 }
 
+function parseCleanupMode(value: unknown): CleanupMode {
+  if (value === 'single' || value === 'batch') return value;
+  throw new ApiError(400, 'BAD_REQUEST', 'mode must be "single" or "batch"');
+}
+
 async function parseJson(request: Request): Promise<any> {
   try {
     return await request.json();
@@ -440,6 +446,33 @@ Respond with a JSON array only.
 Input Text: "${content}"`;
 }
 
+function buildCleanupPrompt(content: string, mode: CleanupMode): string {
+  if (mode === 'batch') {
+    return `You are cleaning up a rough notes draft before the user reviews it.
+Split the text into distinct, atomic lines and clean each line for clarity.
+Do not add new facts. Preserve intent and tone.
+
+Respond with JSON only using this shape:
+{
+  "cleanedText": "all cleaned items joined with newline characters",
+  "items": ["cleaned item 1", "cleaned item 2"]
+}
+
+Input Text: "${content}"`;
+  }
+
+  return `You are cleaning up a rough notes draft before the user reviews it.
+Fix grammar, punctuation, and clarity while preserving the exact meaning.
+Do not add new facts or remove important details.
+
+Respond with JSON only using this shape:
+{
+  "cleanedText": "cleaned draft text"
+}
+
+Input Text: "${content}"`;
+}
+
 function buildSearchPrompt(query: string, notes: Note[]): string {
   const relevantNotes = notes.slice(0, 50);
   const context = relevantNotes
@@ -497,6 +530,26 @@ function buildDailyBriefPrompt(notes: Note[]): string | null {
     .join('\n\n');
 
   return `You are a personal productivity assistant. Given these notes and tasks, write a brief 2-3 sentence daily briefing. Mention overdue tasks first, then today's priorities, then notable new captures. Be concise and actionable. Speak directly to the user.\n\n${sections}`;
+}
+
+function normalizeCleanupResult(content: string, mode: CleanupMode, parsed: any): { cleanedText: string; items?: string[] } {
+  const items = Array.isArray(parsed?.items)
+    ? parsed.items
+        .map((item: unknown) => (typeof item === 'string' ? item.trim() : ''))
+        .filter(Boolean)
+        .slice(0, 25)
+    : [];
+
+  const cleaned = typeof parsed?.cleanedText === 'string' ? parsed.cleanedText.trim() : '';
+
+  if (mode === 'batch') {
+    const cleanedText = cleaned || items.join('\n') || content.trim();
+    return items.length > 0 ? { cleanedText, items } : { cleanedText };
+  }
+
+  return {
+    cleanedText: cleaned || items[0] || content.trim(),
+  };
 }
 
 export default {
@@ -635,6 +688,19 @@ export default {
           }));
 
           return jsonResponse({ results });
+        }
+
+        if (pathname === '/api/v1/ai/cleanup') {
+          const content = typeof body.content === 'string' ? body.content.trim() : '';
+          if (!content) {
+            throw new ApiError(400, 'BAD_REQUEST', 'content is required');
+          }
+
+          const mode = parseCleanupMode(body.mode ?? 'single');
+          const prompt = buildCleanupPrompt(content, mode);
+          const text = await withRetries(() => callProvider(session.provider, session.apiKey, prompt, env.DEFAULT_MODEL));
+          const parsed = safeParseJson<any>(text);
+          return jsonResponse({ result: normalizeCleanupResult(content, mode, parsed) });
         }
 
         if (pathname === '/api/v1/ai/search') {
