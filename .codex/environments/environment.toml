@@ -3,13 +3,133 @@ version = 1
 name = "pocket-brain"
 
 [setup]
-script = ""
+script = '''
+if [ ! -x node_modules/.bin/vite ]; then
+  npm install --include=dev
+fi
+'''
 
 [[actions]]
-name = "Run"
+name = "Install Deps"
 icon = "run"
 command = '''
-npm install
+npm install --include=dev
+'''
+
+[[actions]]
+name = "Dev Frontend"
+icon = "run"
+command = '''
+if [ ! -x node_modules/.bin/vite ]; then
+  npm install --include=dev
+fi
+npm run dev
+'''
+
+[[actions]]
+name = "Dev Proxy Stack"
+icon = "run"
+command = '''
+if [ ! -x node_modules/.bin/vite ]; then
+  npm install --include=dev
+fi
+if [ ! -f worker/.dev.vars ]; then
+  cp worker/.dev.vars.example worker/.dev.vars
+fi
+npm run worker:dev &
+WORKER_PID=$!
+trap 'kill $WORKER_PID' EXIT INT TERM
+sleep 2
+npm run dev:proxy
+'''
+
+[[actions]]
+name = "Worker Dev"
+icon = "run"
+command = '''
+npm run worker:dev
+'''
+
+[[actions]]
+name = "Build"
+icon = "run"
+command = '''
+if [ ! -x node_modules/.bin/vite ]; then
+  npm install --include=dev
+fi
+npm run build
+'''
+
+[[actions]]
+name = "Build + Preview"
+icon = "run"
+command = '''
+if [ ! -x node_modules/.bin/vite ]; then
+  npm install --include=dev
+fi
 npm run build
 npm run preview
+'''
+
+[[actions]]
+name = "Test E2E"
+icon = "run"
+command = '''
+if [ ! -x node_modules/.bin/vite ]; then
+  npm install --include=dev
+fi
+npm run test
+'''
+
+[[actions]]
+name = "Test E2E UI"
+icon = "run"
+command = '''
+if [ ! -x node_modules/.bin/vite ]; then
+  npm install --include=dev
+fi
+npm run test:ui
+'''
+
+[[actions]]
+name = "Worker Bootstrap"
+icon = "run"
+command = '''
+if [ ! -x node_modules/.bin/vite ]; then
+  npm install --include=dev
+fi
+npm run worker:bootstrap
+'''
+
+[[actions]]
+name = "Worker Deploy"
+icon = "run"
+command = '''
+if [ ! -x node_modules/.bin/vite ]; then
+  npm install --include=dev
+fi
+npm run worker:deploy
+'''
+
+[[actions]]
+name = "Preflight (Build + Test)"
+icon = "run"
+command = '''
+if [ ! -x node_modules/.bin/vite ]; then
+  npm install --include=dev
+fi
+npm run build
+npm run test
+'''
+
+[[actions]]
+name = "Worker Deploy (Safe)"
+icon = "run"
+command = '''
+if [ ! -x node_modules/.bin/vite ]; then
+  npm install --include=dev
+fi
+npm run build
+npm run test
+npm run worker:deploy
 '''
