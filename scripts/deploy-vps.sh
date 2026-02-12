@@ -37,10 +37,20 @@ echo "==> Applying database schema"
 docker compose exec -T postgres psql -U postgres -d pocketbrain < server/drizzle/0000_initial.sql
 
 echo "==> Health check: http://127.0.0.1:8080/health"
-HEALTH_STATUS="$(curl -s -o /tmp/pocketbrain-health.json -w "%{http_code}" http://127.0.0.1:8080/health)"
+HEALTH_STATUS=""
+for attempt in {1..30}; do
+  HEALTH_STATUS="$(curl -s -o /tmp/pocketbrain-health.json -w "%{http_code}" http://127.0.0.1:8080/health || true)"
+  if [[ "$HEALTH_STATUS" == "200" ]]; then
+    break
+  fi
+  sleep 2
+done
+
 if [[ "$HEALTH_STATUS" != "200" ]]; then
-  echo "Health check failed with status $HEALTH_STATUS"
+  echo "Health check failed with status $HEALTH_STATUS after retries"
   cat /tmp/pocketbrain-health.json
+  echo "==> Recent API logs"
+  docker compose logs --tail=120 api || true
   exit 1
 fi
 cat /tmp/pocketbrain-health.json
