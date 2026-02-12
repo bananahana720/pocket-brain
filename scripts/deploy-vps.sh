@@ -30,6 +30,9 @@ if [[ "$SKIP_PULL" != "true" ]]; then
   git pull --ff-only
 fi
 
+echo "==> Rendering server/.env from root .env"
+bash scripts/render-server-env.sh --mode production --source .env --output server/.env
+
 echo "==> Validating server runtime config"
 NODE_ENV=production npm run config:check:server
 

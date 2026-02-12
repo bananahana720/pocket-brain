@@ -123,10 +123,13 @@ Deploy script rebuilds containers, applies `server/drizzle/0000_initial.sql`, an
 3. Sync only (git pull on VPS):
    - `npm run vps:sync:remote`
 4. Full deploy via remote `scripts/deploy-vps.sh`:
-   - `npm run vps:deploy:remote`
-5. Optional direct flags:
+   - `npm run vps:deploy:remote -- --skip-pull` (recommended after sync step)
+5. Post-deploy verify (remote SHA + `/ready` summary):
+   - `npm run vps:verify:remote`
+6. Optional direct flags:
    - `bash scripts/deploy-vps-remote.sh --with-worker`
    - `bash scripts/deploy-vps-remote.sh --skip-pull`
+   - `bash scripts/deploy-vps-remote.sh --allow-stash`
 
 ## Command Reference
 
@@ -157,11 +160,14 @@ Deploy script rebuilds containers, applies `server/drizzle/0000_initial.sql`, an
 | `bash scripts/deploy-vps.sh` | Deploy backend stack on VPS (pull, rebuild, schema apply, readiness check) |
 | `bash scripts/deploy-vps.sh --with-worker` | Deploy backend stack plus Cloudflare Worker |
 | `bash scripts/deploy-vps.sh --skip-pull` | Deploy backend stack without running git pull |
+| `bash scripts/render-server-env.sh --mode production --source .env --output server/.env` | Generate `server/.env` from root `.env` for production deploy checks |
 | `npm run vps:precheck:remote` | Verify SSH connectivity + repo layout on remote VPS before running actions |
 | `npm run vps:sync:remote` | Run `git pull --ff-only` on remote VPS repo over SSH |
 | `npm run vps:deploy:remote` | Run full VPS deploy workflow remotely over SSH |
+| `npm run vps:verify:remote` | Print remote git SHA and `/ready` summary over SSH |
 | `bash scripts/deploy-vps-remote.sh --with-worker` | Remote deploy with Cloudflare Worker deploy step |
 | `bash scripts/deploy-vps-remote.sh --skip-pull` | Remote deploy without running `git pull` on VPS |
+| `bash scripts/deploy-vps-remote.sh --allow-stash` | Auto-stash dirty remote repo before sync/deploy |
 | `npx wrangler secret put KEY_ENCRYPTION_SECRET_PREV --config worker/wrangler.toml` | Set previous encryption secret during rotation |
 | `npx wrangler secret delete KEY_ENCRYPTION_SECRET_PREV --config worker/wrangler.toml` | Remove previous encryption secret after rotation window |
 
@@ -169,12 +175,15 @@ Deploy script rebuilds containers, applies `server/drizzle/0000_initial.sql`, an
 - Keep `worker/wrangler.toml` values aligned with your Cloudflare account and KV namespace.
 - Keep `ALLOW_INSECURE_DEV_AUTH=true` only for local development; set it to `false` for production worker/server deployments.
 - Do not commit real secrets in `.env.local`, `worker/.dev.vars`, or `server/.env`.
+- For VPS deploys, treat root `.env` as the source of truth and render `server/.env` from it before runtime checks.
 - Prefer end-to-end local workflow when changing AI/session/security/sync behavior.
 - For rotation safety, keep `KEY_ENCRYPTION_SECRET_PREV` only as long as needed to cover active session TTL.
 
 ## Session Learnings (2026-02-12)
 - Remote VPS SSH workflow is now validated for Ubuntu hosts via `scripts/deploy-vps-remote.sh` and npm wrappers (`vps:precheck:remote`, `vps:sync:remote`, `vps:deploy:remote`).
 - Always run remote precheck before sync/deploy to fail fast on SSH auth, host reachability, and repo layout issues.
+- Remote deploy now fails fast on dirty VPS repo by default; use `--allow-stash` only for intentional one-off recovery.
+- Run `npm run vps:verify:remote` after deploy to confirm remote SHA and `/ready` payload.
 - If deploy fails at schema apply with `FATAL: database "pocketbrain" does not exist`, create the database first and rerun deploy.
 - If `http://127.0.0.1:8080/ready` returns `404` while API `:8788/ready` is healthy, check nginx config inside the container and recreate nginx after syncing `nginx/nginx.conf`.
 - Keep VPS repo state clean between deploys; local edits on tracked files and untracked backup files can cause confusion during future `git pull --ff-only` runs.

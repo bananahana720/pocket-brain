@@ -239,6 +239,7 @@ Run commands:
 npm run vps:precheck:remote
 npm run vps:sync:remote
 npm run vps:deploy:remote
+npm run vps:verify:remote
 ```
 
 Optional deploy flags:
@@ -246,7 +247,20 @@ Optional deploy flags:
 ```bash
 bash scripts/deploy-vps-remote.sh --with-worker
 bash scripts/deploy-vps-remote.sh --skip-pull
+bash scripts/deploy-vps-remote.sh --allow-stash
 ```
+
+Safe CD run order:
+
+1. `npm run vps:precheck:remote`
+2. `npm run vps:sync:remote`
+3. `npm run vps:deploy:remote -- --skip-pull`
+4. `npm run vps:verify:remote`
+
+Notes:
+- `vps:deploy:remote` now fails if the remote repo is dirty.
+- Use `--allow-stash` only when you intentionally want to stash remote drift.
+- Deploy automatically renders `server/.env` from root `.env` before runtime config validation.
 
 ---
 

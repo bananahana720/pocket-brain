@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -11,6 +13,7 @@ Options:
   --path <remote-path>      Remote PocketBrain repo path. Defaults to VPS_PROJECT_DIR env var.
   --port <port>             SSH port. Defaults to VPS_SSH_PORT env var or 22.
   --identity <file>         SSH private key path. Defaults to VPS_SSH_IDENTITY env var.
+  --allow-stash             If remote repo is dirty, stash tracked+untracked changes before sync/deploy.
   --with-worker             Passes --with-worker to remote deploy script.
   --skip-pull               Passes --skip-pull to remote deploy script.
   --sync-only               Only run remote git pull --ff-only (no docker rebuild/redeploy).
@@ -42,6 +45,7 @@ VPS_HOST="${VPS_SSH_HOST:-}"
 PROJECT_DIR="${VPS_PROJECT_DIR:-}"
 SSH_PORT="${VPS_SSH_PORT:-22}"
 SSH_IDENTITY="${VPS_SSH_IDENTITY:-}"
+ALLOW_STASH=false
 WITH_WORKER=false
 SKIP_PULL=false
 SYNC_ONLY=false
@@ -64,6 +68,10 @@ while [[ $# -gt 0 ]]; do
     --identity)
       SSH_IDENTITY="${2:-}"
       shift 2
+      ;;
+    --allow-stash)
+      ALLOW_STASH=true
+      shift
       ;;
     --with-worker)
       WITH_WORKER=true
@@ -130,6 +138,19 @@ if [[ "$PRECHECK_ONLY" == "true" ]]; then
   exit 0
 fi
 
+ensure_remote_repo_clean() {
+  if [[ "$ALLOW_STASH" == "true" ]]; then
+    echo "==> Checking remote repo cleanliness (auto-stash enabled)"
+    ssh "${SSH_ARGS[@]}" "$VPS_HOST" "set -euo pipefail; cd $REMOTE_PROJECT_DIR; if [[ -n \"\$(git status --porcelain)\" ]]; then echo \"Remote repo is dirty; creating stash before continuing\"; git status --short; STASH_NAME=\"codex-predeploy-\$(date +%Y%m%d-%H%M%S)\"; git stash push -u -m \"\$STASH_NAME\"; echo \"Created stash: \$STASH_NAME\"; fi"
+    return
+  fi
+
+  echo "==> Checking remote repo cleanliness"
+  ssh "${SSH_ARGS[@]}" "$VPS_HOST" "set -euo pipefail; cd $REMOTE_PROJECT_DIR; if [[ -n \"\$(git status --porcelain)\" ]]; then echo \"Remote repo is dirty; refusing to continue.\" >&2; git status --short >&2; echo \"Re-run with --allow-stash to auto-stash remote changes.\" >&2; exit 1; fi"
+}
+
+ensure_remote_repo_clean
+
 if [[ "$SYNC_ONLY" == "true" ]]; then
   echo "==> Running remote git sync only"
   ssh "${SSH_ARGS[@]}" "$VPS_HOST" "set -euo pipefail; cd $REMOTE_PROJECT_DIR; git pull --ff-only; git status --short"
@@ -159,7 +180,7 @@ if [[ ${#DEPLOY_FLAGS[@]} -gt 0 ]]; then
 fi
 
 echo "==> Validating remote server runtime config"
-ssh "${SSH_ARGS[@]}" "$VPS_HOST" "set -euo pipefail; cd $REMOTE_PROJECT_DIR; NODE_ENV=production npm run config:check:server"
+ssh "${SSH_ARGS[@]}" "$VPS_HOST" "set -euo pipefail; cd $REMOTE_PROJECT_DIR; bash scripts/render-server-env.sh --mode production --source .env --output server/.env; NODE_ENV=production npm run config:check:server"
 
 if [[ "$WITH_WORKER" == "true" ]]; then
   echo "==> Validating remote worker runtime config"
@@ -168,4 +189,10 @@ fi
 
 echo "==> Running remote deploy workflow"
 ssh "${SSH_ARGS[@]}" "$VPS_HOST" "set -euo pipefail; cd $REMOTE_PROJECT_DIR; bash scripts/deploy-vps.sh$DEPLOY_FLAGS_JOINED"
+echo "==> Running post-deploy verification"
+VERIFY_ARGS=(--host "$VPS_HOST" --path "$PROJECT_DIR" --port "$SSH_PORT")
+if [[ -n "$SSH_IDENTITY" ]]; then
+  VERIFY_ARGS+=(--identity "$SSH_IDENTITY")
+fi
+bash "$ROOT_DIR/scripts/verify-vps-remote.sh" "${VERIFY_ARGS[@]}"
 echo "==> Remote deploy complete"
