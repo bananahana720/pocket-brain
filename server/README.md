@@ -41,3 +41,15 @@ npm --prefix server run dev
 ```bash
 npm --prefix server run build
 ```
+
+## VPS Quick Deploy
+
+From repo root on VPS:
+
+```bash
+bash scripts/deploy-vps.sh
+```
+
+Optional flags:
+- `--with-worker` to deploy Worker after backend checks.
+- `--skip-pull` to skip `git pull --ff-only`.

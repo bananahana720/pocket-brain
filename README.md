@@ -175,6 +175,23 @@ npm run build
 npm run preview
 ```
 
+### VPS Quick Deploy
+
+For existing VPS installs, use the helper script:
+
+```bash
+bash scripts/deploy-vps.sh
+```
+
+Options:
+- `--with-worker`: also runs `npm run worker:deploy` after backend health checks.
+- `--skip-pull`: skips `git pull --ff-only`.
+
+Prerequisites:
+- run from repo root on VPS
+- Docker and Docker Compose available
+- if deploying worker, Cloudflare env auth vars are already exported
+
 ---
 
 ## Project Structure
