@@ -27,6 +27,7 @@ import { hashContent } from './utils/hash';
 import { useDebouncedValue } from './hooks/useDebouncedValue';
 import { useSyncEngine } from './hooks/useSyncEngine';
 import { decodeSharedNotePayload, SharedNotePayload } from './utils/sharedNoteLink';
+import { buildSemanticGraph } from './utils/semanticGraph';
 import {
   AnalysisQueueState,
   NoteOp,
@@ -84,6 +85,7 @@ type CaptureSaveResult = { ok: true } | { ok: false };
 const TodayView = React.lazy(() => import('./components/TodayView'));
 const Drawer = React.lazy(() => import('./components/Drawer'));
 const DiagnosticsPanel = React.lazy(() => import('./components/DiagnosticsPanel'));
+const ThoughtGraphView = React.lazy(() => import('./components/ThoughtGraphView'));
 
 function buildNoteSearchText(note: Note): string {
   return `${note.content} ${note.title || ''} ${(note.tags || []).join(' ')}`.toLowerCase();
@@ -275,7 +277,10 @@ function App() {
   const [undoStack, setUndoStack] = useState<UndoAction[]>([]);
   const [showArchived, setShowArchived] = useState(false);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
-  const [viewMode, setViewMode] = useState<'all' | 'today'>('all');
+  const [viewMode, setViewMode] = useState<'all' | 'today' | 'graph'>('all');
+  const [graphIncludeArchived, setGraphIncludeArchived] = useState(false);
+  const [graphMinScore, setGraphMinScore] = useState(3);
+  const [graphFocusedNoteId, setGraphFocusedNoteId] = useState<string | null>(null);
   const [aiBrief, setAiBrief] = useState<string | null>(null);
   const [isLoadingBrief, setIsLoadingBrief] = useState(false);
   const [visibleNotesCount, setVisibleNotesCount] = useState(INITIAL_VISIBLE_NOTES);
@@ -284,6 +289,7 @@ function App() {
   const [aiErrorMessage, setAiErrorMessage] = useState<string | null>(null);
   const [aiDegradedMessage, setAiDegradedMessage] = useState<string | null>(null);
   const [sharedNotePayload, setSharedNotePayload] = useState<SharedNotePayload | null>(null);
+  const [isNotesHydrated, setIsNotesHydrated] = useState(false);
 
   const pushQueueWarningToast = useCallback((message: string) => {
     const id = `${Date.now()}-${Math.random()}`;
@@ -302,7 +308,7 @@ function App() {
   }, []);
 
   const syncEngine = useSyncEngine({
-    enabled: isAuthLoaded && isSignedIn,
+    enabled: isAuthLoaded && isSignedIn && isNotesHydrated,
     userId,
     notes,
     setNotes,
@@ -343,6 +349,7 @@ function App() {
   const notesListRef = useRef<HTMLDivElement>(null);
   const virtualRangeRafRef = useRef<number | null>(null);
   const syncBlockToastTsRef = useRef(0);
+  const previousViewModeRef = useRef(viewMode);
 
   // --- Toast System ---
   const addToast = useCallback(
@@ -934,6 +941,7 @@ function App() {
       } finally {
         if (!cancelled) {
           hasLoadedRef.current = true;
+          setIsNotesHydrated(true);
           runAnalysisQueue();
         }
       }
@@ -1818,6 +1826,15 @@ function App() {
     [searchQuery, isAiSearch, notes]
   );
 
+  const semanticGraph = useMemo(
+    () =>
+      buildSemanticGraph(notes, {
+        includeArchived: graphIncludeArchived,
+        minScore: graphMinScore,
+      }),
+    [notes, graphIncludeArchived, graphMinScore]
+  );
+
   const filteredNotes = useMemo(() => {
     const activeTagLower = activeTag?.toLowerCase() || null;
     const lowerQ = !isAiSearch && debouncedSearchQuery ? debouncedSearchQuery.toLowerCase() : null;
@@ -1987,11 +2004,67 @@ function App() {
     handleEnterTodayView();
   }, [viewMode, handleEnterTodayView]);
 
+  const handleGraphToggle = useCallback(() => {
+    if (viewMode === 'graph') {
+      setViewMode('all');
+      return;
+    }
+    setViewMode('graph');
+  }, [viewMode]);
+
+  const handleOpenGraph = useCallback(() => {
+    setViewMode('graph');
+  }, []);
+
+  const handleOpenRelatedNote = useCallback((noteId: string) => {
+    setGraphFocusedNoteId(noteId);
+    setViewMode('graph');
+  }, []);
+
+  const handleOpenGraphNode = useCallback(
+    (noteId: string) => {
+      const target = notesRef.current.find(note => note.id === noteId);
+      if (target?.isArchived) {
+        setShowArchived(true);
+      } else {
+        setShowArchived(false);
+      }
+      setFilter('ALL');
+      setSearchQuery('');
+      setActiveTag(null);
+      setGraphFocusedNoteId(noteId);
+      setViewMode('all');
+    },
+    []
+  );
+
   const handleClearFilters = useCallback(() => {
     setFilter('ALL');
     setSearchQuery('');
     setActiveTag(null);
   }, []);
+
+  useEffect(() => {
+    if (viewMode === 'graph' && previousViewModeRef.current !== 'graph') {
+      trackEvent('graph_view_opened', {
+        nodes: semanticGraph.stats.nodeCount,
+        edges: semanticGraph.stats.edgeCount,
+      });
+    }
+    previousViewModeRef.current = viewMode;
+  }, [viewMode, semanticGraph.stats.edgeCount, semanticGraph.stats.nodeCount]);
+
+  useEffect(() => {
+    if (viewMode !== 'graph') return;
+    if (!graphFocusedNoteId) return;
+    const focused = semanticGraph.nodes.find(node => node.id === graphFocusedNoteId);
+    if (!focused) return;
+    const degree = semanticGraph.adjacencyByNoteId.get(graphFocusedNoteId)?.length || 0;
+    trackEvent('graph_node_focused', {
+      degree,
+      type: focused.type || 'NOTE',
+    });
+  }, [graphFocusedNoteId, semanticGraph.adjacencyByNoteId, semanticGraph.nodes, viewMode]);
 
   const handleConnectAI = useCallback(
     async (provider: AIProvider, apiKey: string) => {
@@ -2048,6 +2121,7 @@ function App() {
             onClearData={handleClearData}
             onTagClick={handleTagClick}
             onShowArchived={handleShowArchived}
+            onOpenGraph={handleOpenGraph}
             showArchived={showArchived}
             onExitArchived={handleExitArchived}
             onImportNotes={handleImportNotes}
@@ -2116,6 +2190,18 @@ function App() {
                   {hasOverdueTasks && viewMode !== 'today' && (
                     <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-rose-500 rounded-full border-2 border-white dark:border-zinc-900" />
                   )}
+                </button>
+                <button
+                  onClick={handleGraphToggle}
+                  className={`px-3 py-2 rounded-md transition-colors flex items-center gap-1.5 border ${
+                    viewMode === 'graph'
+                      ? 'bg-brand-100/60 dark:bg-brand-900/40 border-brand-300/60 text-brand-700 dark:text-brand-300'
+                      : 'mission-tag-chip mission-muted hover:text-zinc-700 dark:hover:text-zinc-100'
+                  }`}
+                  title="Graph view"
+                >
+                  <BrainCircuit className="w-4 h-4" />
+                  <span className="text-xs font-semibold hidden sm:inline">Graph</span>
                 </button>
                 <button
                   onClick={handleOpenDrawer}
@@ -2246,9 +2332,24 @@ function App() {
                   onSetDueDate={handleSetDueDate}
                   onSetPriority={handleSetPriority}
                   onTagClick={handleTagClick}
+                  relatedNotesByNoteId={semanticGraph.backlinksByNoteId}
+                  onOpenRelatedNote={handleOpenRelatedNote}
                   aiBrief={aiBrief}
                   isLoadingBrief={isLoadingBrief}
                   onShareBrief={handleShareTodayBrief}
+                />
+              </Suspense>
+            ) : viewMode === 'graph' ? (
+              <Suspense fallback={null}>
+                <ThoughtGraphView
+                  graph={semanticGraph}
+                  includeArchived={graphIncludeArchived}
+                  minScore={graphMinScore}
+                  focusedNoteId={graphFocusedNoteId}
+                  onIncludeArchivedChange={setGraphIncludeArchived}
+                  onMinScoreChange={setGraphMinScore}
+                  onFocusNote={setGraphFocusedNoteId}
+                  onOpenNote={handleOpenGraphNode}
                 />
               </Suspense>
             ) : (
@@ -2314,6 +2415,8 @@ function App() {
                         onArchive={handleArchiveNote}
                         onSetDueDate={handleSetDueDate}
                         onSetPriority={handleSetPriority}
+                        relatedNotes={semanticGraph.backlinksByNoteId.get(note.id) || []}
+                        onOpenRelatedNote={handleOpenRelatedNote}
                       />
                     ))}
 

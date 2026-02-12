@@ -15,6 +15,8 @@ interface TodayViewProps {
   onSetDueDate: (id: string, date: number | undefined) => void;
   onSetPriority: (id: string, priority: 'urgent' | 'normal' | 'low' | undefined) => void;
   onTagClick: (tag: string) => void;
+  relatedNotesByNoteId?: Map<string, Array<{ noteId: string; title: string; score: number; reasonLabel: string }>>;
+  onOpenRelatedNote?: (noteId: string) => void;
   aiBrief: string | null;
   isLoadingBrief: boolean;
   onShareBrief: (brief: string, stats: { overdue: number; dueToday: number; capturedToday: number }) => void;
@@ -32,6 +34,8 @@ const TodayView: React.FC<TodayViewProps> = ({
   onSetDueDate,
   onSetPriority,
   onTagClick,
+  relatedNotesByNoteId,
+  onOpenRelatedNote,
   aiBrief,
   isLoadingBrief,
   onShareBrief,
@@ -88,6 +92,8 @@ const TodayView: React.FC<TodayViewProps> = ({
         onArchive={onArchive}
         onSetDueDate={onSetDueDate}
         onSetPriority={onSetPriority}
+        relatedNotes={relatedNotesByNoteId?.get(note.id) || []}
+        onOpenRelatedNote={onOpenRelatedNote}
       />
     ));
 

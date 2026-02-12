@@ -10,7 +10,7 @@ test.describe('Filters & Search', () => {
 
   test('filter by type: Tasks', async ({ page }) => {
     await gotoWithNotes(page, fixtures());
-    await page.getByRole('button', { name: 'Tasks' }).click();
+    await page.getByRole('button', { name: 'Tasks', exact: true }).click();
     await expect(page.getByText('Task content')).toBeVisible();
     await expect(page.getByText('Regular note')).not.toBeVisible();
     await expect(page.getByText('Idea content')).not.toBeVisible();
@@ -18,14 +18,14 @@ test.describe('Filters & Search', () => {
 
   test('filter by type: Ideas', async ({ page }) => {
     await gotoWithNotes(page, fixtures());
-    await page.getByRole('button', { name: 'Ideas' }).click();
+    await page.getByRole('button', { name: 'Ideas', exact: true }).click();
     await expect(page.getByText('Idea content')).toBeVisible();
     await expect(page.getByText('Regular note')).not.toBeVisible();
   });
 
   test('filter by type: Notes', async ({ page }) => {
     await gotoWithNotes(page, fixtures());
-    await page.getByRole('button', { name: 'Notes' }).click();
+    await page.getByRole('button', { name: 'Notes', exact: true }).click();
     await expect(page.getByText('Regular note')).toBeVisible();
     await expect(page.getByText('Task content')).not.toBeVisible();
   });
@@ -48,10 +48,10 @@ test.describe('Filters & Search', () => {
 
   test('clear filters shows all notes', async ({ page }) => {
     await gotoWithNotes(page, fixtures());
-    await page.getByRole('button', { name: 'Tasks' }).click();
+    await page.getByRole('button', { name: 'Tasks', exact: true }).click();
     await expect(page.getByText('Regular note')).not.toBeVisible();
 
-    await page.getByRole('button', { name: 'All' }).click();
+    await page.getByRole('button', { name: 'All', exact: true }).click();
     await expect(page.getByText('Regular note')).toBeVisible();
     await expect(page.getByText('Task content')).toBeVisible();
     await expect(page.getByText('Idea content')).toBeVisible();

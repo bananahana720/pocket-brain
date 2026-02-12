@@ -35,6 +35,14 @@ test.describe('sync queue backpressure', () => {
         });
       }
 
+      if (pathname === '/api/v2/sync/bootstrap' && request.method() === 'POST') {
+        return json(route, {
+          imported: 0,
+          alreadyBootstrapped: true,
+          cursor: 0,
+        });
+      }
+
       if (pathname === '/api/v2/sync/push' && request.method() === 'POST') {
         return json(route, {
           error: {

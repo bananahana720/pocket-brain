@@ -76,6 +76,14 @@ test.describe('sync reset recovery', () => {
         });
       }
 
+      if (pathname === '/api/v2/sync/bootstrap' && request.method() === 'POST') {
+        return json(route, {
+          imported: 0,
+          alreadyBootstrapped: true,
+          cursor: currentCursor,
+        });
+      }
+
       if (pathname === '/api/v2/sync/push' && request.method() === 'POST') {
         return json(
           route,

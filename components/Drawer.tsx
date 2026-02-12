@@ -36,6 +36,7 @@ interface DrawerProps {
   onClearData: () => void;
   onTagClick?: (tag: string) => void;
   onShowArchived: () => void;
+  onOpenGraph?: () => void;
   showArchived: boolean;
   onExitArchived: () => void;
   onImportNotes?: (notes: Note[]) => void;
@@ -65,6 +66,7 @@ const Drawer: React.FC<DrawerProps> = ({
   onClearData,
   onTagClick,
   onShowArchived,
+  onOpenGraph,
   showArchived,
   onExitArchived,
   onImportNotes,
@@ -699,6 +701,20 @@ const Drawer: React.FC<DrawerProps> = ({
             </div>
           </div>
         )}
+
+        <button
+          onClick={() => {
+            onOpenGraph?.();
+            onClose();
+          }}
+          className="w-full flex items-center justify-between px-4 py-3 rounded-xl mission-tag-chip hover:bg-zinc-50/70 dark:hover:bg-zinc-800/40 text-zinc-700 dark:text-zinc-300 font-medium text-sm transition-colors text-left mb-3"
+        >
+          <div className="flex items-center gap-3">
+            <Link2 className="w-4 h-4" />
+            Thought Graph
+          </div>
+          <span className="text-[10px] uppercase tracking-wide text-zinc-400">Open</span>
+        </button>
 
         {/* Archive */}
         <button

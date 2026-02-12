@@ -7,7 +7,10 @@ export type AnalyticsEventName =
   | 'note_share_clicked'
   | 'note_share_completed'
   | 'note_share_opened'
-  | 'note_share_imported';
+  | 'note_share_imported'
+  | 'graph_view_opened'
+  | 'graph_node_focused'
+  | 'backlink_open_graph_clicked';
 
 interface AnalyticsEvent {
   name: AnalyticsEventName;

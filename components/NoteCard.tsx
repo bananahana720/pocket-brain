@@ -16,6 +16,8 @@ interface NoteCardProps {
   onArchive: (id: string) => void;
   onSetDueDate: (id: string, date: number | undefined) => void;
   onSetPriority: (id: string, priority: 'urgent' | 'normal' | 'low' | undefined) => void;
+  relatedNotes?: Array<{ noteId: string; title: string; score: number; reasonLabel: string }>;
+  onOpenRelatedNote?: (noteId: string) => void;
 }
 
 function formatNoteForSharing(note: Note): { shareText: string; shareUrl: string } {
@@ -41,7 +43,21 @@ const DUE_DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
   day: 'numeric',
 });
 
-const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, onToggleComplete, onReanalyze, onTagClick, onPin, onArchive, onSetDueDate, onSetPriority }) => {
+const NoteCard: React.FC<NoteCardProps> = ({
+  note,
+  onUpdate,
+  onDelete,
+  onCopy,
+  onToggleComplete,
+  onReanalyze,
+  onTagClick,
+  onPin,
+  onArchive,
+  onSetDueDate,
+  onSetPriority,
+  relatedNotes,
+  onOpenRelatedNote,
+}) => {
   const [isEditing, setIsEditing] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showDatePicker, setShowDatePicker] = useState(false);
@@ -139,6 +155,8 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
 
   const shareState =
     shareStatus === 'Failed' ? 'error' : shareStatus ? 'success' : 'idle';
+  const visibleRelated = (relatedNotes || []).slice(0, 3);
+  const remainingRelated = Math.max(0, (relatedNotes?.length || 0) - visibleRelated.length);
 
   const getTypeBadge = () => {
     switch (note.type) {
@@ -484,6 +502,36 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
               #{tag}
             </span>
           ))}
+        </div>
+      )}
+
+      {visibleRelated.length > 0 && !isEditing && (
+        <div className="mt-3 pt-3 border-t border-dashed border-zinc-200/70 dark:border-zinc-700/80">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-400 mb-2">Backlinks</p>
+          <div className="flex flex-wrap gap-1.5">
+            {visibleRelated.map(link => (
+              <button
+                key={link.noteId}
+                onClick={() => {
+                  trackEvent('backlink_open_graph_clicked', {
+                    sourceType: note.type || 'NOTE',
+                    score: link.score,
+                  });
+                  onOpenRelatedNote?.(link.noteId);
+                }}
+                className="mission-tag-chip rounded-md px-2 py-1 text-[10px] text-left text-cyan-700 dark:text-cyan-300 hover:bg-cyan-50/70 dark:hover:bg-cyan-900/20 transition-colors"
+                title={`${link.title} (${link.score})`}
+              >
+                <span className="font-semibold mr-1">{link.title.length > 24 ? `${link.title.slice(0, 22)}...` : link.title}</span>
+                <span className="text-zinc-500 dark:text-zinc-400">{link.reasonLabel}</span>
+              </button>
+            ))}
+            {remainingRelated > 0 && (
+              <span className="rounded-md px-2 py-1 text-[10px] text-zinc-500 dark:text-zinc-400 mission-tag-chip">
+                +{remainingRelated} more
+              </span>
+            )}
+          </div>
         </div>
       )}
     </div>

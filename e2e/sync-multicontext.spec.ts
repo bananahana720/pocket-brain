@@ -159,6 +159,14 @@ test.describe('sync multi-context', () => {
         });
       }
 
+      if (pathname === '/api/v2/sync/bootstrap' && request.method() === 'POST') {
+        return json(route, {
+          imported: 0,
+          alreadyBootstrapped: true,
+          cursor,
+        });
+      }
+
       if (pathname === '/api/v2/devices' && request.method() === 'GET') {
         const devices = Array.from(seenDevices.values()).map((id, index) => ({
           id,
