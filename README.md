@@ -204,8 +204,16 @@ bash scripts/deploy-vps.sh
 Options:
 - `--with-worker`: also runs `npm run worker:deploy` after backend health checks.
 - `--skip-pull`: skips `git pull --ff-only`.
+- `--ready-retries <count>`: overrides readiness retry attempts (default `30`).
+- `--ready-delay <seconds>`: overrides readiness retry delay (default `2`).
 
-Deploy script validates backend readiness via `GET /ready` (DB required, Redis status reported).
+Deploy script now:
+- validates compose config before restart
+- auto-creates database `pocketbrain` if missing
+- checks readiness on both direct API (`:8788/ready`) and nginx (`:8080/ready`)
+- prints compose status + logs on failure
+
+`/ready` is the deployment health endpoint. `/` on nginx may return `404` and is not a deployment-failure signal.
 Server metrics are available at `GET /metrics` for Prometheus scrape integration.
 
 Dedicated multi-instance degradation validation:
@@ -236,6 +244,10 @@ The remote scripts auto-load `.vps-remote.env` and then `.env` for:
 - `VPS_SSH_PORT`
 - `VPS_SSH_IDENTITY`
 - `VPS_SSH_RETRY_ATTEMPTS`
+- `VPS_READY_RETRIES`
+- `VPS_READY_DELAY_SECONDS`
+- `VPS_POSTGRES_READY_RETRIES`
+- `VPS_POSTGRES_READY_DELAY_SECONDS`
 
 One-off shell exports also work:
 
@@ -263,6 +275,7 @@ bash scripts/deploy-vps-remote.sh --with-worker
 bash scripts/deploy-vps-remote.sh --skip-pull
 bash scripts/deploy-vps-remote.sh --allow-stash
 bash scripts/deploy-vps-remote.sh --ssh-retries 5
+bash scripts/deploy-vps-remote.sh --ready-retries 45 --ready-delay 2
 bash scripts/verify-vps-remote.sh --ready-retries 30 --ready-delay 2
 ```
 
@@ -276,7 +289,9 @@ Safe CD run order:
 Notes:
 - `vps:deploy:remote` now fails if the remote repo is dirty.
 - Use `--allow-stash` only when you intentionally want to stash remote drift.
+- `vps:deploy:remote` now prechecks remote docker/npm/.env prerequisites before deploy.
 - Deploy automatically renders `server/.env` from root `.env` before runtime config validation.
+- If remote deploy fails, scripts automatically print remote compose status and recent service logs.
 - If `VPS_SSH_HOST` is set as a raw IP/hostname, scripts default to `ubuntu@<host>`.
 - If `VPS_SSH_IDENTITY` is unset and `~/.ssh/id_ed25519` exists, scripts use it automatically.
 

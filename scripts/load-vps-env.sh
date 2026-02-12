@@ -43,6 +43,10 @@ load_vps_env() {
     load_var_from_file_if_unset "VPS_SSH_PORT" "$file_path"
     load_var_from_file_if_unset "VPS_SSH_IDENTITY" "$file_path"
     load_var_from_file_if_unset "VPS_SSH_RETRY_ATTEMPTS" "$file_path"
+    load_var_from_file_if_unset "VPS_READY_RETRIES" "$file_path"
+    load_var_from_file_if_unset "VPS_READY_DELAY_SECONDS" "$file_path"
+    load_var_from_file_if_unset "VPS_POSTGRES_READY_RETRIES" "$file_path"
+    load_var_from_file_if_unset "VPS_POSTGRES_READY_DELAY_SECONDS" "$file_path"
   done
 
   if [[ -n "${VPS_SSH_HOST:-}" && "${VPS_SSH_HOST}" != *@* ]]; then
@@ -63,6 +67,22 @@ load_vps_env() {
 
   if [[ -z "${VPS_SSH_RETRY_ATTEMPTS:-}" ]]; then
     export VPS_SSH_RETRY_ATTEMPTS="3"
+  fi
+
+  if [[ -z "${VPS_READY_RETRIES:-}" ]]; then
+    export VPS_READY_RETRIES="30"
+  fi
+
+  if [[ -z "${VPS_READY_DELAY_SECONDS:-}" ]]; then
+    export VPS_READY_DELAY_SECONDS="2"
+  fi
+
+  if [[ -z "${VPS_POSTGRES_READY_RETRIES:-}" ]]; then
+    export VPS_POSTGRES_READY_RETRIES="20"
+  fi
+
+  if [[ -z "${VPS_POSTGRES_READY_DELAY_SECONDS:-}" ]]; then
+    export VPS_POSTGRES_READY_DELAY_SECONDS="2"
   fi
 }
 

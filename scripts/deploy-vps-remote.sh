@@ -18,6 +18,8 @@ Options:
   --allow-stash             If remote repo is dirty, stash tracked+untracked changes before sync/deploy.
   --with-worker             Passes --with-worker to remote deploy script.
   --skip-pull               Passes --skip-pull to remote deploy script.
+  --ready-retries <count>   Readiness retries passed to remote deploy/verify checks.
+  --ready-delay <seconds>   Readiness delay passed to remote deploy/verify checks.
   --sync-only               Only run remote git pull --ff-only (no docker rebuild/redeploy).
   --precheck-only           Validate SSH and remote repo path, then exit.
   --help                    Show this help text.
@@ -51,6 +53,8 @@ PROJECT_DIR="${VPS_PROJECT_DIR:-}"
 SSH_PORT="${VPS_SSH_PORT:-22}"
 SSH_IDENTITY="${VPS_SSH_IDENTITY:-}"
 SSH_RETRIES="${VPS_SSH_RETRY_ATTEMPTS:-3}"
+READY_RETRIES="${VPS_READY_RETRIES:-30}"
+READY_DELAY_SECONDS="${VPS_READY_DELAY_SECONDS:-2}"
 ALLOW_STASH=false
 WITH_WORKER=false
 SKIP_PULL=false
@@ -77,6 +81,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --ssh-retries)
       SSH_RETRIES="${2:-}"
+      shift 2
+      ;;
+    --ready-retries)
+      READY_RETRIES="${2:-}"
+      shift 2
+      ;;
+    --ready-delay)
+      READY_DELAY_SECONDS="${2:-}"
       shift 2
       ;;
     --allow-stash)
@@ -125,6 +137,14 @@ if ! [[ "$SSH_RETRIES" =~ ^[0-9]+$ ]] || [[ "$SSH_RETRIES" -lt 1 ]]; then
   echo "Invalid SSH retry count: $SSH_RETRIES (expected integer >= 1)." >&2
   exit 1
 fi
+if ! [[ "$READY_RETRIES" =~ ^[0-9]+$ ]] || [[ "$READY_RETRIES" -lt 1 ]]; then
+  echo "Invalid ready retry count: $READY_RETRIES (expected integer >= 1)." >&2
+  exit 1
+fi
+if ! [[ "$READY_DELAY_SECONDS" =~ ^[0-9]+$ ]] || [[ "$READY_DELAY_SECONDS" -lt 1 ]]; then
+  echo "Invalid ready retry delay: $READY_DELAY_SECONDS (expected integer >= 1)." >&2
+  exit 1
+fi
 
 SSH_ARGS=(
   -p "$SSH_PORT"
@@ -148,8 +168,9 @@ run_ssh() {
   while (( attempt <= attempts )); do
     if ssh "${SSH_ARGS[@]}" "$VPS_HOST" "$remote_cmd"; then
       return 0
+    else
+      exit_code=$?
     fi
-    exit_code=$?
     if (( attempt == attempts )); then
       echo "Remote command failed after ${attempts} attempt(s): $label" >&2
       return "$exit_code"
@@ -163,10 +184,16 @@ run_ssh() {
   return "$exit_code"
 }
 
+collect_remote_runtime_diagnostics() {
+  echo "==> Collecting remote runtime diagnostics"
+  run_ssh "set -euo pipefail; cd $REMOTE_PROJECT_DIR; echo \"compose_ps=\"; docker compose ps || true; echo \"api_logs=\"; docker compose logs --tail=200 api || true; echo \"nginx_logs=\"; docker compose logs --tail=200 nginx || true; echo \"postgres_logs=\"; docker compose logs --tail=120 postgres || true" "remote_runtime_diagnostics" 1 || true
+}
+
 echo "==> Remote target: $VPS_HOST"
 echo "==> Remote path: $PROJECT_DIR"
 echo "==> SSH port: $SSH_PORT"
 echo "==> SSH retries: $SSH_RETRIES"
+echo "==> Ready retries: $READY_RETRIES (delay ${READY_DELAY_SECONDS}s)"
 if [[ -n "$SSH_IDENTITY" ]]; then
   echo "==> SSH identity: $SSH_IDENTITY"
 fi
@@ -176,6 +203,9 @@ run_ssh "echo connected" "ssh_connectivity"
 
 echo "==> Precheck: repository layout"
 run_ssh "set -euo pipefail; cd $REMOTE_PROJECT_DIR; test -d .git; test -x scripts/deploy-vps.sh || test -f scripts/deploy-vps.sh" "repo_layout"
+
+echo "==> Precheck: runtime prerequisites"
+run_ssh "set -euo pipefail; cd $REMOTE_PROJECT_DIR; command -v docker >/dev/null || { echo \"docker is missing on remote host\" >&2; exit 1; }; docker compose version >/dev/null || { echo \"docker compose is unavailable on remote host\" >&2; exit 1; }; command -v node >/dev/null || { echo \"node is missing on remote host\" >&2; exit 1; }; command -v npm >/dev/null || { echo \"npm is missing on remote host\" >&2; exit 1; }; command -v curl >/dev/null || { echo \"curl is missing on remote host\" >&2; exit 1; }; node -e \"const major=parseInt(process.versions.node.split('.')[0],10); if (!Number.isFinite(major) || major < 18) process.exit(1);\" || { echo \"node >= 18 is required on remote host\" >&2; exit 1; }; [[ -f .env ]] || { echo \"Missing .env at $PROJECT_DIR/.env\" >&2; exit 1; }; [[ -f docker-compose.yml ]] || { echo \"Missing docker-compose.yml at $PROJECT_DIR\" >&2; exit 1; }; [[ -f scripts/deploy-vps.sh ]] || { echo \"Missing scripts/deploy-vps.sh\" >&2; exit 1; }" "runtime_prerequisites" 1
 
 if [[ "$PRECHECK_ONLY" == "true" ]]; then
   echo "==> Precheck complete"
@@ -208,12 +238,26 @@ if [[ "$SKIP_PULL" != "true" ]]; then
   SKIP_PULL=true
 fi
 
+echo "==> Checking remote deploy flag compatibility"
+REMOTE_FLAG_SUPPORT_OUTPUT="$(run_ssh "set -euo pipefail; cd $REMOTE_PROJECT_DIR; if grep -q -- '--ready-retries' scripts/deploy-vps.sh; then echo supports_ready_flags=true; else echo supports_ready_flags=false; fi" "deploy_flag_compatibility" 1)"
+echo "$REMOTE_FLAG_SUPPORT_OUTPUT"
+REMOTE_SUPPORTS_READY_FLAGS=false
+if printf "%s" "$REMOTE_FLAG_SUPPORT_OUTPUT" | grep -q "supports_ready_flags=true"; then
+  REMOTE_SUPPORTS_READY_FLAGS=true
+fi
+
 DEPLOY_FLAGS=()
 if [[ "$WITH_WORKER" == "true" ]]; then
   DEPLOY_FLAGS+=("--with-worker")
 fi
 if [[ "$SKIP_PULL" == "true" ]]; then
   DEPLOY_FLAGS+=("--skip-pull")
+fi
+if [[ "$REMOTE_SUPPORTS_READY_FLAGS" == "true" ]]; then
+  DEPLOY_FLAGS+=("--ready-retries" "$READY_RETRIES")
+  DEPLOY_FLAGS+=("--ready-delay" "$READY_DELAY_SECONDS")
+else
+  echo "==> Remote deploy script does not support --ready-* flags yet; using remote defaults"
 fi
 
 DEPLOY_FLAGS_JOINED=""
@@ -232,9 +276,12 @@ if [[ "$WITH_WORKER" == "true" ]]; then
 fi
 
 echo "==> Running remote deploy workflow"
-run_ssh "set -euo pipefail; cd $REMOTE_PROJECT_DIR; bash scripts/deploy-vps.sh$DEPLOY_FLAGS_JOINED" "remote_deploy_workflow" 1
+if ! run_ssh "set -euo pipefail; cd $REMOTE_PROJECT_DIR; bash scripts/deploy-vps.sh$DEPLOY_FLAGS_JOINED" "remote_deploy_workflow" 1; then
+  collect_remote_runtime_diagnostics
+  exit 1
+fi
 echo "==> Running post-deploy verification"
-VERIFY_ARGS=(--host "$VPS_HOST" --path "$PROJECT_DIR" --port "$SSH_PORT" --ssh-retries "$SSH_RETRIES")
+VERIFY_ARGS=(--host "$VPS_HOST" --path "$PROJECT_DIR" --port "$SSH_PORT" --ssh-retries "$SSH_RETRIES" --ready-retries "$READY_RETRIES" --ready-delay "$READY_DELAY_SECONDS")
 if [[ -n "$SSH_IDENTITY" ]]; then
   VERIFY_ARGS+=(--identity "$SSH_IDENTITY")
 fi
