@@ -92,6 +92,15 @@ export interface SyncPushResponse {
   nextCursor: number;
 }
 
+export interface SyncPullResponse {
+  changes: Array<{ cursor: number; op: 'upsert' | 'delete'; note: Note; requestId: string }>;
+  nextCursor: number;
+  resetRequired?: boolean;
+  resetReason?: 'CURSOR_TOO_OLD';
+  oldestAvailableCursor?: number;
+  latestCursor?: number;
+}
+
 export interface SyncCursor {
   value: number;
 }

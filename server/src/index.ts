@@ -59,7 +59,7 @@ export async function buildServer() {
 
   app.addHook('preHandler', async (request, reply) => {
     const routeUrl = request.routeOptions.url;
-    if (routeUrl === '/health' || routeUrl === '/ready') return;
+    if (routeUrl === '/health' || routeUrl === '/ready' || routeUrl === '/metrics') return;
 
     let auth = request.auth;
     let forcedDeviceId: string | undefined;
@@ -169,9 +169,12 @@ export async function buildServer() {
 
 async function start() {
   await connectInfra();
-  await initRealtimeHub();
+  const realtime = await initRealtimeHub();
 
   const app = await buildServer();
+  if (!realtime.distributedFanoutAvailable) {
+    app.log.warn('redis pub/sub unavailable; realtime fanout is in local-fallback mode');
+  }
   const stopMaintenance = startMaintenanceLoop(app.log);
 
   const close = async () => {

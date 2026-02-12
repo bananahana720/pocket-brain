@@ -111,8 +111,10 @@ Create a `.env.local` file in the project root.
    - `STREAM_TICKET_TTL_SECONDS=60`
    - `MAINTENANCE_INTERVAL_MS=600000`
    - `TOMBSTONE_RETENTION_MS=2592000000`
+   - `NOTE_CHANGES_RETENTION_MS=2592000000`
    - `SYNC_BATCH_LIMIT=100`
    - `SYNC_PULL_LIMIT=500`
+   - `REQUIRE_REDIS_FOR_READY=false` (set `true` for multi-instance deployments that require distributed realtime fanout)
 6. Create/connect your API key from the in-app drawer (`Menu > AI Security`).
 
 If Worker Clerk vars are partial/missing while a bearer token is provided, the Worker responds with `AUTH_CONFIG_INVALID`.
@@ -155,6 +157,14 @@ OPENROUTER_API_KEY=your_openrouter_api_key_here
 
 If both keys are present, OpenRouter takes priority. These env keys are used only for local development fallback; production should use the Worker proxy path.
 
+Optional frontend sync queue pressure control:
+
+```bash
+VITE_SYNC_QUEUE_HARD_CAP=500
+```
+
+When exceeded, the client keeps the newest pending operations and drops oldest queued entries after compaction. Queue-cap drops emit telemetry and a throttled in-app warning.
+
 **Local proxy simulation (recommended for testing secure path):**
 
 ```bash
@@ -196,11 +206,47 @@ Options:
 - `--skip-pull`: skips `git pull --ff-only`.
 
 Deploy script validates backend readiness via `GET /ready` (DB required, Redis status reported).
+Server metrics are available at `GET /metrics` for Prometheus scrape integration.
+
+Dedicated multi-instance degradation validation:
+
+```bash
+npm run server:test:chaos
+```
 
 Prerequisites:
 - run from repo root on VPS
 - Docker and Docker Compose available
 - if deploying worker, Cloudflare env auth vars are already exported
+
+### Remote VPS Deploy From Local Machine
+
+You can run VPS deploy/sync actions over SSH from your local repo checkout.
+
+Set once per shell:
+
+```bash
+export VPS_SSH_HOST=ubuntu@your-vps-host
+export VPS_PROJECT_DIR=/srv/pocket-brain
+# Optional:
+export VPS_SSH_PORT=22
+export VPS_SSH_IDENTITY=~/.ssh/id_ed25519
+```
+
+Run commands:
+
+```bash
+npm run vps:precheck:remote
+npm run vps:sync:remote
+npm run vps:deploy:remote
+```
+
+Optional deploy flags:
+
+```bash
+bash scripts/deploy-vps-remote.sh --with-worker
+bash scripts/deploy-vps-remote.sh --skip-pull
+```
 
 ---
 

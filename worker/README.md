@@ -22,6 +22,7 @@ Set `ALLOW_INSECURE_DEV_AUTH=false` in production. Keep insecure auth enabled on
 - `VPS_API_ORIGIN` (required for `/api/v2/*` passthrough, for example `http://127.0.0.1:8788` locally)
 - `VPS_PROXY_TIMEOUT_MS` (default `10000`): timeout for Worker `/api/v2/*` upstream calls.
 - `VPS_PROXY_RETRIES` (default `2`): retry attempts for transient `/api/v2/*` failures (except `/api/v2/events` stream handshake).
+- Worker also applies a short in-memory circuit-breaker for repeated `/api/v2/*` upstream failures to fail fast during outages.
 
 ## Required KV namespace
 

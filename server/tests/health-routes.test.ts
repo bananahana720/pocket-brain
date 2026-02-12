@@ -30,6 +30,9 @@ describe('health routes', () => {
     expect(payload.ok).toBe(true);
     expect(payload.dependencies.database.ok).toBe(true);
     expect(payload.dependencies.redis.ok).toBe(true);
+    expect(payload.dependencies.realtime.mode).toBeDefined();
+    expect(payload.metrics.sync.pullRequests).toBeTypeOf('number');
+    expect(payload.metrics.maintenance.cyclesRun).toBeTypeOf('number');
   });
 
   it('returns 503 when database is unhealthy', async () => {
@@ -45,5 +48,20 @@ describe('health routes', () => {
     const payload = response.json();
     expect(payload.ok).toBe(false);
     expect(payload.dependencies.database.ok).toBe(false);
+  });
+
+  it('returns prometheus metrics payload for scrape integrations', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['content-type']).toContain('text/plain');
+    expect(response.body).toContain('pocketbrain_sync_cursor_resets_total');
+    expect(response.body).toContain('pocketbrain_note_changes_pruned_total');
+    expect(response.body).toContain('pocketbrain_realtime_fallback_dwell_seconds');
+    expect(response.body).toContain('pocketbrain_realtime_fallback_active');
+    expect(response.body).toContain('pocketbrain_realtime_fallback_dwell_seconds_total');
   });
 });

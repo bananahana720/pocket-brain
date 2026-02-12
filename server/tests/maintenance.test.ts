@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const pruneTombstonesMock = vi.hoisted(() => vi.fn());
+const pruneNoteChangesMock = vi.hoisted(() => vi.fn());
 const whereMock = vi.hoisted(() => vi.fn());
 const returningMock = vi.hoisted(() => vi.fn());
 const deleteMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../src/services/sync.js', () => ({
   pruneTombstones: pruneTombstonesMock,
+  pruneNoteChanges: pruneNoteChangesMock,
 }));
 
 vi.mock('../src/db/client.js', () => ({
@@ -18,11 +20,13 @@ vi.mock('../src/db/client.js', () => ({
 describe('maintenance service', () => {
   beforeEach(() => {
     pruneTombstonesMock.mockReset();
+    pruneNoteChangesMock.mockReset();
     whereMock.mockReset();
     returningMock.mockReset();
     deleteMock.mockReset();
 
     pruneTombstonesMock.mockResolvedValue(2);
+    pruneNoteChangesMock.mockResolvedValue(3);
     returningMock.mockResolvedValue([{ requestId: 'a' }, { requestId: 'b' }]);
     whereMock.mockReturnValue({ returning: returningMock });
     deleteMock.mockReturnValue({ where: whereMock });
@@ -38,9 +42,11 @@ describe('maintenance service', () => {
     const result = await runMaintenanceCycle();
 
     expect(pruneTombstonesMock).toHaveBeenCalledTimes(1);
+    expect(pruneNoteChangesMock).toHaveBeenCalledTimes(1);
     expect(deleteMock).toHaveBeenCalledTimes(1);
     expect(result).toEqual({
       prunedTombstones: 2,
+      prunedNoteChanges: 3,
       removedIdempotencyKeys: 2,
     });
   });

@@ -1,4 +1,12 @@
-import { DeviceSession, Note, SyncBootstrapState, SyncConflict, SyncOp, SyncPushResponse } from '../types';
+import {
+  DeviceSession,
+  Note,
+  SyncBootstrapState,
+  SyncConflict,
+  SyncOp,
+  SyncPullResponse,
+  SyncPushResponse,
+} from '../types';
 import { apiFetch } from './apiClient';
 
 function mapError(status: number, payload: any): Error {
@@ -23,14 +31,9 @@ export async function fetchNotesSnapshot(includeDeleted = true): Promise<{ notes
   return payload;
 }
 
-export async function pullSyncChanges(cursor: number): Promise<{
-  changes: Array<{ cursor: number; op: 'upsert' | 'delete'; note: Note; requestId: string }>;
-  nextCursor: number;
-}> {
+export async function pullSyncChanges(cursor: number): Promise<SyncPullResponse> {
   const response = await apiFetch(`/api/v2/sync/pull?cursor=${encodeURIComponent(String(cursor))}`);
-  const payload = await readJson<{ changes: Array<{ cursor: number; op: 'upsert' | 'delete'; note: Note; requestId: string }>; nextCursor: number }>(
-    response
-  );
+  const payload = await readJson<SyncPullResponse>(response);
   if (!response.ok) throw mapError(response.status, payload);
   return payload;
 }

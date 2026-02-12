@@ -18,6 +18,7 @@ import {
   revokeDevice,
 } from '../services/syncService';
 import {
+  type EnqueueSyncOpsResult,
   enqueueSyncOps,
   loadSyncState,
   markSyncBootstrapped,
@@ -50,6 +51,7 @@ const AUTO_MERGE_ALLOWED_FIELDS = new Set<string>(
 );
 const CONFLICT_LOOP_WINDOW_MS = 5 * 60 * 1000;
 const CONFLICT_LOOP_THRESHOLD = 2;
+const SYNC_QUEUE_WARNING_THROTTLE_MS = 60_000;
 
 function isArrayEqual(a: unknown[], b: unknown[]): boolean {
   if (a.length !== b.length) return false;
@@ -183,13 +185,34 @@ function applyRemoteChanges(prev: Note[], changes: Array<{ op: 'upsert' | 'delet
   return merged.sort((a, b) => b.createdAt - a.createdAt);
 }
 
+function applyPendingQueue(base: Note[], pendingQueue: SyncOp[]): Note[] {
+  if (pendingQueue.length === 0) {
+    return base;
+  }
+
+  const byId = new Map(base.map(note => [note.id, note]));
+  for (const op of pendingQueue) {
+    if (op.op === 'delete') {
+      byId.delete(op.noteId);
+      continue;
+    }
+
+    if (op.note) {
+      byId.set(op.noteId, op.note);
+    }
+  }
+
+  return Array.from(byId.values()).sort((a, b) => b.createdAt - a.createdAt);
+}
+
 export function useSyncEngine(args: {
   enabled: boolean;
   userId: string | null;
   notes: Note[];
   setNotes: React.Dispatch<React.SetStateAction<Note[]>>;
+  onQueueWarning?: (message: string) => void;
 }) {
-  const { enabled, userId, notes, setNotes } = args;
+  const { enabled, userId, notes, setNotes, onQueueWarning } = args;
 
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(enabled ? 'syncing' : 'disabled');
   const [conflicts, setConflicts] = useState<SyncConflict[]>([]);
@@ -205,6 +228,7 @@ export function useSyncEngine(args: {
   const notesRef = useRef<Note[]>(notes);
   const conflictsRef = useRef<SyncConflict[]>([]);
   const conflictLoopRef = useRef<Map<string, number[]>>(new Map());
+  const queueWarningTsRef = useRef(0);
 
   useEffect(() => {
     notesRef.current = notes;
@@ -213,6 +237,44 @@ export function useSyncEngine(args: {
   useEffect(() => {
     conflictsRef.current = conflicts;
   }, [conflicts]);
+
+  const applyEnqueueResult = useCallback((result: EnqueueSyncOpsResult, source: string) => {
+    queueRef.current = result.queue;
+    const policy = result.queuePolicy;
+    const hasCompactionDrops = policy.compactionDrops > 0;
+    const hasCapDrops = policy.capDrops > 0;
+
+    if (!hasCompactionDrops && !hasCapDrops) return;
+
+    if (hasCompactionDrops) {
+      incrementMetric('sync_queue_compaction_drops', policy.compactionDrops);
+    }
+    if (hasCapDrops) {
+      incrementMetric('sync_queue_cap_drops', policy.capDrops);
+      incrementMetric('sync_queue_cap_events');
+    }
+
+    console.warn('sync queue applied drop policy', {
+      source,
+      before: policy.before,
+      after: policy.after,
+      cap: policy.cap,
+      compactionDrops: policy.compactionDrops,
+      capDrops: policy.capDrops,
+    });
+
+    if (hasCapDrops && onQueueWarning) {
+      const now = Date.now();
+      if (now - queueWarningTsRef.current >= SYNC_QUEUE_WARNING_THROTTLE_MS) {
+        queueWarningTsRef.current = now;
+        onQueueWarning(
+          `Sync queue reached cap (${policy.cap}); ${policy.capDrops} older pending sync operation${
+            policy.capDrops === 1 ? '' : 's'
+          } were dropped.`
+        );
+      }
+    }
+  }, [onQueueWarning]);
 
   const refreshDevices = useCallback(async () => {
     if (!enabled) {
@@ -319,7 +381,7 @@ export function useSyncEngine(args: {
 
           if (retryOps.length > 0) {
             const retryState = await enqueueSyncOps(retryOps);
-            queueRef.current = retryState.queue;
+            applyEnqueueResult(retryState, 'conflict_retry');
           }
 
           if (manualConflicts.length > 0) {
@@ -344,7 +406,7 @@ export function useSyncEngine(args: {
     } finally {
       processingRef.current = false;
     }
-  }, [enabled, setNotes]);
+  }, [applyEnqueueResult, enabled, setNotes]);
 
   const pullLatest = useCallback(async () => {
     if (!enabled) return;
@@ -357,6 +419,22 @@ export function useSyncEngine(args: {
 
     try {
       const result = await pullSyncChanges(cursorRef.current);
+      if (result.resetRequired) {
+        incrementMetric('sync_cursor_resets');
+        const snapshot = await fetchNotesSnapshot(true);
+        suppressDiffRef.current = true;
+        const baseSnapshot = snapshot.notes
+          .filter(note => !note.deletedAt)
+          .sort((a, b) => b.createdAt - a.createdAt);
+        setNotes(applyPendingQueue(baseSnapshot, queueRef.current));
+        cursorRef.current = Math.max(snapshot.cursor, result.nextCursor || 0);
+        await setSyncCursor(cursorRef.current);
+        if (conflictsRef.current.length === 0) {
+          setSyncStatus('synced');
+        }
+        return;
+      }
+
       if (result.changes.length > 0) {
         suppressDiffRef.current = true;
         setNotes(prev => applyRemoteChanges(prev, result.changes));
@@ -497,13 +575,13 @@ export function useSyncEngine(args: {
 
     enqueueSyncOps(nextOps)
       .then(state => {
-        queueRef.current = state.queue;
+        applyEnqueueResult(state, 'note_diff');
       })
       .then(() => flushPushQueue())
       .catch(() => {
         setSyncStatus('degraded');
       });
-  }, [enabled, flushPushQueue, notes, userId]);
+  }, [applyEnqueueResult, enabled, flushPushQueue, notes, userId]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -612,7 +690,7 @@ export function useSyncEngine(args: {
 
       enqueueSyncOps([retryOp])
         .then(state => {
-          queueRef.current = state.queue;
+          applyEnqueueResult(state, 'manual_conflict_retry');
           setConflicts(prev => {
             const next = prev.filter(item => item.requestId !== requestId);
             conflictsRef.current = next;
@@ -624,7 +702,7 @@ export function useSyncEngine(args: {
           setSyncStatus('degraded');
         });
     },
-    [conflicts, flushPushQueue, resolveConflictKeepServer]
+    [applyEnqueueResult, conflicts, flushPushQueue, resolveConflictKeepServer]
   );
 
   const dismissConflict = useCallback((requestId: string) => {

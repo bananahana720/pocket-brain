@@ -285,11 +285,20 @@ function App() {
   const [aiDegradedMessage, setAiDegradedMessage] = useState<string | null>(null);
   const [sharedNotePayload, setSharedNotePayload] = useState<SharedNotePayload | null>(null);
 
+  const pushQueueWarningToast = useCallback((message: string) => {
+    const id = `${Date.now()}-${Math.random()}`;
+    setToasts(prev => [...prev, { id, message, type: 'info' }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, 5000);
+  }, []);
+
   const syncEngine = useSyncEngine({
     enabled: isAuthLoaded && isSignedIn,
     userId,
     notes,
     setNotes,
+    onQueueWarning: pushQueueWarningToast,
   });
 
   const searchInputRef = useRef<HTMLInputElement>(null);

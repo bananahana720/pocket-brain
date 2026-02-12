@@ -48,6 +48,10 @@ const DiagnosticsPanel: React.FC = () => {
         <p>Capture write-through failure: {clientMetrics.counters.capture_write_through_failure}</p>
         <p>Capture retries clicked: {clientMetrics.counters.capture_retry_clicked}</p>
         <p>Sync conflict-loop blocks: {clientMetrics.counters.sync_conflict_loop_blocks}</p>
+        <p>Sync cursor resets: {clientMetrics.counters.sync_cursor_resets}</p>
+        <p>Sync queue compaction drops: {clientMetrics.counters.sync_queue_compaction_drops}</p>
+        <p>Sync queue cap drops: {clientMetrics.counters.sync_queue_cap_drops}</p>
+        <p>Sync queue cap events: {clientMetrics.counters.sync_queue_cap_events}</p>
         <p>Avg capture visible: {clientMetrics.latencyAverages.captureVisibleMs}ms</p>
         <p>Avg capture write-through: {clientMetrics.latencyAverages.captureWriteMs}ms</p>
         <p>Stale drops: {clientMetrics.counters.stale_analysis_drops}</p>

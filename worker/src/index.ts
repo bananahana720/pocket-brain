@@ -88,6 +88,8 @@ interface Metrics {
   vpsProxyFailures: number;
   vpsProxyTimeouts: number;
   vpsProxyRetries: number;
+  vpsProxyCircuitOpens: number;
+  vpsProxyCircuitRejects: number;
 }
 
 const SESSION_COOKIE_NAME = 'pb_ai_session';
@@ -110,6 +112,8 @@ const CIRCUIT_FAILURE_THRESHOLD = 5;
 const CIRCUIT_OPEN_MS = 30_000;
 const DEFAULT_VPS_PROXY_TIMEOUT_MS = 10_000;
 const DEFAULT_VPS_PROXY_RETRIES = 2;
+const VPS_PROXY_CIRCUIT_FAILURE_THRESHOLD = 5;
+const VPS_PROXY_CIRCUIT_OPEN_MS = 15_000;
 
 type RateLimitEntry = {
   windowStart: number;
@@ -169,12 +173,18 @@ const metrics: Metrics = {
   vpsProxyFailures: 0,
   vpsProxyTimeouts: 0,
   vpsProxyRetries: 0,
+  vpsProxyCircuitOpens: 0,
+  vpsProxyCircuitRejects: 0,
 };
 
 const rateLimits = new Map<string, RateLimitEntry>();
 const providerCircuit: Record<AIProvider, CircuitState> = {
   gemini: { consecutiveFailures: 0, openUntil: 0 },
   openrouter: { consecutiveFailures: 0, openUntil: 0 },
+};
+const vpsProxyCircuit: CircuitState = {
+  consecutiveFailures: 0,
+  openUntil: 0,
 };
 const JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
 const jwksCache = new Map<string, { expiresAt: number; keys: JsonWebKey[] }>();
@@ -383,6 +393,16 @@ function errorResponse(error: unknown): Response {
 }
 
 async function proxyToVps(request: Request, env: Env, pathname: string): Promise<Response> {
+  if (vpsProxyCircuit.openUntil > Date.now()) {
+    metrics.vpsProxyCircuitRejects += 1;
+    throw new ApiError(
+      503,
+      'SERVICE_UNAVAILABLE',
+      'Sync service is temporarily unavailable. Please retry shortly.',
+      true
+    );
+  }
+
   const origin = (env.VPS_API_ORIGIN || '').trim();
   if (!origin) {
     throw new ApiError(503, 'SERVICE_UNAVAILABLE', 'VPS API origin is not configured', true);
@@ -441,6 +461,12 @@ async function proxyToVps(request: Request, env: Env, pathname: string): Promise
         }
 
         metrics.vpsProxyFailures += 1;
+        vpsProxyCircuit.consecutiveFailures += 1;
+        if (vpsProxyCircuit.consecutiveFailures >= VPS_PROXY_CIRCUIT_FAILURE_THRESHOLD) {
+          vpsProxyCircuit.consecutiveFailures = 0;
+          vpsProxyCircuit.openUntil = Date.now() + VPS_PROXY_CIRCUIT_OPEN_MS;
+          metrics.vpsProxyCircuitOpens += 1;
+        }
         throw new ApiError(
           503,
           'SERVICE_UNAVAILABLE',
@@ -450,6 +476,10 @@ async function proxyToVps(request: Request, env: Env, pathname: string): Promise
       }
 
       const passthroughHeaders = new Headers(response.headers);
+      if (vpsProxyCircuit.consecutiveFailures !== 0 || vpsProxyCircuit.openUntil !== 0) {
+        vpsProxyCircuit.consecutiveFailures = 0;
+        vpsProxyCircuit.openUntil = 0;
+      }
       return new Response(response.body, {
         status: response.status,
         headers: passthroughHeaders,
@@ -471,6 +501,12 @@ async function proxyToVps(request: Request, env: Env, pathname: string): Promise
       }
 
       metrics.vpsProxyFailures += 1;
+      vpsProxyCircuit.consecutiveFailures += 1;
+      if (vpsProxyCircuit.consecutiveFailures >= VPS_PROXY_CIRCUIT_FAILURE_THRESHOLD) {
+        vpsProxyCircuit.consecutiveFailures = 0;
+        vpsProxyCircuit.openUntil = Date.now() + VPS_PROXY_CIRCUIT_OPEN_MS;
+        metrics.vpsProxyCircuitOpens += 1;
+      }
       throw new ApiError(
         503,
         'SERVICE_UNAVAILABLE',
@@ -483,6 +519,12 @@ async function proxyToVps(request: Request, env: Env, pathname: string): Promise
   }
 
   metrics.vpsProxyFailures += 1;
+  vpsProxyCircuit.consecutiveFailures += 1;
+  if (vpsProxyCircuit.consecutiveFailures >= VPS_PROXY_CIRCUIT_FAILURE_THRESHOLD) {
+    vpsProxyCircuit.consecutiveFailures = 0;
+    vpsProxyCircuit.openUntil = Date.now() + VPS_PROXY_CIRCUIT_OPEN_MS;
+    metrics.vpsProxyCircuitOpens += 1;
+  }
   throw new ApiError(
     503,
     'SERVICE_UNAVAILABLE',

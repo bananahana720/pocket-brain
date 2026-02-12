@@ -8,6 +8,7 @@
     "start": "node dist/index.js",
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
+    "test:chaos": "RUN_CHAOS_TESTS=1 vitest run tests/chaos-multi-instance.test.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate"
   },

@@ -67,6 +67,17 @@ export async function registerSyncRoutes(app: FastifyInstance): Promise<void> {
     const cursor = Number.isFinite(Number(rawCursor)) ? Math.max(0, Number(rawCursor)) : 0;
 
     const result = await pullSync(request.appUserId, cursor);
+    if (result.resetRequired) {
+      request.log.warn(
+        {
+          cursor,
+          reason: result.resetReason,
+          oldestAvailableCursor: result.oldestAvailableCursor,
+          latestCursor: result.latestCursor,
+        },
+        'sync pull requested cursor reset'
+      );
+    }
     return result;
   });
 

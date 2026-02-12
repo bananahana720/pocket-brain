@@ -91,4 +91,34 @@ describe('worker /api/v2 proxy resilience', () => {
     expect(payload.error.retryable).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
+
+  it('opens a short VPS proxy circuit after repeated failures and then fails fast', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('upstream down', { status: 503 }));
+
+    const env = createEnv({
+      VPS_PROXY_RETRIES: '0',
+    });
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const response = await worker.fetch(
+        new Request(`https://worker.example/api/v2/sync/pull?cursor=${attempt}`),
+        env
+      );
+      expect(response.status).toBe(503);
+    }
+
+    const callsBeforeOpenReject = fetchMock.mock.calls.length;
+    const fastFail = await worker.fetch(
+      new Request('https://worker.example/api/v2/sync/pull?cursor=99'),
+      env
+    );
+    const payload = await fastFail.json();
+
+    expect(fastFail.status).toBe(503);
+    expect(payload.error.code).toBe('SERVICE_UNAVAILABLE');
+    expect(payload.error.retryable).toBe(true);
+    expect(fetchMock.mock.calls.length).toBe(callsBeforeOpenReject);
+  });
 });

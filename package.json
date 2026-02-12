@@ -9,6 +9,7 @@
     "server:dev": "npm --prefix server run dev",
     "server:build": "npm --prefix server run build",
     "server:test": "npm --prefix server run test",
+    "server:test:chaos": "npm --prefix server run test:chaos",
     "build": "vite build",
     "preview": "vite preview",
     "test": "playwright test",
@@ -17,7 +18,10 @@
     "worker:deploy": "WRANGLER_SEND_METRICS=false XDG_CONFIG_HOME=.wrangler-home npx wrangler deploy --config worker/wrangler.toml",
     "worker:kv:create": "WRANGLER_SEND_METRICS=false XDG_CONFIG_HOME=.wrangler-home npx wrangler kv namespace create AI_SESSIONS --config worker/wrangler.toml",
     "worker:secret:set": "WRANGLER_SEND_METRICS=false XDG_CONFIG_HOME=.wrangler-home npx wrangler secret put KEY_ENCRYPTION_SECRET --config worker/wrangler.toml",
-    "worker:bootstrap": "bash scripts/bootstrap-worker.sh"
+    "worker:bootstrap": "bash scripts/bootstrap-worker.sh",
+    "vps:precheck:remote": "bash scripts/deploy-vps-remote.sh --precheck-only",
+    "vps:sync:remote": "bash scripts/deploy-vps-remote.sh --sync-only",
+    "vps:deploy:remote": "bash scripts/deploy-vps-remote.sh"
   },
   "dependencies": {
     "@clerk/clerk-react": "^5.44.0",

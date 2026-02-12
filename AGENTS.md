@@ -112,6 +112,22 @@ Playwright uses `npm run dev` as its web server and targets `http://localhost:30
 
 Deploy script rebuilds containers, applies `server/drizzle/0000_initial.sql`, and validates readiness via `http://127.0.0.1:8080/ready`.
 
+### 14) Remote VPS management from local machine (SSH)
+1. Export remote connection vars:
+   - `export VPS_SSH_HOST=ubuntu@your-vps-host`
+   - `export VPS_PROJECT_DIR=/srv/pocket-brain`
+   - Optional: `export VPS_SSH_PORT=22`
+   - Optional: `export VPS_SSH_IDENTITY=~/.ssh/id_ed25519`
+2. Validate connectivity and remote repo layout:
+   - `npm run vps:precheck:remote`
+3. Sync only (git pull on VPS):
+   - `npm run vps:sync:remote`
+4. Full deploy via remote `scripts/deploy-vps.sh`:
+   - `npm run vps:deploy:remote`
+5. Optional direct flags:
+   - `bash scripts/deploy-vps-remote.sh --with-worker`
+   - `bash scripts/deploy-vps-remote.sh --skip-pull`
+
 ## Command Reference
 
 | Command | Purpose |
@@ -141,6 +157,11 @@ Deploy script rebuilds containers, applies `server/drizzle/0000_initial.sql`, an
 | `bash scripts/deploy-vps.sh` | Deploy backend stack on VPS (pull, rebuild, schema apply, readiness check) |
 | `bash scripts/deploy-vps.sh --with-worker` | Deploy backend stack plus Cloudflare Worker |
 | `bash scripts/deploy-vps.sh --skip-pull` | Deploy backend stack without running git pull |
+| `npm run vps:precheck:remote` | Verify SSH connectivity + repo layout on remote VPS before running actions |
+| `npm run vps:sync:remote` | Run `git pull --ff-only` on remote VPS repo over SSH |
+| `npm run vps:deploy:remote` | Run full VPS deploy workflow remotely over SSH |
+| `bash scripts/deploy-vps-remote.sh --with-worker` | Remote deploy with Cloudflare Worker deploy step |
+| `bash scripts/deploy-vps-remote.sh --skip-pull` | Remote deploy without running `git pull` on VPS |
 | `npx wrangler secret put KEY_ENCRYPTION_SECRET_PREV --config worker/wrangler.toml` | Set previous encryption secret during rotation |
 | `npx wrangler secret delete KEY_ENCRYPTION_SECRET_PREV --config worker/wrangler.toml` | Remove previous encryption secret after rotation window |
 
@@ -150,3 +171,11 @@ Deploy script rebuilds containers, applies `server/drizzle/0000_initial.sql`, an
 - Do not commit real secrets in `.env.local`, `worker/.dev.vars`, or `server/.env`.
 - Prefer end-to-end local workflow when changing AI/session/security/sync behavior.
 - For rotation safety, keep `KEY_ENCRYPTION_SECRET_PREV` only as long as needed to cover active session TTL.
+
+## Session Learnings (2026-02-12)
+- Remote VPS SSH workflow is now validated for Ubuntu hosts via `scripts/deploy-vps-remote.sh` and npm wrappers (`vps:precheck:remote`, `vps:sync:remote`, `vps:deploy:remote`).
+- Always run remote precheck before sync/deploy to fail fast on SSH auth, host reachability, and repo layout issues.
+- If deploy fails at schema apply with `FATAL: database "pocketbrain" does not exist`, create the database first and rerun deploy.
+- If `http://127.0.0.1:8080/ready` returns `404` while API `:8788/ready` is healthy, check nginx config inside the container and recreate nginx after syncing `nginx/nginx.conf`.
+- Keep VPS repo state clean between deploys; local edits on tracked files and untracked backup files can cause confusion during future `git pull --ff-only` runs.
+- Docker Compose warns that `version` in `docker-compose.yml` is obsolete; this is non-blocking but should be cleaned up in a follow-up.

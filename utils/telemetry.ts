@@ -20,7 +20,11 @@ export type ClientMetricName =
   | 'capture_write_through_success'
   | 'capture_write_through_failure'
   | 'capture_retry_clicked'
-  | 'sync_conflict_loop_blocks';
+  | 'sync_conflict_loop_blocks'
+  | 'sync_cursor_resets'
+  | 'sync_queue_compaction_drops'
+  | 'sync_queue_cap_drops'
+  | 'sync_queue_cap_events';
 
 interface ClientMetrics {
   counters: Record<ClientMetricName, number>;
@@ -58,6 +62,10 @@ const metrics: ClientMetrics = {
     capture_write_through_failure: 0,
     capture_retry_clicked: 0,
     sync_conflict_loop_blocks: 0,
+    sync_cursor_resets: 0,
+    sync_queue_compaction_drops: 0,
+    sync_queue_cap_drops: 0,
+    sync_queue_cap_events: 0,
   },
   aiErrorCodes: {},
   latencies: {

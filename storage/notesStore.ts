@@ -9,6 +9,19 @@ const SYNC_STATE_STORE = 'sync_state';
 const SNAPSHOT_KEY = 'current';
 const ANALYSIS_QUEUE_KEY = 'current';
 const SYNC_STATE_KEY = 'current';
+const DEFAULT_SYNC_QUEUE_HARD_CAP = 500;
+
+function resolveSyncQueueHardCap(): number {
+  const raw = import.meta.env?.VITE_SYNC_QUEUE_HARD_CAP;
+  if (!raw) return DEFAULT_SYNC_QUEUE_HARD_CAP;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return DEFAULT_SYNC_QUEUE_HARD_CAP;
+  const normalized = Math.floor(parsed);
+  if (normalized < 1) return DEFAULT_SYNC_QUEUE_HARD_CAP;
+  return normalized;
+}
+
+const SYNC_QUEUE_HARD_CAP = resolveSyncQueueHardCap();
 
 export type NoteOp =
   | { type: 'upsert'; note: Note }
@@ -67,6 +80,18 @@ export interface PersistedSyncState {
   cursor: number;
   queue: SyncOp[];
   bootstrappedUserId: string | null;
+}
+
+export interface SyncQueuePolicyStats {
+  before: number;
+  after: number;
+  cap: number;
+  compactionDrops: number;
+  capDrops: number;
+}
+
+export interface EnqueueSyncOpsResult extends PersistedSyncState {
+  queuePolicy: SyncQueuePolicyStats;
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -270,8 +295,65 @@ export async function saveSyncState(state: PersistedSyncState): Promise<void> {
   }
 }
 
-export async function enqueueSyncOps(ops: SyncOp[]): Promise<PersistedSyncState> {
-  if (ops.length === 0) return loadSyncState();
+function compactSyncQueue(queue: SyncOp[]): SyncOp[] {
+  if (queue.length <= 1) return queue;
+
+  // Keep the most recent pending operation per note to avoid unbounded queue growth while offline.
+  const latestIndexByNoteId = new Map<string, number>();
+  for (let i = 0; i < queue.length; i++) {
+    latestIndexByNoteId.set(queue[i].noteId, i);
+  }
+
+  return queue.filter((op, index) => latestIndexByNoteId.get(op.noteId) === index);
+}
+
+export function applySyncQueuePolicies(queue: SyncOp[], hardCap = SYNC_QUEUE_HARD_CAP): {
+  queue: SyncOp[];
+  queuePolicy: SyncQueuePolicyStats;
+} {
+  const before = queue.length;
+  const compacted = compactSyncQueue(queue);
+  const compactionDrops = Math.max(0, before - compacted.length);
+  const cap = Math.max(1, Math.floor(Number.isFinite(hardCap) ? hardCap : SYNC_QUEUE_HARD_CAP));
+
+  let cappedQueue = compacted;
+  let capDrops = 0;
+  if (compacted.length > cap) {
+    capDrops = compacted.length - cap;
+    // Drop oldest operations to preserve most recent local edits when queue pressure is high.
+    cappedQueue = compacted.slice(capDrops);
+  }
+
+  return {
+    queue: cappedQueue,
+    queuePolicy: {
+      before,
+      after: cappedQueue.length,
+      cap,
+      compactionDrops,
+      capDrops,
+    },
+  };
+}
+
+function withNoQueueDrops(state: PersistedSyncState): EnqueueSyncOpsResult {
+  return {
+    ...state,
+    queuePolicy: {
+      before: state.queue.length,
+      after: state.queue.length,
+      cap: SYNC_QUEUE_HARD_CAP,
+      compactionDrops: 0,
+      capDrops: 0,
+    },
+  };
+}
+
+export async function enqueueSyncOps(ops: SyncOp[]): Promise<EnqueueSyncOpsResult> {
+  if (ops.length === 0) {
+    const current = await loadSyncState();
+    return withNoQueueDrops(current);
+  }
   const current = await loadSyncState();
   const nextQueue = [...current.queue];
 
@@ -284,12 +366,16 @@ export async function enqueueSyncOps(ops: SyncOp[]): Promise<PersistedSyncState>
     }
   }
 
+  const { queue, queuePolicy } = applySyncQueuePolicies(nextQueue);
   const updated: PersistedSyncState = {
     ...current,
-    queue: nextQueue,
+    queue,
   };
   await saveSyncState(updated);
-  return updated;
+  return {
+    ...updated,
+    queuePolicy,
+  };
 }
 
 export async function removeQueuedSyncOps(requestIds: string[]): Promise<PersistedSyncState> {

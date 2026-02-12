@@ -31,8 +31,10 @@ cp server/.env.example server/.env
 - `STREAM_TICKET_TTL_SECONDS` (default `60`)
 - `MAINTENANCE_INTERVAL_MS` (default `600000`)
 - `TOMBSTONE_RETENTION_MS` (default `2592000000`)
+- `NOTE_CHANGES_RETENTION_MS` (default `2592000000`)
 - `SYNC_BATCH_LIMIT` (default `100`)
 - `SYNC_PULL_LIMIT` (default `500`)
+- `REQUIRE_REDIS_FOR_READY` (default `false`; set `true` in multi-instance deployments that require distributed realtime fanout)
 
 For production, set `ALLOW_INSECURE_DEV_AUTH=false`.
 When `ALLOW_INSECURE_DEV_AUTH=false`, `CLERK_SECRET_KEY` is required.
@@ -41,7 +43,28 @@ If you are still on a pre-cutover release with legacy SSE query-token compatibil
 ## Health endpoints
 
 - `GET /health`: liveness check.
-- `GET /ready`: readiness check (DB required, Redis status included).
+- `GET /ready`: readiness check (DB required, Redis status included) plus realtime/sync/maintenance health metrics.
+- `GET /metrics`: Prometheus scrape endpoint (unauthenticated; protect by network/ingress policy in production).
+
+### Prometheus metrics
+
+Key reliability metrics:
+- `pocketbrain_sync_cursor_resets_total`
+- `pocketbrain_note_changes_pruned_total`
+- `pocketbrain_realtime_fallback_dwell_seconds`
+- `pocketbrain_realtime_fallback_active`
+- `pocketbrain_realtime_fallback_dwell_seconds_total`
+
+Example scrape check:
+
+```bash
+curl -s http://127.0.0.1:8788/metrics | grep pocketbrain_
+```
+
+Starter alert ideas:
+- cursor reset surge: `rate(pocketbrain_sync_cursor_resets_total[5m])` above baseline
+- prune surge: `increase(pocketbrain_note_changes_pruned_total[15m])` above expected maintenance volume
+- sustained realtime fallback: `pocketbrain_realtime_fallback_active == 1` with elevated `pocketbrain_realtime_fallback_dwell_seconds`
 
 5. Start server:
 
@@ -54,6 +77,20 @@ npm --prefix server run dev
 ```bash
 npm --prefix server run build
 ```
+
+## Dedicated chaos workflow
+
+Run the multi-instance Redis-degradation validation:
+
+```bash
+npm --prefix server run test:chaos
+```
+
+This workflow validates:
+- 2 API instances against the same Postgres
+- Redis unavailable/degraded behavior
+- readiness with strict/non-strict Redis gating
+- cross-instance sync continuity and realtime endpoint availability
 
 ## VPS Quick Deploy
 

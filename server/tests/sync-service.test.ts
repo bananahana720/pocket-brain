@@ -171,17 +171,39 @@ function createDbMock() {
 
   return {
     query,
-    select() {
+    select(selection?: Record<string, unknown>) {
       return {
         from(table: any) {
           return {
             async where(expr: Expr) {
               if (table !== schema.noteChanges) {
-                return [{ value: 0 }];
+                if (!selection || Object.keys(selection).length === 0) {
+                  return [{ value: 0 }];
+                }
+                const result: Record<string, number> = {};
+                for (const key of Object.keys(selection)) {
+                  result[key] = 0;
+                }
+                return [result];
               }
               const rows = state.noteChanges.filter(row => matchesExpr(row, expr));
+              const minSeq =
+                rows.length > 0 ? rows.reduce((min, row) => Math.min(min, Number(row.seq || 0)), Number.MAX_SAFE_INTEGER) : 0;
               const maxSeq = rows.reduce((max, row) => Math.max(max, Number(row.seq || 0)), 0);
-              return [{ value: maxSeq }];
+              if (!selection || Object.keys(selection).length === 0) {
+                return [{ value: maxSeq }];
+              }
+
+              const result: Record<string, number> = {};
+              for (const key of Object.keys(selection)) {
+                if (key === 'oldest' || key.toLowerCase().includes('min')) {
+                  result[key] = minSeq === Number.MAX_SAFE_INTEGER ? 0 : minSeq;
+                } else {
+                  result[key] = maxSeq;
+                }
+              }
+
+              return [result];
             },
           };
         },
@@ -308,6 +330,16 @@ function createDbMock() {
             };
           }
 
+          if (table === schema.noteChanges) {
+            const deleted = state.noteChanges.filter(row => matchesExpr(row, expr));
+            state.noteChanges = state.noteChanges.filter(row => !matchesExpr(row, expr));
+            return {
+              async returning() {
+                return deleted.map(row => ({ seq: row.seq }));
+              },
+            };
+          }
+
           return Promise.resolve();
         },
       };
@@ -350,7 +382,15 @@ vi.mock('../src/db/client.js', () => ({
   db: createDbMock(),
 }));
 
-import { bootstrapSync, getNotesSnapshot, pullSync, pruneTombstones, pushSync } from '../src/services/sync.js';
+import {
+  bootstrapSync,
+  getNotesSnapshot,
+  getSyncHealthMetrics,
+  pullSync,
+  pruneNoteChanges,
+  pruneTombstones,
+  pushSync,
+} from '../src/services/sync.js';
 
 function makeNote(id: string, version = 1) {
   const now = Date.now();
@@ -411,6 +451,44 @@ describe('sync service', () => {
     const pull = await pullSync(userId, 0);
     expect(pull.changes).toHaveLength(1);
     expect(pull.changes[0].requestId).toBe('req-idempotent-1');
+  });
+
+  it('flags reset required when requested cursor predates pruned change history', async () => {
+    const firstNote = makeNote('note-gap-1', 1);
+    const secondNote = makeNote('note-gap-2', 1);
+
+    await pushSync({
+      userId,
+      deviceId,
+      operations: [
+        {
+          requestId: 'req-gap-1',
+          op: 'upsert',
+          noteId: firstNote.id,
+          baseVersion: 0,
+          note: firstNote,
+        },
+        {
+          requestId: 'req-gap-2',
+          op: 'upsert',
+          noteId: secondNote.id,
+          baseVersion: 0,
+          note: secondNote,
+        },
+      ],
+    });
+
+    mockContext.state.noteChanges = mockContext.state.noteChanges.filter(row => row.seq !== 1);
+
+    const pull = await pullSync(userId, 0);
+    expect(pull.resetRequired).toBe(true);
+    expect(pull.resetReason).toBe('CURSOR_TOO_OLD');
+    expect(pull.oldestAvailableCursor).toBe(2);
+    expect(pull.latestCursor).toBe(2);
+    expect(pull.changes).toEqual([]);
+    expect(pull.nextCursor).toBe(2);
+    const metrics = getSyncHealthMetrics();
+    expect(metrics.pullResetsRequired).toBeGreaterThanOrEqual(1);
   });
 
   it('reports conflicts with server-changed fields derived from base snapshot', async () => {
@@ -539,6 +617,36 @@ describe('sync service', () => {
 
     const afterPrune = await getNotesSnapshot(userId, true);
     expect(afterPrune.notes).toHaveLength(0);
+  });
+
+  it('tracks note-change prune metrics for alerting and diagnostics', async () => {
+    const note = makeNote('note-prune-metrics', 1);
+    await pushSync({
+      userId,
+      deviceId,
+      operations: [
+        {
+          requestId: 'req-prune-metrics-seed',
+          op: 'upsert',
+          noteId: note.id,
+          baseVersion: 0,
+          note,
+        },
+      ],
+    });
+
+    expect(mockContext.state.noteChanges).toHaveLength(1);
+    mockContext.state.noteChanges[0].createdAt = Date.now() - 120_000;
+
+    const before = getSyncHealthMetrics();
+    const prunedCount = await pruneNoteChanges(60_000);
+    const after = getSyncHealthMetrics();
+
+    expect(prunedCount).toBe(1);
+    expect(after.noteChangesPruneRuns).toBe(before.noteChangesPruneRuns + 1);
+    expect(after.noteChangesPrunedTotal).toBe(before.noteChangesPrunedTotal + 1);
+    expect(after.lastNoteChangesPrunedCount).toBe(1);
+    expect(after.lastNoteChangesPrunedAt).toBeTypeOf('number');
   });
 
   it('keeps delete-vs-upsert conflicts manual and includes tombstone changed fields when base note is missing', async () => {

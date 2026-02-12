@@ -50,6 +50,30 @@ export interface SyncPushResult {
   nextCursor: number;
 }
 
+export type SyncPullResetReason = 'CURSOR_TOO_OLD';
+
+export interface SyncPullResult {
+  changes: Array<{ cursor: number; op: 'upsert' | 'delete'; note: SyncNote; requestId: string }>;
+  nextCursor: number;
+  resetRequired?: boolean;
+  resetReason?: SyncPullResetReason;
+  oldestAvailableCursor?: number;
+  latestCursor?: number;
+}
+
+interface SyncHealthMetrics {
+  pullRequests: number;
+  pullResetsRequired: number;
+  lastResetAt: number | null;
+  lastResetCursor: number | null;
+  lastResetOldestAvailableCursor: number | null;
+  lastResetLatestCursor: number | null;
+  noteChangesPruneRuns: number;
+  noteChangesPrunedTotal: number;
+  lastNoteChangesPrunedAt: number | null;
+  lastNoteChangesPrunedCount: number;
+}
+
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const SYNC_FIELD_KEYS: Array<keyof SyncNote> = [
   'content',
@@ -68,6 +92,18 @@ const SYNC_FIELD_KEYS: Array<keyof SyncNote> = [
   'deletedAt',
 ];
 const SYNC_FIELD_NAMES = new Set<string>(SYNC_FIELD_KEYS.map(field => String(field)));
+const syncHealthMetrics: SyncHealthMetrics = {
+  pullRequests: 0,
+  pullResetsRequired: 0,
+  lastResetAt: null,
+  lastResetCursor: null,
+  lastResetOldestAvailableCursor: null,
+  lastResetLatestCursor: null,
+  noteChangesPruneRuns: 0,
+  noteChangesPrunedTotal: 0,
+  lastNoteChangesPrunedAt: null,
+  lastNoteChangesPrunedCount: 0,
+};
 
 function nowTs(): number {
   return Date.now();
@@ -467,6 +503,21 @@ async function getCurrentCursor(userId: string): Promise<number> {
   return row?.value || 0;
 }
 
+async function getCursorWindow(userId: string): Promise<{ oldest: number; latest: number }> {
+  const [row] = await db
+    .select({
+      oldest: sql<number>`coalesce(min(${noteChanges.seq}), 0)`,
+      latest: sql<number>`coalesce(max(${noteChanges.seq}), 0)`,
+    })
+    .from(noteChanges)
+    .where(eq(noteChanges.userId, userId));
+
+  return {
+    oldest: row?.oldest || 0,
+    latest: row?.latest || 0,
+  };
+}
+
 export async function getNotesSnapshot(userId: string, includeDeleted = true): Promise<{ notes: SyncNote[]; cursor: number }> {
   const rows = await db.query.notes.findMany({
     where: includeDeleted ? eq(notes.userId, userId) : and(eq(notes.userId, userId), isNull(notes.deletedAt)),
@@ -480,10 +531,25 @@ export async function getNotesSnapshot(userId: string, includeDeleted = true): P
   };
 }
 
-export async function pullSync(userId: string, cursor: number): Promise<{
-  changes: Array<{ cursor: number; op: 'upsert' | 'delete'; note: SyncNote; requestId: string }>;
-  nextCursor: number;
-}> {
+export async function pullSync(userId: string, cursor: number): Promise<SyncPullResult> {
+  syncHealthMetrics.pullRequests += 1;
+  const window = await getCursorWindow(userId);
+  if (window.oldest > 0 && cursor < window.oldest - 1) {
+    syncHealthMetrics.pullResetsRequired += 1;
+    syncHealthMetrics.lastResetAt = nowTs();
+    syncHealthMetrics.lastResetCursor = cursor;
+    syncHealthMetrics.lastResetOldestAvailableCursor = window.oldest;
+    syncHealthMetrics.lastResetLatestCursor = window.latest;
+    return {
+      changes: [],
+      nextCursor: window.latest,
+      resetRequired: true,
+      resetReason: 'CURSOR_TOO_OLD',
+      oldestAvailableCursor: window.oldest,
+      latestCursor: window.latest,
+    };
+  }
+
   const rows = await db.query.noteChanges.findMany({
     where: and(eq(noteChanges.userId, userId), gt(noteChanges.seq, cursor)),
     orderBy: (table, helpers) => [helpers.asc(table.seq)],
@@ -515,6 +581,12 @@ export async function pullSync(userId: string, cursor: number): Promise<{
   return {
     changes,
     nextCursor,
+  };
+}
+
+export function getSyncHealthMetrics(): SyncHealthMetrics {
+  return {
+    ...syncHealthMetrics,
   };
 }
 
@@ -690,6 +762,21 @@ export async function pruneTombstones(retentionMs = 30 * 24 * 60 * 60 * 1000): P
     .delete(notes)
     .where(and(sql`${notes.deletedAt} is not null`, sql`${notes.deletedAt} < ${cutoff}`))
     .returning({ id: notes.id });
+
+  return rows.length;
+}
+
+export async function pruneNoteChanges(retentionMs = 30 * 24 * 60 * 60 * 1000): Promise<number> {
+  const cutoff = nowTs() - retentionMs;
+  const rows = await db
+    .delete(noteChanges)
+    .where(sql`${noteChanges.createdAt} < ${cutoff}`)
+    .returning({ seq: noteChanges.seq });
+
+  syncHealthMetrics.noteChangesPruneRuns += 1;
+  syncHealthMetrics.noteChangesPrunedTotal += rows.length;
+  syncHealthMetrics.lastNoteChangesPrunedAt = nowTs();
+  syncHealthMetrics.lastNoteChangesPrunedCount = rows.length;
 
   return rows.length;
 }
