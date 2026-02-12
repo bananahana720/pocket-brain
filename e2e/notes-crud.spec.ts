@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { gotoWithNotes, makeNote, createNoteViaUI, openNoteMenu } from './helpers';
+import { configureCaptureSaveHooks, gotoWithNotes, makeNote, createNoteViaUI, openNoteMenu } from './helpers';
 
 test.describe('Notes CRUD', () => {
   test('create a note via textarea + Cmd+Enter', async ({ page }) => {
@@ -8,6 +8,17 @@ test.describe('Notes CRUD', () => {
     await expect(page.getByText('Note captured')).toBeVisible();
     await expect(page.getByText('My first test note here')).toBeVisible();
     await expect(page.getByText('Your mind is clear')).not.toBeVisible();
+  });
+
+  test('shows saving status until durable capture commit', async ({ page }) => {
+    await gotoWithNotes(page);
+    await configureCaptureSaveHooks(page, { delayMs: 650 });
+
+    await createNoteViaUI(page, 'Write-through reliability note');
+
+    await expect(page.getByTestId('capture-save-status')).toContainText('Saving');
+    await expect(page.getByText('Note captured')).toBeVisible();
+    await expect(page.getByText('Write-through reliability note')).toBeVisible();
   });
 
   test('displays seeded notes on load', async ({ page }) => {
@@ -75,6 +86,7 @@ test.describe('Notes CRUD', () => {
   test('notes persist across page reloads', async ({ page }) => {
     await gotoWithNotes(page);
     await createNoteViaUI(page, 'Persistent note content');
+    await expect(page.getByText('Note captured')).toBeVisible();
     await expect(page.getByText('Persistent note content')).toBeVisible();
 
     await page.reload();

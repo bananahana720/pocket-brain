@@ -53,6 +53,15 @@ export async function createNoteViaUI(page: Page, text: string) {
   await textarea.press('Meta+Enter');
 }
 
+export async function configureCaptureSaveHooks(
+  page: Page,
+  options: { delayMs?: number }
+) {
+  await page.evaluate(({ delayMs }) => {
+    (window as any).__PB_CAPTURE_SAVE_DELAY_MS = delayMs ?? 0;
+  }, options);
+}
+
 /** Open the three-dot context menu on the first (or only) note card */
 export async function openNoteMenu(page: Page) {
   await page.locator('.lucide-ellipsis-vertical').first().locator('xpath=ancestor::button').click();

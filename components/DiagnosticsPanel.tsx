@@ -41,6 +41,10 @@ const DiagnosticsPanel: React.FC = () => {
         <p>AI requests: {clientMetrics.counters.ai_requests}</p>
         <p>AI failures: {clientMetrics.counters.ai_failures}</p>
         <p>AI payload avg: {clientMetrics.latencyAverages.aiPayloadBytes} bytes</p>
+        <p>Capture write-through success: {clientMetrics.counters.capture_write_through_success}</p>
+        <p>Capture write-through failure: {clientMetrics.counters.capture_write_through_failure}</p>
+        <p>Capture retries clicked: {clientMetrics.counters.capture_retry_clicked}</p>
+        <p>Avg capture write-through: {clientMetrics.latencyAverages.captureWriteMs}ms</p>
         <p>Stale drops: {clientMetrics.counters.stale_analysis_drops}</p>
         <p>Persist writes: {clientMetrics.counters.persist_writes}</p>
         <p>Persist failures: {clientMetrics.counters.persist_failures}</p>

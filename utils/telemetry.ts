@@ -16,7 +16,10 @@ export type ClientMetricName =
   | 'ai_failures'
   | 'stale_analysis_drops'
   | 'analysis_queue_pauses'
-  | 'analysis_queue_stale_pruned';
+  | 'analysis_queue_stale_pruned'
+  | 'capture_write_through_success'
+  | 'capture_write_through_failure'
+  | 'capture_retry_clicked';
 
 interface ClientMetrics {
   counters: Record<ClientMetricName, number>;
@@ -25,6 +28,7 @@ interface ClientMetrics {
     persistMs: number[];
     aiMs: number[];
     aiPayloadBytes: number[];
+    captureWriteMs: number[];
   };
 }
 
@@ -48,12 +52,16 @@ const metrics: ClientMetrics = {
     stale_analysis_drops: 0,
     analysis_queue_pauses: 0,
     analysis_queue_stale_pruned: 0,
+    capture_write_through_success: 0,
+    capture_write_through_failure: 0,
+    capture_retry_clicked: 0,
   },
   aiErrorCodes: {},
   latencies: {
     persistMs: [],
     aiMs: [],
     aiPayloadBytes: [],
+    captureWriteMs: [],
   },
 };
 
@@ -80,6 +88,10 @@ export function recordAiPayloadBytes(bytes: number): void {
   pushBounded(metrics.latencies.aiPayloadBytes, bytes);
 }
 
+export function recordCaptureWriteThroughLatency(ms: number): void {
+  pushBounded(metrics.latencies.captureWriteMs, ms);
+}
+
 export function recordAiErrorCode(code: string): void {
   metrics.aiErrorCodes[code] = (metrics.aiErrorCodes[code] || 0) + 1;
 }
@@ -97,11 +109,13 @@ export function getClientMetricsSnapshot() {
       persistMs: average(metrics.latencies.persistMs),
       aiMs: average(metrics.latencies.aiMs),
       aiPayloadBytes: average(metrics.latencies.aiPayloadBytes),
+      captureWriteMs: average(metrics.latencies.captureWriteMs),
     },
     latencySamples: {
       persistMs: metrics.latencies.persistMs.length,
       aiMs: metrics.latencies.aiMs.length,
       aiPayloadBytes: metrics.latencies.aiPayloadBytes.length,
+      captureWriteMs: metrics.latencies.captureWriteMs.length,
     },
   };
 }

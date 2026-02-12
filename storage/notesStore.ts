@@ -190,6 +190,52 @@ export async function saveAnalysisQueueState(state: AnalysisQueueState): Promise
   }
 }
 
+export async function saveCapture(note: Note, analysisJob?: PersistedAnalysisJob): Promise<void> {
+  const db = await openDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction([OPS_STORE, ANALYSIS_QUEUE_STORE], 'readwrite');
+      const opsStore = tx.objectStore(OPS_STORE);
+      const queueStore = tx.objectStore(ANALYSIS_QUEUE_STORE);
+
+      opsStore.add({
+        createdAt: Date.now(),
+        op: { type: 'upsert', note } satisfies NoteOp,
+      } satisfies OpRecord);
+
+      if (analysisJob) {
+        const loadQueueRequest = queueStore.get(ANALYSIS_QUEUE_KEY);
+        loadQueueRequest.onsuccess = () => {
+          const record = loadQueueRequest.result as AnalysisQueueRecord | undefined;
+          const pending = sanitizeAnalysisQueue(record?.pending);
+          const deferred = sanitizeAnalysisQueue(record?.deferred);
+          const transient = sanitizeAnalysisQueue(record?.transient);
+          const deadLetter = sanitizeAnalysisQueue(record?.deadLetter);
+          const removeByNoteId = (job: PersistedAnalysisJob) => job.noteId !== analysisJob.noteId;
+
+          queueStore.put({
+            id: ANALYSIS_QUEUE_KEY,
+            updatedAt: Date.now(),
+            pending: [...pending.filter(removeByNoteId), analysisJob],
+            deferred: deferred.filter(removeByNoteId),
+            transient: transient.filter(removeByNoteId),
+            deadLetter: deadLetter.filter(removeByNoteId),
+          } satisfies AnalysisQueueRecord);
+        };
+        loadQueueRequest.onerror = () => {
+          reject(loadQueueRequest.error || new Error('Failed to load analysis queue state for capture save'));
+        };
+      }
+
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('Failed to persist captured note'));
+      tx.onabort = () => reject(tx.error || new Error('Captured note transaction aborted'));
+    });
+  } finally {
+    db.close();
+  }
+}
+
 export async function saveOps(ops: NoteOp[]): Promise<{ opCount: number }> {
   if (ops.length === 0) {
     return { opCount: await getOpCount() };

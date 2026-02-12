@@ -34,6 +34,7 @@ import {
   migrateFromLocalStorage,
   PersistedAnalysisJob,
   resetNotesStore,
+  saveCapture,
   saveAnalysisQueueState,
   saveOps,
 } from './storage/notesStore';
@@ -45,6 +46,7 @@ import {
   parseEncryptedBackupPayloadWithKey,
 } from './utils/encryptedExport';
 import {
+  recordCaptureWriteThroughLatency,
   incrementMetric,
   recordAiErrorCode,
   recordAiLatency,
@@ -76,6 +78,7 @@ const VIRTUAL_ROW_HEIGHT = 210;
 const VIRTUAL_OVERSCAN = 12;
 
 type AnalysisJob = PersistedAnalysisJob;
+type CaptureSaveResult = { ok: true } | { ok: false };
 
 function buildNoteSearchText(note: Note): string {
   return `${note.content} ${note.title || ''} ${(note.tags || []).join(' ')}`.toLowerCase();
@@ -135,6 +138,10 @@ function buildOps(prevNotes: Note[], nextNotes: Note[]): NoteOp[] {
   }
 
   return ops;
+}
+
+function getNotePersistSignature(note: Note): string {
+  return `${note.contentHash || ''}:${note.analysisVersion || 0}:${note.isProcessed ? 1 : 0}`;
 }
 
 function toAiMessage(error: unknown): {
@@ -288,6 +295,7 @@ function App() {
   const persistDirtyRef = useRef(false);
   const analysisQueuePersistChainRef = useRef<Promise<void>>(Promise.resolve());
   const analysisQueueDirtyRef = useRef(false);
+  const prePersistedCaptureSignaturesRef = useRef<Map<string, string>>(new Map());
   const analysisControllersRef = useRef<Map<string, AbortController>>(new Map());
   const pendingAnalysisRef = useRef<AnalysisJob[]>([]);
   const deferredAnalysisRef = useRef<AnalysisJob[]>([]);
@@ -843,18 +851,31 @@ function App() {
 
     const prev = previousNotesRef.current;
     const next = notes;
-    const ops = buildOps(prev, next);
+    const ops = buildOps(prev, next).filter(op => {
+      if (op.type === 'delete') {
+        prePersistedCaptureSignaturesRef.current.delete(op.id);
+        return true;
+      }
+
+      const signature = prePersistedCaptureSignaturesRef.current.get(op.note.id);
+      if (!signature) return true;
+      if (signature !== getNotePersistSignature(op.note)) return true;
+
+      prePersistedCaptureSignaturesRef.current.delete(op.note.id);
+      return false;
+    });
 
     previousNotesRef.current = next;
     writeShadowSnapshot(next);
     void runAutoBackupIfDue(next);
-    if (ops.length === 0) return;
 
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
     } catch (error) {
       console.error('Failed to update localStorage fallback snapshot', error);
     }
+
+    if (ops.length === 0) return;
 
     persistDirtyRef.current = true;
     persistChainRef.current = persistChainRef.current
@@ -1213,7 +1234,7 @@ function App() {
 
   // --- Note Actions ---
   const handleAddNote = useCallback(
-    (content: string, presetType?: NoteType) => {
+    async (content: string, presetType?: NoteType): Promise<CaptureSaveResult> => {
       const id = `${Date.now()}${Math.random().toString().slice(2, 6)}`;
       const now = Date.now();
       const contentSignature = hashContent(content);
@@ -1230,19 +1251,44 @@ function App() {
         ...(presetType ? { type: presetType, title: content.slice(0, 50) } : {}),
       };
 
+      const pendingJob: AnalysisJob | undefined = presetType
+        ? undefined
+        : {
+            noteId: id,
+            content,
+            version: analysisVersion,
+            contentHash: contentSignature,
+            attempts: 0,
+            enqueuedAt: Date.now(),
+          };
+
+      const started = performance.now();
+      try {
+        if (import.meta.env.DEV && typeof window !== 'undefined') {
+          const delayMs = Number((window as any).__PB_CAPTURE_SAVE_DELAY_MS || 0);
+          if (Number.isFinite(delayMs) && delayMs > 0) {
+            await new Promise(resolve => window.setTimeout(resolve, delayMs));
+          }
+        }
+        await saveCapture(newNote, pendingJob);
+        incrementMetric('capture_write_through_success');
+        recordCaptureWriteThroughLatency(performance.now() - started);
+      } catch (error) {
+        console.error('Failed to durably persist captured note', error);
+        incrementMetric('capture_write_through_failure');
+        recordCaptureWriteThroughLatency(performance.now() - started);
+        addToast('Storage issue — note was not saved. Retry.', 'error');
+        return { ok: false };
+      }
+
+      prePersistedCaptureSignaturesRef.current.set(newNote.id, getNotePersistSignature(newNote));
       setNotes(prev => [newNote, ...prev]);
       addToast('Note captured', 'success');
 
-      if (!presetType) {
-        enqueueAnalysis({
-          noteId: id,
-          content,
-          version: analysisVersion,
-          contentHash: contentSignature,
-          attempts: 0,
-          enqueuedAt: Date.now(),
-        });
+      if (pendingJob) {
+        enqueueAnalysis(pendingJob);
       }
+      return { ok: true };
     },
     [addToast, enqueueAnalysis]
   );
@@ -1295,7 +1341,7 @@ function App() {
 
         if (results.length === 0) {
           addToast('Failed to split notes. Saving as single note.', 'error');
-          handleAddNote(content);
+          await handleAddNote(content);
           return;
         }
 
@@ -1325,7 +1371,7 @@ function App() {
         setAiErrorMessage(mapped.message);
         setAiDegradedMessage(mapped.degradedMessage);
         addToast('Batch AI unavailable. Saved as single note instead.', 'error');
-        handleAddNote(content);
+        await handleAddNote(content);
       } finally {
         setIsProcessingBatch(false);
       }

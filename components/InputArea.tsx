@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, forwardRef, useImperativeHandle } from 'react';
 import { Mic, Send, MicOff, X, Sparkles, Wand2, CheckSquare, Lightbulb } from 'lucide-react';
 import { NoteType } from '../types';
+import { incrementMetric } from '../utils/telemetry';
 
 // --- Web Speech API Type Definitions ---
 interface SpeechRecognitionEvent extends Event {
@@ -56,8 +57,8 @@ declare global {
 // ----------------------------------------
 
 interface InputAreaProps {
-  onSave: (content: string, presetType?: NoteType) => void;
-  onBatchSave: (content: string) => void;
+  onSave: (content: string, presetType?: NoteType) => Promise<{ ok: boolean }>;
+  onBatchSave: (content: string) => Promise<void> | void;
   onCleanupDraft: (content: string, mode: 'single' | 'batch') => Promise<{ cleanedText: string; items?: string[] }>;
   onTranscribe?: (audio: Blob) => Promise<string>;
 }
@@ -106,12 +107,16 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
   const [isFocused, setIsFocused] = useState(false);
   const [isBatchMode, setIsBatchMode] = useState(false);
   const [isCleaning, setIsCleaning] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isSaveSlow, setIsSaveSlow] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [cleanupPreview, setCleanupPreview] = useState<CleanupPreviewState | null>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recorderStreamRef = useRef<MediaStream | null>(null);
   const recorderChunksRef = useRef<Blob[]>([]);
   const transcriptionRequestRef = useRef(0);
+  const saveSlowTimerRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const hasSpeechAPI = typeof window !== 'undefined' && ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
@@ -333,19 +338,51 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
     };
   }, []);
 
-  const handleSave = () => {
-    if (!text.trim() || isCleaning || isTranscribing || cleanupPreview) return;
-    if (isBatchMode) {
-      onBatchSave(text);
-    } else {
-      onSave(text, presetType ?? undefined);
+  const clearSaveSlowTimer = () => {
+    if (saveSlowTimerRef.current !== null) {
+      window.clearTimeout(saveSlowTimerRef.current);
+      saveSlowTimerRef.current = null;
     }
-    resetInput();
+  };
+
+  const handleSave = async () => {
+    if (!text.trim() || isCleaning || isTranscribing || cleanupPreview || isSaving) return;
+    if (isBatchMode) {
+      await onBatchSave(text);
+      resetInput();
+      return;
+    }
+
+    if (saveError) {
+      incrementMetric('capture_retry_clicked');
+    }
+    setSaveError(null);
+    setIsSaving(true);
+    setIsSaveSlow(false);
+    clearSaveSlowTimer();
+    saveSlowTimerRef.current = window.setTimeout(() => {
+      setIsSaveSlow(true);
+    }, 500);
+
+    try {
+      const result = await onSave(text, presetType ?? undefined);
+      if (result.ok) {
+        resetInput();
+      } else {
+        setSaveError('Not saved. Retry.');
+      }
+    } catch {
+      setSaveError('Not saved. Retry.');
+    } finally {
+      clearSaveSlowTimer();
+      setIsSaving(false);
+      setIsSaveSlow(false);
+    }
   };
 
   const handleBatchSave = () => {
-    if (!text.trim() || isCleaning || isTranscribing || cleanupPreview) return;
-    onBatchSave(text);
+    if (!text.trim() || isCleaning || isTranscribing || cleanupPreview || isSaving) return;
+    void onBatchSave(text);
     resetInput();
   };
 
@@ -356,21 +393,24 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
     setText('');
     setPresetType(null);
     setIsBatchMode(false);
+    setSaveError(null);
     setCleanupPreview(null);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
       textareaRef.current.focus();
     }
-  }
+  };
 
   const handleQuickAction = (action: 'task' | 'idea' | 'voice' | 'batch') => {
     if (action === 'task') {
       setPresetType(prev => prev === NoteType.TASK ? null : NoteType.TASK);
       setIsBatchMode(false);
+      setSaveError(null);
       textareaRef.current?.focus();
     } else if (action === 'idea') {
       setPresetType(prev => prev === NoteType.IDEA ? null : NoteType.IDEA);
       setIsBatchMode(false);
+      setSaveError(null);
       textareaRef.current?.focus();
     } else if (action === 'voice') {
       setPresetType(null);
@@ -379,6 +419,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
     } else if (action === 'batch') {
       setIsBatchMode(prev => !prev);
       setPresetType(null);
+      setSaveError(null);
       textareaRef.current?.focus();
       requestAnimationFrame(() => resizeTextarea(!isBatchMode));
     }
@@ -423,7 +464,15 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
     setCleanupPreview(null);
 
     if (action === 'keep-both' && preview.originalText.trim()) {
-      onSave(preview.originalText, !isBatchMode ? presetType ?? undefined : undefined);
+      void onSave(preview.originalText, !isBatchMode ? presetType ?? undefined : undefined)
+        .then(result => {
+          if (!result.ok) {
+            setSaveError('Original draft not saved. Retry.');
+          }
+        })
+        .catch(() => {
+          setSaveError('Original draft not saved. Retry.');
+        });
     }
 
     setText(preview.cleanedText);
@@ -444,7 +493,15 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [cleanupPreview]);
 
+  useEffect(
+    () => () => {
+      clearSaveSlowTimer();
+    },
+    []
+  );
+
   const getPlaceholder = () => {
+    if (isSaving) return "Saving...";
     if (isTranscribing) return "Transcribing...";
     if (isCleaning) return "Cleaning draft...";
     if (isListening) return "Listening...";
@@ -455,13 +512,17 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (isSaving) return;
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
       e.preventDefault();
-      handleSave();
+      void handleSave();
     }
   };
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    if (saveError) {
+      setSaveError(null);
+    }
     setText(e.target.value);
     resizeTextarea();
   };
@@ -478,6 +539,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
           <div className="flex gap-2">
             <button
               onClick={() => handleQuickAction('task')}
+              disabled={isSaving}
               className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
                 presetType === NoteType.TASK
                   ? 'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800'
@@ -488,6 +550,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
             </button>
             <button
               onClick={() => handleQuickAction('idea')}
+              disabled={isSaving}
               className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
                 presetType === NoteType.IDEA
                   ? 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-800'
@@ -499,7 +562,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
             {hasVoiceInput && (
             <button
               onClick={() => handleQuickAction('voice')}
-              disabled={isTranscribing}
+              disabled={isTranscribing || isSaving}
               className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
                 isListening
                   ? 'bg-rose-100 dark:bg-rose-900/40 text-rose-700 dark:text-rose-400 border border-rose-200 dark:border-rose-800'
@@ -513,6 +576,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
             )}
             <button
               onClick={() => handleQuickAction('batch')}
+              disabled={isSaving}
               className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
                 isBatchMode
                   ? 'bg-cyan-100 dark:bg-cyan-900/40 text-cyan-700 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-800'
@@ -548,6 +612,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
                 value={text}
                 onChange={handleInput}
                 onKeyDown={handleKeyDown}
+                readOnly={isSaving}
                 onFocus={() => setIsFocused(true)}
                 onBlur={() => setIsFocused(false)}
                 placeholder={getPlaceholder()}
@@ -555,7 +620,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
                 rows={1}
               />
               
-              {text.length > 0 && !isListening && !isTranscribing && (
+              {text.length > 0 && !isListening && !isTranscribing && !isSaving && (
                   <button 
                       onClick={() => setText('')}
                       className="absolute right-2 top-2.5 p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors rounded-full hover:bg-zinc-100 dark:hover:bg-zinc-700"
@@ -571,7 +636,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
             {hasVoiceInput && (
             <button
               onClick={() => void toggleListening()}
-              disabled={isTranscribing}
+              disabled={isTranscribing || isSaving}
               className={`h-12 w-12 rounded-full flex items-center justify-center transition-all duration-300 border ${
                 isListening
                   ? 'bg-rose-50 dark:bg-rose-900/30 border-rose-200 dark:border-rose-800 text-rose-600 animate-pulse shadow-inner'
@@ -590,7 +655,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
                 <>
                     <button
                         onClick={handleCleanup}
-                        disabled={isCleaning || isListening || isTranscribing || !!cleanupPreview}
+                        disabled={isCleaning || isListening || isTranscribing || !!cleanupPreview || isSaving}
                         title={isBatchMode ? "Clean + split draft for review" : "Clean draft for review"}
                         className={`h-12 w-12 rounded-full flex items-center justify-center transition-all duration-300 border shadow-sm disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100 ${
                           isBatchMode
@@ -605,7 +670,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
                    {!isBatchMode && (
                      <button
                           onClick={handleBatchSave}
-                          disabled={isListening || isTranscribing || isCleaning || !!cleanupPreview}
+                          disabled={isListening || isTranscribing || isCleaning || !!cleanupPreview || isSaving}
                           title="AI Batch Split"
                           className="h-12 w-12 rounded-full flex items-center justify-center transition-all duration-300 bg-cyan-100 border border-cyan-200 text-cyan-600 hover:bg-cyan-200 hover:scale-105 shadow-sm disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100"
                       >
@@ -615,8 +680,8 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
 
                     {/* Standard Save */}
                     <button
-                        onClick={handleSave}
-                        disabled={isCleaning || isListening || isTranscribing || !!cleanupPreview}
+                        onClick={() => void handleSave()}
+                        disabled={isCleaning || isListening || isTranscribing || !!cleanupPreview || isSaving}
                         title={isBatchMode ? "Batch Split (⌘+Enter)" : "Save (⌘+Enter)"}
                         className={`h-12 w-12 rounded-full flex items-center justify-center transition-all duration-300 hover:scale-105 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100 shadow-md ${
                           isBatchMode
@@ -638,6 +703,23 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
             )}
           </div>
         </div>
+        {(isSaving || saveError) && (
+          <div className="max-w-3xl mx-auto">
+            {isSaving ? (
+              <p data-testid="capture-save-status" className="text-[11px] mission-muted uppercase tracking-wide">
+                {isSaveSlow ? 'Still saving...' : 'Saving...'}
+              </p>
+            ) : (
+              <button
+                data-testid="capture-save-status"
+                onClick={() => void handleSave()}
+                className="text-[11px] mission-muted uppercase tracking-wide hover:text-zinc-600 dark:hover:text-zinc-300"
+              >
+                {saveError}
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {cleanupPreview && (
