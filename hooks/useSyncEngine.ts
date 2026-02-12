@@ -145,21 +145,42 @@ function buildSafeAutoMergeRetryOp(conflict: SyncConflict, sourceOp: SyncOp): Sy
 }
 
 function areNotesEqual(a: Note, b: Note): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+  if (a === b) return true;
+  if (a.id !== b.id) return false;
+  if (a.createdAt !== b.createdAt) return false;
+  if (a.updatedAt !== b.updatedAt) return false;
+  if (a.version !== b.version) return false;
+
+  for (const field of SYNC_FIELD_KEYS) {
+    if (!areFieldValuesEqual(a[field], b[field])) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function applyRemoteChanges(prev: Note[], changes: Array<{ op: 'upsert' | 'delete'; note: Note }>): Note[] {
   const byId = new Map(prev.map(note => [note.id, note]));
+  let requiresSort = false;
 
   for (const change of changes) {
     if (change.op === 'delete' || change.note.deletedAt) {
       byId.delete(change.note.id);
       continue;
     }
+    const existing = byId.get(change.note.id);
+    if (!existing || existing.createdAt !== change.note.createdAt) {
+      requiresSort = true;
+    }
     byId.set(change.note.id, change.note);
   }
 
-  return Array.from(byId.values()).sort((a, b) => b.createdAt - a.createdAt);
+  const merged = Array.from(byId.values());
+  if (!requiresSort) {
+    return merged;
+  }
+  return merged.sort((a, b) => b.createdAt - a.createdAt);
 }
 
 export function useSyncEngine(args: {

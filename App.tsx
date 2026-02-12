@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import React, { Suspense, useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { Search, Sparkles, Menu, Zap, BrainCircuit, X, Archive, Calendar, WifiOff } from 'lucide-react';
 import { AIAuthState, AIProvider, Note, NoteType, UndoAction } from './types';
 import {
@@ -16,10 +16,7 @@ import {
 } from './services/geminiService';
 import NoteCard from './components/NoteCard';
 import InputArea, { InputAreaHandle } from './components/InputArea';
-import TodayView from './components/TodayView';
-import Drawer from './components/Drawer';
 import ErrorBoundary from './components/ErrorBoundary';
-import DiagnosticsPanel from './components/DiagnosticsPanel';
 import ConflictResolutionModal from './components/ConflictResolutionModal';
 import SyncStatusBadge from './components/SyncStatusBadge';
 import { ToastContainer, ToastMessage, ToastAction } from './components/Toast';
@@ -84,6 +81,9 @@ const VIRTUAL_OVERSCAN = 12;
 
 type AnalysisJob = PersistedAnalysisJob;
 type CaptureSaveResult = { ok: true } | { ok: false };
+const TodayView = React.lazy(() => import('./components/TodayView'));
+const Drawer = React.lazy(() => import('./components/Drawer'));
+const DiagnosticsPanel = React.lazy(() => import('./components/DiagnosticsPanel'));
 
 function buildNoteSearchText(note: Note): string {
   return `${note.content} ${note.title || ''} ${(note.tags || []).join(' ')}`.toLowerCase();
@@ -1989,34 +1989,36 @@ function App() {
       <div className="mission-shell min-h-screen relative overflow-hidden transition-colors duration-300">
         <ToastContainer toasts={toasts} removeToast={removeToast} />
 
-        <Drawer
-          isOpen={isDrawerOpen}
-          onClose={handleCloseDrawer}
-          notes={notes}
-          onExport={handleExportData}
-          onClearData={handleClearData}
-          onTagClick={handleTagClick}
-          onShowArchived={handleShowArchived}
-          showArchived={showArchived}
-          onExitArchived={handleExitArchived}
-          onImportNotes={handleImportNotes}
-          addToast={addToast}
-          aiAuth={aiAuth}
-          aiErrorMessage={aiErrorMessage}
-          onConnectAI={handleConnectAI}
-          onDisconnectAI={handleDisconnectAI}
-          onBackupRecorded={recordBackupCompletion}
-          isAuthLoaded={isAuthLoaded}
-          isSignedIn={isSignedIn}
-          userEmail={userEmail}
-          onSignIn={openSignIn}
-          onSignOut={handleSignOut}
-          syncStatus={syncEngine.syncStatus}
-          devices={syncEngine.devices}
-          currentDeviceId={syncEngine.currentDeviceId}
-          onRefreshDevices={syncEngine.refreshDevices}
-          onRevokeDevice={syncEngine.revokeDevice}
-        />
+        <Suspense fallback={null}>
+          <Drawer
+            isOpen={isDrawerOpen}
+            onClose={handleCloseDrawer}
+            notes={notes}
+            onExport={handleExportData}
+            onClearData={handleClearData}
+            onTagClick={handleTagClick}
+            onShowArchived={handleShowArchived}
+            showArchived={showArchived}
+            onExitArchived={handleExitArchived}
+            onImportNotes={handleImportNotes}
+            addToast={addToast}
+            aiAuth={aiAuth}
+            aiErrorMessage={aiErrorMessage}
+            onConnectAI={handleConnectAI}
+            onDisconnectAI={handleDisconnectAI}
+            onBackupRecorded={recordBackupCompletion}
+            isAuthLoaded={isAuthLoaded}
+            isSignedIn={isSignedIn}
+            userEmail={userEmail}
+            onSignIn={openSignIn}
+            onSignOut={handleSignOut}
+            syncStatus={syncEngine.syncStatus}
+            devices={syncEngine.devices}
+            currentDeviceId={syncEngine.currentDeviceId}
+            onRefreshDevices={syncEngine.refreshDevices}
+            onRevokeDevice={syncEngine.revokeDevice}
+          />
+        </Suspense>
 
         <ConflictResolutionModal
           conflicts={syncEngine.conflicts}
@@ -2181,22 +2183,24 @@ function App() {
         <main className="max-w-3xl mx-auto px-4 py-6 pb-40 space-y-6">
           <ErrorBoundary>
             {viewMode === 'today' ? (
-              <TodayView
-                notes={notes}
-                onUpdate={handleUpdateNote}
-                onDelete={handleDeleteNote}
-                onCopy={handleCopyNote}
-                onToggleComplete={handleToggleComplete}
-                onReanalyze={handleReanalyze}
-                onPin={handlePinNote}
-                onArchive={handleArchiveNote}
-                onSetDueDate={handleSetDueDate}
-                onSetPriority={handleSetPriority}
-                onTagClick={handleTagClick}
-                aiBrief={aiBrief}
-                isLoadingBrief={isLoadingBrief}
-                onShareBrief={handleShareTodayBrief}
-              />
+              <Suspense fallback={null}>
+                <TodayView
+                  notes={notes}
+                  onUpdate={handleUpdateNote}
+                  onDelete={handleDeleteNote}
+                  onCopy={handleCopyNote}
+                  onToggleComplete={handleToggleComplete}
+                  onReanalyze={handleReanalyze}
+                  onPin={handlePinNote}
+                  onArchive={handleArchiveNote}
+                  onSetDueDate={handleSetDueDate}
+                  onSetPriority={handleSetPriority}
+                  onTagClick={handleTagClick}
+                  aiBrief={aiBrief}
+                  isLoadingBrief={isLoadingBrief}
+                  onShareBrief={handleShareTodayBrief}
+                />
+              </Suspense>
             ) : (
               <>
                 {showArchived && (
@@ -2298,7 +2302,11 @@ function App() {
           />
         </ErrorBoundary>
 
-        {import.meta.env.DEV && <DiagnosticsPanel />}
+        {import.meta.env.DEV && (
+          <Suspense fallback={null}>
+            <DiagnosticsPanel />
+          </Suspense>
+        )}
       </div>
     </ThemeProvider>
   );
