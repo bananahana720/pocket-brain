@@ -186,9 +186,11 @@ Deploy script rebuilds containers, applies `server/drizzle/0000_initial.sql`, an
 
 ## Session Learnings (2026-02-12)
 - Remote VPS SSH workflow is now validated for Ubuntu hosts via `scripts/deploy-vps-remote.sh` and npm wrappers (`vps:precheck:remote`, `vps:sync:remote`, `vps:deploy:remote`).
+- Commit/deploy signal playbook: after local validation, run `git push origin main` then `npm run vps:precheck:remote`, `npm run vps:sync:remote`, `npm run vps:deploy:remote -- --skip-pull`, and `npm run vps:verify:remote`.
 - Always run remote precheck before sync/deploy to fail fast on SSH auth, host reachability, and repo layout issues.
 - Remote deploy now fails fast on dirty VPS repo by default; use `--allow-stash` only for intentional one-off recovery.
 - Run `npm run vps:verify:remote` after deploy to confirm remote SHA and `/ready` payload.
+- Remote scripts now auto-load VPS settings from `.vps-remote.env` (fallback `.env`), auto-prefix raw hosts to `ubuntu@`, and default identity to `~/.ssh/id_ed25519` when present.
 - If deploy fails at schema apply with `FATAL: database "pocketbrain" does not exist`, create the database first and rerun deploy.
 - If `http://127.0.0.1:8080/ready` returns `404` while API `:8788/ready` is healthy, check nginx config inside the container and recreate nginx after syncing `nginx/nginx.conf`.
 - Keep VPS repo state clean between deploys; local edits on tracked files and untracked backup files can cause confusion during future `git pull --ff-only` runs.
