@@ -38,7 +38,7 @@ const envSchema = z.object({
   NOTE_CHANGES_RETENTION_MS: z.coerce.number().int().min(24 * 60 * 60 * 1000).default(30 * 24 * 60 * 60 * 1000),
   SYNC_BATCH_LIMIT: z.coerce.number().int().min(1).max(500).default(100),
   SYNC_PULL_LIMIT: z.coerce.number().int().min(1).max(2000).default(500),
-  REQUIRE_REDIS_FOR_READY: optionalBooleanFromEnv.default(false),
+  REQUIRE_REDIS_FOR_READY: optionalBooleanFromEnv,
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -50,6 +50,7 @@ if (!parsed.success) {
 
 const allowInsecureDevAuth = parsed.data.ALLOW_INSECURE_DEV_AUTH ?? parsed.data.NODE_ENV !== 'production';
 const streamTicketSecret = (parsed.data.STREAM_TICKET_SECRET || parsed.data.KEY_ENCRYPTION_SECRET).trim();
+const requireRedisForReady = parsed.data.REQUIRE_REDIS_FOR_READY ?? parsed.data.NODE_ENV === 'production';
 
 if (parsed.data.NODE_ENV === 'production' && allowInsecureDevAuth) {
   throw new Error('Invalid environment:\nALLOW_INSECURE_DEV_AUTH must be false in production.');
@@ -67,5 +68,6 @@ export const env = {
   ...parsed.data,
   ALLOW_INSECURE_DEV_AUTH: allowInsecureDevAuth,
   STREAM_TICKET_SECRET: streamTicketSecret,
+  REQUIRE_REDIS_FOR_READY: requireRedisForReady,
 };
 export type AppEnv = typeof env;

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DeviceSession,
   Note,
+  SyncBackpressure,
   SyncConflict,
   SyncOp,
   SyncPushResponse,
@@ -20,6 +21,7 @@ import {
 import {
   type EnqueueSyncOpsResult,
   enqueueSyncOps,
+  getSyncQueueHardCap,
   loadSyncState,
   markSyncBootstrapped,
   removeQueuedSyncOps,
@@ -27,7 +29,7 @@ import {
 } from '../storage/notesStore';
 import { incrementMetric } from '../utils/telemetry';
 
-export type SyncStatus = 'disabled' | 'syncing' | 'synced' | 'offline' | 'conflict' | 'degraded';
+export type SyncStatus = 'disabled' | 'syncing' | 'synced' | 'offline' | 'conflict' | 'blocked' | 'degraded';
 
 const SYNC_FIELD_KEYS: Array<keyof Note> = [
   'content',
@@ -52,6 +54,8 @@ const AUTO_MERGE_ALLOWED_FIELDS = new Set<string>(
 const CONFLICT_LOOP_WINDOW_MS = 5 * 60 * 1000;
 const CONFLICT_LOOP_THRESHOLD = 2;
 const SYNC_QUEUE_WARNING_THROTTLE_MS = 60_000;
+const SYNC_RETRY_BASE_MS = 1_000;
+const SYNC_RETRY_MAX_MS = 30_000;
 
 function isArrayEqual(a: unknown[], b: unknown[]): boolean {
   if (a.length !== b.length) return false;
@@ -211,13 +215,21 @@ export function useSyncEngine(args: {
   notes: Note[];
   setNotes: React.Dispatch<React.SetStateAction<Note[]>>;
   onQueueWarning?: (message: string) => void;
+  onResetRecovery?: (message: string) => void;
 }) {
-  const { enabled, userId, notes, setNotes, onQueueWarning } = args;
+  const { enabled, userId, notes, setNotes, onQueueWarning, onResetRecovery } = args;
+  const syncQueueCap = getSyncQueueHardCap();
 
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(enabled ? 'syncing' : 'disabled');
   const [conflicts, setConflicts] = useState<SyncConflict[]>([]);
   const [devices, setDevices] = useState<DeviceSession[]>([]);
   const [currentDeviceId, setCurrentDeviceId] = useState<string | null>(null);
+  const [syncBackpressure, setSyncBackpressure] = useState<SyncBackpressure>({
+    blocked: false,
+    pendingOps: 0,
+    cap: syncQueueCap,
+    overflowBy: 0,
+  });
 
   const queueRef = useRef<SyncOp[]>([]);
   const cursorRef = useRef(0);
@@ -227,8 +239,18 @@ export function useSyncEngine(args: {
   const prevNotesRef = useRef<Note[]>(notes);
   const notesRef = useRef<Note[]>(notes);
   const conflictsRef = useRef<SyncConflict[]>([]);
+  const backpressureRef = useRef<SyncBackpressure>({
+    blocked: false,
+    pendingOps: 0,
+    cap: syncQueueCap,
+    overflowBy: 0,
+  });
   const conflictLoopRef = useRef<Map<string, number[]>>(new Map());
   const queueWarningTsRef = useRef(0);
+  const retryAttemptRef = useRef(0);
+  const retryTimerRef = useRef<number | null>(null);
+  const pullLatestRef = useRef<() => Promise<void>>(async () => {});
+  const flushPushQueueRef = useRef<() => Promise<void>>(async () => {});
 
   useEffect(() => {
     notesRef.current = notes;
@@ -238,43 +260,103 @@ export function useSyncEngine(args: {
     conflictsRef.current = conflicts;
   }, [conflicts]);
 
+  const setBackpressureState = useCallback((next: SyncBackpressure) => {
+    backpressureRef.current = next;
+    setSyncBackpressure(next);
+  }, []);
+
+  const refreshBackpressureFromQueue = useCallback((queue: SyncOp[], cap = syncQueueCap): SyncBackpressure => {
+    const normalizedCap = Math.max(1, cap);
+    const pendingOps = queue.length;
+    const overflowBy = Math.max(0, pendingOps - normalizedCap);
+    const next: SyncBackpressure = {
+      blocked: pendingOps >= normalizedCap,
+      pendingOps,
+      cap: normalizedCap,
+      overflowBy,
+    };
+    setBackpressureState(next);
+    return next;
+  }, [setBackpressureState, syncQueueCap]);
+
+  const setSyncStatusSafe = useCallback((next: SyncStatus) => {
+    if (next === 'disabled') {
+      setSyncStatus('disabled');
+      return;
+    }
+    if (conflictsRef.current.length > 0) {
+      setSyncStatus('conflict');
+      return;
+    }
+    if (next === 'offline') {
+      setSyncStatus('offline');
+      return;
+    }
+    if (backpressureRef.current.blocked) {
+      setSyncStatus('blocked');
+      return;
+    }
+    setSyncStatus(next);
+  }, []);
+
+  const resetRetryBackoff = useCallback(() => {
+    retryAttemptRef.current = 0;
+    if (retryTimerRef.current !== null) {
+      window.clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleRetry = useCallback(() => {
+    if (retryTimerRef.current !== null || !enabled || !navigator.onLine) return;
+    const baseDelay = Math.min(SYNC_RETRY_MAX_MS, SYNC_RETRY_BASE_MS * Math.pow(2, retryAttemptRef.current));
+    const delay = Math.min(SYNC_RETRY_MAX_MS, baseDelay + Math.floor(Math.random() * 250));
+    retryAttemptRef.current += 1;
+    retryTimerRef.current = window.setTimeout(() => {
+      retryTimerRef.current = null;
+      void pullLatestRef.current();
+      void flushPushQueueRef.current();
+    }, delay);
+  }, [enabled]);
+
   const applyEnqueueResult = useCallback((result: EnqueueSyncOpsResult, source: string) => {
     queueRef.current = result.queue;
     const policy = result.queuePolicy;
+    const wasBlocked = backpressureRef.current.blocked;
+    const nextBackpressure = refreshBackpressureFromQueue(result.queue, policy.cap);
     const hasCompactionDrops = policy.compactionDrops > 0;
-    const hasCapDrops = policy.capDrops > 0;
-
-    if (!hasCompactionDrops && !hasCapDrops) return;
 
     if (hasCompactionDrops) {
       incrementMetric('sync_queue_compaction_drops', policy.compactionDrops);
-    }
-    if (hasCapDrops) {
-      incrementMetric('sync_queue_cap_drops', policy.capDrops);
-      incrementMetric('sync_queue_cap_events');
+      console.warn('sync queue compacted pending operations', {
+        source,
+        before: policy.before,
+        after: policy.after,
+        cap: policy.cap,
+        compactionDrops: policy.compactionDrops,
+      });
     }
 
-    console.warn('sync queue applied drop policy', {
-      source,
-      before: policy.before,
-      after: policy.after,
-      cap: policy.cap,
-      compactionDrops: policy.compactionDrops,
-      capDrops: policy.capDrops,
-    });
+    if (nextBackpressure.blocked && !wasBlocked) {
+      incrementMetric('sync_queue_block_events');
+    }
 
-    if (hasCapDrops && onQueueWarning) {
+    if (nextBackpressure.blocked && onQueueWarning) {
       const now = Date.now();
       if (now - queueWarningTsRef.current >= SYNC_QUEUE_WARNING_THROTTLE_MS) {
         queueWarningTsRef.current = now;
         onQueueWarning(
-          `Sync queue reached cap (${policy.cap}); ${policy.capDrops} older pending sync operation${
-            policy.capDrops === 1 ? '' : 's'
-          } were dropped.`
+          `Sync queue is at capacity (${nextBackpressure.pendingOps}/${nextBackpressure.cap}). Reconnect and let sync drain before editing more notes.`
         );
       }
     }
-  }, [onQueueWarning]);
+
+    if (nextBackpressure.blocked && navigator.onLine && conflictsRef.current.length === 0) {
+      setSyncStatus('blocked');
+    } else if (!nextBackpressure.blocked && wasBlocked && conflictsRef.current.length === 0) {
+      setSyncStatusSafe(navigator.onLine ? 'syncing' : 'offline');
+    }
+  }, [onQueueWarning, refreshBackpressureFromQueue, setSyncStatusSafe]);
 
   const refreshDevices = useCallback(async () => {
     if (!enabled) {
@@ -295,19 +377,20 @@ export function useSyncEngine(args: {
   const flushPushQueue = useCallback(async () => {
     if (!enabled || processingRef.current) return;
     if (!navigator.onLine) {
-      setSyncStatus('offline');
+      setSyncStatusSafe('offline');
       return;
     }
 
     if (queueRef.current.length === 0) {
+      refreshBackpressureFromQueue(queueRef.current);
       if (conflictsRef.current.length === 0) {
-        setSyncStatus('synced');
+        setSyncStatusSafe('synced');
       }
       return;
     }
 
     processingRef.current = true;
-    setSyncStatus(prev => (prev === 'conflict' ? prev : 'syncing'));
+    setSyncStatusSafe('syncing');
 
     try {
       while (queueRef.current.length > 0) {
@@ -316,17 +399,19 @@ export function useSyncEngine(args: {
 
         try {
           response = await pushSyncOps(batch);
+          resetRetryBackoff();
         } catch (error) {
           const status = (error as Error & { status?: number }).status;
           if (status === 401 || status === 403) {
-            setSyncStatus('degraded');
+            setSyncStatusSafe('degraded');
             return;
           }
           if (!navigator.onLine) {
-            setSyncStatus('offline');
+            setSyncStatusSafe('offline');
             return;
           }
-          setSyncStatus('degraded');
+          setSyncStatusSafe('degraded');
+          scheduleRetry();
           return;
         }
 
@@ -337,6 +422,7 @@ export function useSyncEngine(args: {
           }
           const state = await removeQueuedSyncOps(appliedIds);
           queueRef.current = state.queue;
+          refreshBackpressureFromQueue(state.queue);
           cursorRef.current = Math.max(cursorRef.current, response.nextCursor);
           await setSyncCursor(cursorRef.current);
 
@@ -357,6 +443,7 @@ export function useSyncEngine(args: {
           const conflictRequestIds = response.conflicts.map(conflict => conflict.requestId);
           const state = await removeQueuedSyncOps(conflictRequestIds);
           queueRef.current = state.queue;
+          refreshBackpressureFromQueue(state.queue);
 
           for (const conflict of response.conflicts) {
             const now = Date.now();
@@ -400,25 +487,34 @@ export function useSyncEngine(args: {
 
         if (queueRef.current.length === 0) {
           const hasConflicts = manualConflicts.length > 0 || conflictsRef.current.length > 0;
-          setSyncStatus(hasConflicts ? 'conflict' : 'synced');
+          setSyncStatusSafe(hasConflicts ? 'conflict' : 'synced');
         }
       }
     } finally {
       processingRef.current = false;
     }
-  }, [applyEnqueueResult, enabled, setNotes]);
+  }, [
+    applyEnqueueResult,
+    enabled,
+    refreshBackpressureFromQueue,
+    resetRetryBackoff,
+    scheduleRetry,
+    setNotes,
+    setSyncStatusSafe,
+  ]);
 
   const pullLatest = useCallback(async () => {
     if (!enabled) return;
     if (!navigator.onLine) {
-      setSyncStatus('offline');
+      setSyncStatusSafe('offline');
       return;
     }
 
-    setSyncStatus(prev => (prev === 'conflict' ? prev : 'syncing'));
+    setSyncStatusSafe('syncing');
 
     try {
       const result = await pullSyncChanges(cursorRef.current);
+      resetRetryBackoff();
       if (result.resetRequired) {
         incrementMetric('sync_cursor_resets');
         const snapshot = await fetchNotesSnapshot(true);
@@ -429,8 +525,10 @@ export function useSyncEngine(args: {
         setNotes(applyPendingQueue(baseSnapshot, queueRef.current));
         cursorRef.current = Math.max(snapshot.cursor, result.nextCursor || 0);
         await setSyncCursor(cursorRef.current);
+        incrementMetric('sync_cursor_reset_recoveries');
+        onResetRecovery?.('Recovered sync state after a stale cursor reset.');
         if (conflictsRef.current.length === 0) {
-          setSyncStatus('synced');
+          setSyncStatusSafe('synced');
         }
         return;
       }
@@ -442,16 +540,17 @@ export function useSyncEngine(args: {
       cursorRef.current = Math.max(cursorRef.current, result.nextCursor);
       await setSyncCursor(cursorRef.current);
       if (conflictsRef.current.length === 0) {
-        setSyncStatus('synced');
+        setSyncStatusSafe('synced');
       }
     } catch {
       if (!navigator.onLine) {
-        setSyncStatus('offline');
+        setSyncStatusSafe('offline');
       } else {
-        setSyncStatus('degraded');
+        setSyncStatusSafe('degraded');
+        scheduleRetry();
       }
     }
-  }, [enabled, setNotes]);
+  }, [enabled, onResetRecovery, resetRetryBackoff, scheduleRetry, setNotes, setSyncStatusSafe]);
 
   useEffect(() => {
     if (!enabled || !userId) {
@@ -459,9 +558,16 @@ export function useSyncEngine(args: {
       queueRef.current = [];
       cursorRef.current = 0;
       conflictLoopRef.current.clear();
+      resetRetryBackoff();
       setConflicts([]);
       setDevices([]);
       setCurrentDeviceId(null);
+      setBackpressureState({
+        blocked: false,
+        pendingOps: 0,
+        cap: syncQueueCap,
+        overflowBy: 0,
+      });
       setSyncStatus('disabled');
       prevNotesRef.current = notes;
       return;
@@ -475,10 +581,11 @@ export function useSyncEngine(args: {
     initializedUserRef.current = userId;
 
     const init = async () => {
-      setSyncStatus('syncing');
+      setSyncStatusSafe('syncing');
 
       const persisted = await loadSyncState();
       queueRef.current = persisted.queue;
+      refreshBackpressureFromQueue(queueRef.current);
       cursorRef.current = persisted.cursor;
 
       if (!persisted.bootstrappedUserId && notesRef.current.length > 0) {
@@ -504,20 +611,35 @@ export function useSyncEngine(args: {
       await pullLatest();
       await flushPushQueue();
       if (!cancelled && conflictsRef.current.length === 0) {
-        setSyncStatus('synced');
+        setSyncStatusSafe('synced');
       }
     };
 
     init().catch(() => {
       if (!cancelled) {
-        setSyncStatus('degraded');
+        setSyncStatusSafe('degraded');
+        scheduleRetry();
       }
     });
 
     return () => {
       cancelled = true;
     };
-  }, [enabled, flushPushQueue, notes, pullLatest, refreshDevices, setNotes, userId]);
+  }, [
+    enabled,
+    flushPushQueue,
+    notes,
+    pullLatest,
+    refreshBackpressureFromQueue,
+    refreshDevices,
+    resetRetryBackoff,
+    scheduleRetry,
+    setBackpressureState,
+    setNotes,
+    setSyncStatusSafe,
+    syncQueueCap,
+    userId,
+  ]);
 
   useEffect(() => {
     prevNotesRef.current = notes;
@@ -579,9 +701,10 @@ export function useSyncEngine(args: {
       })
       .then(() => flushPushQueue())
       .catch(() => {
-        setSyncStatus('degraded');
+        setSyncStatusSafe('degraded');
+        scheduleRetry();
       });
-  }, [applyEnqueueResult, enabled, flushPushQueue, notes, userId]);
+  }, [applyEnqueueResult, enabled, flushPushQueue, notes, scheduleRetry, setSyncStatusSafe, userId]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -594,13 +717,14 @@ export function useSyncEngine(args: {
       },
       () => {
         if (navigator.onLine) {
-          setSyncStatus(prev => (prev === 'conflict' ? prev : 'degraded'));
+          setSyncStatusSafe('degraded');
+          scheduleRetry();
         }
       }
     );
 
     return () => disconnect();
-  }, [enabled, pullLatest]);
+  }, [enabled, pullLatest, scheduleRetry, setSyncStatusSafe]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -616,14 +740,14 @@ export function useSyncEngine(args: {
   useEffect(() => {
     const onOnline = () => {
       if (!enabled) return;
-      setSyncStatus(prev => (prev === 'conflict' ? prev : 'syncing'));
+      setSyncStatusSafe('syncing');
       void pullLatest();
       void flushPushQueue();
     };
 
     const onOffline = () => {
       if (!enabled) return;
-      setSyncStatus('offline');
+      setSyncStatusSafe('offline');
     };
 
     window.addEventListener('online', onOnline);
@@ -633,7 +757,7 @@ export function useSyncEngine(args: {
       window.removeEventListener('online', onOnline);
       window.removeEventListener('offline', onOffline);
     };
-  }, [enabled, flushPushQueue, pullLatest]);
+  }, [enabled, flushPushQueue, pullLatest, setSyncStatusSafe]);
 
   const resolveConflictKeepServer = useCallback((requestId: string) => {
     setConflicts(prev => {
@@ -699,10 +823,11 @@ export function useSyncEngine(args: {
         })
         .then(() => flushPushQueue())
         .catch(() => {
-          setSyncStatus('degraded');
+          setSyncStatusSafe('degraded');
+          scheduleRetry();
         });
     },
-    [applyEnqueueResult, conflicts, flushPushQueue, resolveConflictKeepServer]
+    [applyEnqueueResult, conflicts, flushPushQueue, resolveConflictKeepServer, scheduleRetry, setSyncStatusSafe]
   );
 
   const dismissConflict = useCallback((requestId: string) => {
@@ -721,12 +846,32 @@ export function useSyncEngine(args: {
   useEffect(() => {
     if (conflicts.length > 0) {
       setSyncStatus('conflict');
+      return;
     }
-  }, [conflicts.length]);
+    if (!enabled) return;
+    if (backpressureRef.current.blocked) {
+      setSyncStatusSafe(navigator.onLine ? 'blocked' : 'offline');
+    }
+  }, [conflicts.length, enabled, setSyncStatusSafe]);
+
+  useEffect(() => {
+    pullLatestRef.current = pullLatest;
+  }, [pullLatest]);
+
+  useEffect(() => {
+    flushPushQueueRef.current = flushPushQueue;
+  }, [flushPushQueue]);
+
+  useEffect(() => {
+    return () => {
+      resetRetryBackoff();
+    };
+  }, [resetRetryBackoff]);
 
   return useMemo(
     () => ({
       syncStatus,
+      syncBackpressure,
       conflicts,
       devices,
       currentDeviceId,
@@ -738,6 +883,7 @@ export function useSyncEngine(args: {
     }),
     [
       syncStatus,
+      syncBackpressure,
       conflicts,
       devices,
       currentDeviceId,

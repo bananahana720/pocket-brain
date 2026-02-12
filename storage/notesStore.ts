@@ -12,6 +12,13 @@ const SYNC_STATE_KEY = 'current';
 const DEFAULT_SYNC_QUEUE_HARD_CAP = 500;
 
 function resolveSyncQueueHardCap(): number {
+  if (typeof window !== 'undefined') {
+    const testOverride = Number((window as Window & { __PB_SYNC_QUEUE_HARD_CAP?: number }).__PB_SYNC_QUEUE_HARD_CAP);
+    if (Number.isFinite(testOverride) && Math.floor(testOverride) >= 1) {
+      return Math.floor(testOverride);
+    }
+  }
+
   const raw = import.meta.env?.VITE_SYNC_QUEUE_HARD_CAP;
   if (!raw) return DEFAULT_SYNC_QUEUE_HARD_CAP;
   const parsed = Number(raw);
@@ -22,6 +29,10 @@ function resolveSyncQueueHardCap(): number {
 }
 
 const SYNC_QUEUE_HARD_CAP = resolveSyncQueueHardCap();
+
+export function getSyncQueueHardCap(): number {
+  return SYNC_QUEUE_HARD_CAP;
+}
 
 export type NoteOp =
   | { type: 'upsert'; note: Note }
@@ -87,7 +98,9 @@ export interface SyncQueuePolicyStats {
   after: number;
   cap: number;
   compactionDrops: number;
-  capDrops: number;
+  blocked: boolean;
+  overflowBy: number;
+  pendingOps: number;
 }
 
 export interface EnqueueSyncOpsResult extends PersistedSyncState {
@@ -315,38 +328,67 @@ export function applySyncQueuePolicies(queue: SyncOp[], hardCap = SYNC_QUEUE_HAR
   const compacted = compactSyncQueue(queue);
   const compactionDrops = Math.max(0, before - compacted.length);
   const cap = Math.max(1, Math.floor(Number.isFinite(hardCap) ? hardCap : SYNC_QUEUE_HARD_CAP));
-
-  let cappedQueue = compacted;
-  let capDrops = 0;
-  if (compacted.length > cap) {
-    capDrops = compacted.length - cap;
-    // Drop oldest operations to preserve most recent local edits when queue pressure is high.
-    cappedQueue = compacted.slice(capDrops);
-  }
+  const pendingOps = compacted.length;
+  const overflowBy = Math.max(0, pendingOps - cap);
+  const blocked = pendingOps >= cap;
 
   return {
-    queue: cappedQueue,
+    queue: compacted,
     queuePolicy: {
       before,
-      after: cappedQueue.length,
+      after: compacted.length,
       cap,
       compactionDrops,
-      capDrops,
+      blocked,
+      overflowBy,
+      pendingOps,
     },
   };
 }
 
+export function limitQueueToCapPreservingExisting(baseQueue: SyncOp[], candidateQueue: SyncOp[], cap: number): SyncOp[] {
+  const normalizedCap = Math.max(1, Math.floor(Number.isFinite(cap) ? cap : SYNC_QUEUE_HARD_CAP));
+  if (candidateQueue.length <= normalizedCap) {
+    return candidateQueue;
+  }
+
+  const baseNoteIds = new Set(baseQueue.map(op => op.noteId));
+  const acceptedNoteIds = new Set<string>();
+
+  for (const op of candidateQueue) {
+    if (baseNoteIds.has(op.noteId)) {
+      acceptedNoteIds.add(op.noteId);
+    }
+  }
+
+  let availableSlots = normalizedCap - acceptedNoteIds.size;
+  if (availableSlots > 0) {
+    for (const op of candidateQueue) {
+      if (acceptedNoteIds.has(op.noteId)) continue;
+      if (availableSlots <= 0) break;
+      acceptedNoteIds.add(op.noteId);
+      availableSlots -= 1;
+    }
+  }
+
+  return candidateQueue.filter(op => acceptedNoteIds.has(op.noteId));
+}
+
 function withNoQueueDrops(state: PersistedSyncState): EnqueueSyncOpsResult {
+  const { queue, queuePolicy } = applySyncQueuePolicies(state.queue);
   return {
     ...state,
-    queuePolicy: {
-      before: state.queue.length,
-      after: state.queue.length,
-      cap: SYNC_QUEUE_HARD_CAP,
-      compactionDrops: 0,
-      capDrops: 0,
-    },
+    queue,
+    queuePolicy,
   };
+}
+
+function isSameQueueByRequestId(a: SyncOp[], b: SyncOp[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].requestId !== b[i].requestId) return false;
+  }
+  return true;
 }
 
 export async function enqueueSyncOps(ops: SyncOp[]): Promise<EnqueueSyncOpsResult> {
@@ -355,7 +397,16 @@ export async function enqueueSyncOps(ops: SyncOp[]): Promise<EnqueueSyncOpsResul
     return withNoQueueDrops(current);
   }
   const current = await loadSyncState();
-  const nextQueue = [...current.queue];
+  const normalizedCurrent = withNoQueueDrops(current);
+  const baseState: PersistedSyncState = {
+    ...current,
+    queue: normalizedCurrent.queue,
+  };
+  if (!isSameQueueByRequestId(current.queue, normalizedCurrent.queue)) {
+    await saveSyncState(baseState);
+  }
+
+  const nextQueue = [...baseState.queue];
 
   for (const op of ops) {
     const existingIndex = nextQueue.findIndex(item => item.requestId === op.requestId);
@@ -367,8 +418,31 @@ export async function enqueueSyncOps(ops: SyncOp[]): Promise<EnqueueSyncOpsResul
   }
 
   const { queue, queuePolicy } = applySyncQueuePolicies(nextQueue);
+  if (queuePolicy.overflowBy > 0) {
+    const cappedQueue = limitQueueToCapPreservingExisting(baseState.queue, queue, queuePolicy.cap);
+    const { queuePolicy: cappedPolicy } = applySyncQueuePolicies(cappedQueue, queuePolicy.cap);
+    const updated: PersistedSyncState = {
+      ...baseState,
+      queue: cappedQueue,
+    };
+    await saveSyncState(updated);
+
+    return {
+      ...updated,
+      queuePolicy: {
+        before: queuePolicy.before,
+        after: cappedPolicy.after,
+        cap: queuePolicy.cap,
+        compactionDrops: queuePolicy.compactionDrops,
+        blocked: cappedPolicy.blocked,
+        overflowBy: cappedPolicy.overflowBy,
+        pendingOps: cappedPolicy.pendingOps,
+      },
+    };
+  }
+
   const updated: PersistedSyncState = {
-    ...current,
+    ...baseState,
     queue,
   };
   await saveSyncState(updated);

@@ -193,12 +193,14 @@ class ApiError extends Error {
   status: number;
   code: string;
   retryable: boolean;
+  headers?: Record<string, string>;
 
-  constructor(status: number, code: string, message: string, retryable = false) {
+  constructor(status: number, code: string, message: string, retryable = false, headers?: Record<string, string>) {
     super(message);
     this.status = status;
     this.code = code;
     this.retryable = retryable;
+    this.headers = headers;
   }
 }
 
@@ -376,7 +378,8 @@ function errorResponse(error: unknown): Response {
           retryable: error.retryable,
         },
       },
-      error.status
+      error.status,
+      error.headers
     );
   }
 
@@ -395,11 +398,13 @@ function errorResponse(error: unknown): Response {
 async function proxyToVps(request: Request, env: Env, pathname: string): Promise<Response> {
   if (vpsProxyCircuit.openUntil > Date.now()) {
     metrics.vpsProxyCircuitRejects += 1;
+    const retryAfterSeconds = Math.max(1, Math.ceil((vpsProxyCircuit.openUntil - Date.now()) / 1000));
     throw new ApiError(
       503,
       'SERVICE_UNAVAILABLE',
       'Sync service is temporarily unavailable. Please retry shortly.',
-      true
+      true,
+      { 'Retry-After': String(retryAfterSeconds) }
     );
   }
 
@@ -467,11 +472,13 @@ async function proxyToVps(request: Request, env: Env, pathname: string): Promise
           vpsProxyCircuit.openUntil = Date.now() + VPS_PROXY_CIRCUIT_OPEN_MS;
           metrics.vpsProxyCircuitOpens += 1;
         }
+        const retryAfterSeconds = Math.max(1, Math.ceil(VPS_PROXY_CIRCUIT_OPEN_MS / 1000));
         throw new ApiError(
           503,
           'SERVICE_UNAVAILABLE',
           'Sync service is temporarily unavailable. Please retry shortly.',
-          true
+          true,
+          { 'Retry-After': String(retryAfterSeconds) }
         );
       }
 
@@ -507,11 +514,13 @@ async function proxyToVps(request: Request, env: Env, pathname: string): Promise
         vpsProxyCircuit.openUntil = Date.now() + VPS_PROXY_CIRCUIT_OPEN_MS;
         metrics.vpsProxyCircuitOpens += 1;
       }
+      const retryAfterSeconds = Math.max(1, Math.ceil(VPS_PROXY_CIRCUIT_OPEN_MS / 1000));
       throw new ApiError(
         503,
         'SERVICE_UNAVAILABLE',
         'Sync service is temporarily unavailable. Please retry shortly.',
-        true
+        true,
+        { 'Retry-After': String(retryAfterSeconds) }
       );
     } finally {
       cleanup();
@@ -525,11 +534,13 @@ async function proxyToVps(request: Request, env: Env, pathname: string): Promise
     vpsProxyCircuit.openUntil = Date.now() + VPS_PROXY_CIRCUIT_OPEN_MS;
     metrics.vpsProxyCircuitOpens += 1;
   }
+  const retryAfterSeconds = Math.max(1, Math.ceil(VPS_PROXY_CIRCUIT_OPEN_MS / 1000));
   throw new ApiError(
     503,
     'SERVICE_UNAVAILABLE',
     'Sync service is temporarily unavailable. Please retry shortly.',
-    true
+    true,
+    { 'Retry-After': String(retryAfterSeconds) }
   );
 }
 
@@ -1653,7 +1664,15 @@ export default {
         if (!isLocalDiagnosticsRequest(request)) {
           throw new ApiError(404, 'NOT_FOUND', 'Route not found');
         }
-        return jsonResponse({ metrics });
+        const remainingMs = Math.max(0, vpsProxyCircuit.openUntil - Date.now());
+        return jsonResponse({
+          metrics,
+          vpsProxyCircuit: {
+            open: remainingMs > 0,
+            openUntil: vpsProxyCircuit.openUntil,
+            remainingMs,
+          },
+        });
       }
 
       if (pathname.startsWith('/api/v2/')) {

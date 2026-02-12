@@ -23,6 +23,7 @@ Set `ALLOW_INSECURE_DEV_AUTH=false` in production. Keep insecure auth enabled on
 - `VPS_PROXY_TIMEOUT_MS` (default `10000`): timeout for Worker `/api/v2/*` upstream calls.
 - `VPS_PROXY_RETRIES` (default `2`): retry attempts for transient `/api/v2/*` failures (except `/api/v2/events` stream handshake).
 - Worker also applies a short in-memory circuit-breaker for repeated `/api/v2/*` upstream failures to fail fast during outages.
+  - while open, `/api/v2/*` failures include `Retry-After` to guide client backoff.
 
 ## Required KV namespace
 
@@ -58,6 +59,10 @@ npm run worker:dev
 
 For local JWT bypass, keep `ALLOW_INSECURE_DEV_AUTH=true` in `.dev.vars`.
 For local JWT verification, set `ALLOW_INSECURE_DEV_AUTH=false` and provide all Clerk vars (`CLERK_JWKS_URL`, `CLERK_ISSUER`, `CLERK_AUDIENCE`).
+
+Diagnostics endpoint (`GET /api/v1/metrics`) now includes:
+- proxy circuit metrics (`vpsProxyCircuitOpens`, `vpsProxyCircuitRejects`)
+- current circuit state (`open`, `openUntil`, `remainingMs`) for local troubleshooting.
 
 In a second terminal (app):
 

@@ -2,12 +2,7 @@ import Fastify, { FastifyInstance } from 'fastify';
 import cookie from '@fastify/cookie';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { registerEventRoutes } from '../src/routes/events.js';
-import {
-  consumeStreamTicket,
-  issueStreamTicket,
-  STREAM_TICKET_COOKIE_NAME,
-  StreamTicketError,
-} from '../src/auth/streamTicket.js';
+import * as streamTicket from '../src/auth/streamTicket.js';
 
 const TEST_SUB = 'user_events_1';
 const TEST_DEVICE_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -26,7 +21,7 @@ async function buildEventsApp(): Promise<FastifyInstance> {
 
     if (request.routeOptions.url !== '/api/v2/events') return;
 
-    const rawTicket = request.cookies?.[STREAM_TICKET_COOKIE_NAME];
+    const rawTicket = request.cookies?.[streamTicket.STREAM_TICKET_COOKIE_NAME];
     if (!rawTicket) {
       reply.code(401).send({
         error: {
@@ -39,7 +34,7 @@ async function buildEventsApp(): Promise<FastifyInstance> {
     }
 
     try {
-      const claims = await consumeStreamTicket(rawTicket);
+      const claims = await streamTicket.consumeStreamTicket(rawTicket);
       if (claims.sub !== TEST_SUB || claims.deviceId !== TEST_DEVICE_ID) {
         reply.code(403).send({
           error: {
@@ -52,7 +47,7 @@ async function buildEventsApp(): Promise<FastifyInstance> {
       }
       (request as any).appUserId = 'app-user-events-1';
     } catch (error) {
-      if (error instanceof StreamTicketError) {
+      if (error instanceof streamTicket.StreamTicketError) {
         reply.code(error.statusCode).send({
           error: {
             code: error.code,
@@ -87,7 +82,7 @@ describe('event routes', () => {
       expect(response.json()).toMatchObject({ ok: true });
       const cookieHeader = response.headers['set-cookie'];
       expect(typeof cookieHeader).toBe('string');
-      expect(String(cookieHeader)).toContain(`${STREAM_TICKET_COOKIE_NAME}=`);
+      expect(String(cookieHeader)).toContain(`${streamTicket.STREAM_TICKET_COOKIE_NAME}=`);
       expect(String(cookieHeader)).toContain('Path=/api/v2/events');
     } finally {
       await app.close();
@@ -97,7 +92,7 @@ describe('event routes', () => {
   it('accepts valid stream ticket for GET /api/v2/events', async () => {
     const app = await buildEventsApp();
     try {
-      const { token } = issueStreamTicket({
+      const { token } = streamTicket.issueStreamTicket({
         subject: TEST_SUB,
         deviceId: TEST_DEVICE_ID,
         ttlSeconds: 120,
@@ -107,7 +102,7 @@ describe('event routes', () => {
         method: 'GET',
         url: '/api/v2/events',
         cookies: {
-          [STREAM_TICKET_COOKIE_NAME]: token,
+          [streamTicket.STREAM_TICKET_COOKIE_NAME]: token,
         },
         headers: {
           'x-sse-test-close': '1',
@@ -143,7 +138,7 @@ describe('event routes', () => {
 
     const app = await buildEventsApp();
     try {
-      const { token } = issueStreamTicket({
+      const { token } = streamTicket.issueStreamTicket({
         subject: TEST_SUB,
         deviceId: TEST_DEVICE_ID,
         ttlSeconds: 30,
@@ -155,7 +150,7 @@ describe('event routes', () => {
         method: 'GET',
         url: '/api/v2/events',
         cookies: {
-          [STREAM_TICKET_COOKIE_NAME]: token,
+          [streamTicket.STREAM_TICKET_COOKIE_NAME]: token,
         },
         simulate: {
           close: true,
@@ -173,7 +168,7 @@ describe('event routes', () => {
   it('rejects stream ticket user/device mismatch', async () => {
     const app = await buildEventsApp();
     try {
-      const { token } = issueStreamTicket({
+      const { token } = streamTicket.issueStreamTicket({
         subject: 'different-user',
         deviceId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
         ttlSeconds: 120,
@@ -183,7 +178,7 @@ describe('event routes', () => {
         method: 'GET',
         url: '/api/v2/events',
         cookies: {
-          [STREAM_TICKET_COOKIE_NAME]: token,
+          [streamTicket.STREAM_TICKET_COOKIE_NAME]: token,
         },
         simulate: {
           close: true,
@@ -193,6 +188,40 @@ describe('event routes', () => {
       expect(response.statusCode).toBe(403);
       expect(response.json().error.code).toBe('STREAM_TICKET_MISMATCH');
     } finally {
+      await app.close();
+    }
+  });
+
+  it('returns 503 when stream ticket replay store is unavailable', async () => {
+    const app = await buildEventsApp();
+    const consumeSpy = vi
+      .spyOn(streamTicket, 'consumeStreamTicket')
+      .mockRejectedValueOnce(
+        new streamTicket.StreamTicketError(
+          'STREAM_TICKET_STORAGE_UNAVAILABLE',
+          'Stream auth store unavailable. Please retry.',
+          503,
+          true
+        )
+      );
+
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v2/events',
+        cookies: {
+          [streamTicket.STREAM_TICKET_COOKIE_NAME]: 'mock-token',
+        },
+        simulate: {
+          close: true,
+        },
+      });
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json().error.code).toBe('STREAM_TICKET_STORAGE_UNAVAILABLE');
+      expect(response.json().error.retryable).toBe(true);
+    } finally {
+      consumeSpy.mockRestore();
       await app.close();
     }
   });

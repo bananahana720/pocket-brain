@@ -114,7 +114,7 @@ Create a `.env.local` file in the project root.
    - `NOTE_CHANGES_RETENTION_MS=2592000000`
    - `SYNC_BATCH_LIMIT=100`
    - `SYNC_PULL_LIMIT=500`
-   - `REQUIRE_REDIS_FOR_READY=false` (set `true` for multi-instance deployments that require distributed realtime fanout)
+   - `REQUIRE_REDIS_FOR_READY` defaults to `true` in production (`false` in dev/test); set explicitly to override
 6. Create/connect your API key from the in-app drawer (`Menu > AI Security`).
 
 If Worker Clerk vars are partial/missing while a bearer token is provided, the Worker responds with `AUTH_CONFIG_INVALID`.
@@ -163,7 +163,7 @@ Optional frontend sync queue pressure control:
 VITE_SYNC_QUEUE_HARD_CAP=500
 ```
 
-When exceeded, the client keeps the newest pending operations and drops oldest queued entries after compaction. Queue-cap drops emit telemetry and a throttled in-app warning.
+When pending sync operations reach the cap, the UI blocks additional note mutations until the queue drains (non-destructive policy). Queue-block events emit telemetry and a throttled in-app warning.
 
 **Local proxy simulation (recommended for testing secure path):**
 

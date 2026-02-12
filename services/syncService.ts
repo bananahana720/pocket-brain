@@ -80,29 +80,57 @@ export function openSyncEventStream(
   onCursor: (cursor: number) => void,
   onError: () => void
 ): () => void {
+  const BASE_RECONNECT_MS = 1_000;
+  const MAX_RECONNECT_MS = 30_000;
   let source: EventSource | null = null;
   let reconnectTimer: number | null = null;
   let closed = false;
+  let reconnectAttempts = 0;
+
+  const parseRetryAfterMs = (value: string | null): number | null => {
+    if (!value) return null;
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds) || seconds < 0) return null;
+    return Math.min(MAX_RECONNECT_MS, Math.max(BASE_RECONNECT_MS, Math.floor(seconds * 1000)));
+  };
+
+  const nextReconnectMs = () => {
+    const exp = Math.min(MAX_RECONNECT_MS, BASE_RECONNECT_MS * Math.pow(2, reconnectAttempts));
+    reconnectAttempts += 1;
+    return Math.min(MAX_RECONNECT_MS, exp + Math.floor(Math.random() * 250));
+  };
+
+  const scheduleReconnect = (retryAfterMs?: number | null) => {
+    if (closed || reconnectTimer !== null) return;
+    const delay = retryAfterMs ?? nextReconnectMs();
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null;
+      void connect();
+    }, delay);
+  };
 
   const connect = async () => {
     try {
-      await apiFetch('/api/v2/events/ticket', {
+      const ticketResponse = await apiFetch('/api/v2/events/ticket', {
         method: 'POST',
       });
+      if (!ticketResponse.ok) {
+        onError();
+        scheduleReconnect(parseRetryAfterMs(ticketResponse.headers.get('retry-after')));
+        return;
+      }
     } catch {
       onError();
-      if (!closed && reconnectTimer === null) {
-        reconnectTimer = window.setTimeout(() => {
-          reconnectTimer = null;
-          void connect();
-        }, 3000);
-      }
+      scheduleReconnect();
       return;
     }
 
     if (closed) return;
 
     source = new EventSource('/api/v2/events', { withCredentials: true });
+    source.onopen = () => {
+      reconnectAttempts = 0;
+    };
     source.addEventListener('sync', event => {
       try {
         const data = JSON.parse((event as MessageEvent<string>).data) as { cursor?: number };
@@ -118,13 +146,7 @@ export function openSyncEventStream(
       source?.close();
       source = null;
       onError();
-
-      if (!closed && reconnectTimer === null) {
-        reconnectTimer = window.setTimeout(() => {
-          reconnectTimer = null;
-          void connect();
-        }, 3000);
-      }
+      scheduleReconnect();
     };
   };
 

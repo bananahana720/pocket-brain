@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlertTriangle, CheckCircle2, CloudOff, RefreshCw, ShieldAlert } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, CloudOff, Lock, RefreshCw, ShieldAlert } from 'lucide-react';
 import { SyncStatus } from '../hooks/useSyncEngine';
 
 interface SyncStatusBadgeProps {
@@ -31,6 +31,11 @@ const statusConfig: Record<SyncStatus, { label: string; className: string; icon:
     label: 'Conflict',
     className: 'text-rose-700 border-rose-200 bg-rose-50 dark:text-rose-300 dark:border-rose-800/70 dark:bg-rose-900/30',
     icon: <AlertTriangle className="w-3.5 h-3.5" />,
+  },
+  blocked: {
+    label: 'Blocked',
+    className: 'text-fuchsia-700 border-fuchsia-200 bg-fuchsia-50 dark:text-fuchsia-300 dark:border-fuchsia-800/70 dark:bg-fuchsia-900/30',
+    icon: <Lock className="w-3.5 h-3.5" />,
   },
   degraded: {
     label: 'Degraded',

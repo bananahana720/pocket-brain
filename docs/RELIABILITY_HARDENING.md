@@ -51,17 +51,16 @@
 ### 5) Client sync queue pressure controls
 - `storage/notesStore.ts`
   - Keeps compaction to latest pending op per note.
-  - Added hard cap policy (`VITE_SYNC_QUEUE_HARD_CAP`, default `500`) that drops oldest queued entries after compaction when cap is exceeded.
-  - Exposes queue policy stats (`before`, `after`, `cap`, `compactionDrops`, `capDrops`) for telemetry and tests.
+  - Added hard cap policy (`VITE_SYNC_QUEUE_HARD_CAP`, default `500`) that blocks additional writes at capacity without dropping queued ops.
+  - Exposes queue policy stats (`before`, `after`, `cap`, `compactionDrops`, `blocked`, `overflowBy`, `pendingOps`) for telemetry and tests.
 - `hooks/useSyncEngine.ts`
-  - Emits queue-drop telemetry.
-  - Logs structured queue-drop warnings.
-  - Emits throttled user-visible warning on cap drops.
+  - Emits queue compaction + block telemetry.
+  - Emits throttled user-visible warning when queue capacity is reached.
 - `utils/telemetry.ts`, `components/DiagnosticsPanel.tsx`
   - Added client metrics:
     - `sync_queue_compaction_drops`
-    - `sync_queue_cap_drops`
-    - `sync_queue_cap_events`
+    - `sync_queue_block_events`
+    - `sync_queue_blocked_mutations`
 
 ## Metrics + Alert Integration Path
 
@@ -114,6 +113,25 @@
 
 ## Residual Risks
 
-1. Queue hard-cap drops can still discard unsynced operations under sustained offline pressure; warnings and telemetry improve visibility but do not eliminate data-loss risk.
+1. Queue protection now blocks writes instead of dropping operations; users can still be temporarily blocked during long outages.
 2. Chaos workflow auto-skips when Postgres or loopback binding is unavailable in constrained environments.
 3. Alert thresholds require production tuning against observed baseline traffic and maintenance cadence.
+
+---
+
+## Follow-up Hardening (2026-02-12)
+
+### Additional updates shipped
+
+1. Sync queue cap is now non-destructive:
+   - no oldest-op dropping at cap
+   - UI enters blocked state and rejects additional note mutations until queue drains
+2. Client sync retry behavior now uses bounded exponential backoff (push/pull + event stream reconnect paths).
+3. Cursor reset recovery now emits explicit client metric and user-visible informational toast.
+4. Worker `/api/v2/*` outage responses now include `Retry-After` and diagnostics expose current proxy-circuit state.
+5. Runtime config validation script added and wired into deploy/bootstrap helpers to catch auth/readiness secret drift before deploy.
+
+### Updated residual risks
+
+1. While queue overflow loss is removed, users can be temporarily blocked from editing during prolonged outage windows.
+2. Alert thresholds and queue cap still require production tuning against observed traffic and offline behavior.

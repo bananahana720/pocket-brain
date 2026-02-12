@@ -60,7 +60,10 @@ export async function registerHealthRoutes(app: FastifyInstance): Promise<void> 
         database: {
           ok: databaseOk,
         },
-        redis: redisState,
+        redis: {
+          ...redisState,
+          requiredForReady: redisRequiredForReady,
+        },
         realtime: {
           mode: realtime.distributedFanoutAvailable ? 'distributed' : 'local-fallback',
           degraded: !realtime.distributedFanoutAvailable,

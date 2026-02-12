@@ -90,6 +90,7 @@ describe('health route redis readiness gating', () => {
       const payload = response.json();
       expect(payload.ok).toBe(true);
       expect(payload.dependencies.redis.ok).toBe(false);
+      expect(payload.dependencies.redis.requiredForReady).toBe(false);
       expect(payload.dependencies.realtime.mode).toBe('local-fallback');
     } finally {
       await app.close();
@@ -113,6 +114,7 @@ describe('health route redis readiness gating', () => {
       expect(response.statusCode).toBe(503);
       const payload = response.json();
       expect(payload.ok).toBe(false);
+      expect(payload.dependencies.redis.requiredForReady).toBe(true);
       expect(payload.dependencies.realtime.redisRequiredForReady).toBe(true);
       expect(payload.metrics.sync.pullResetsRequired).toBe(1);
       expect(payload.metrics.maintenance.lastResult.prunedNoteChanges).toBe(2);

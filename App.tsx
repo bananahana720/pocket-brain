@@ -293,12 +293,21 @@ function App() {
     }, 5000);
   }, []);
 
+  const pushSyncRecoveryToast = useCallback((message: string) => {
+    const id = `${Date.now()}-${Math.random()}`;
+    setToasts(prev => [...prev, { id, message, type: 'info' }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, 4500);
+  }, []);
+
   const syncEngine = useSyncEngine({
     enabled: isAuthLoaded && isSignedIn,
     userId,
     notes,
     setNotes,
     onQueueWarning: pushQueueWarningToast,
+    onResetRecovery: pushSyncRecoveryToast,
   });
 
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -333,6 +342,7 @@ function App() {
   const loadMoreRef = useRef<HTMLDivElement>(null);
   const notesListRef = useRef<HTMLDivElement>(null);
   const virtualRangeRafRef = useRef<number | null>(null);
+  const syncBlockToastTsRef = useRef(0);
 
   // --- Toast System ---
   const addToast = useCallback(
@@ -349,6 +359,23 @@ function App() {
   const removeToast = useCallback((id: string) => {
     setToasts(prev => prev.filter(t => t.id !== id));
   }, []);
+
+  const assertSyncWritable = useCallback((): boolean => {
+    if (!syncEngine.syncBackpressure.blocked) {
+      return true;
+    }
+
+    incrementMetric('sync_queue_blocked_mutations');
+    const now = Date.now();
+    if (now - syncBlockToastTsRef.current > 3_000) {
+      syncBlockToastTsRef.current = now;
+      addToast(
+        `Sync queue is full (${syncEngine.syncBackpressure.pendingOps}/${syncEngine.syncBackpressure.cap}). Reconnect and wait for sync before editing more notes.`,
+        'error'
+      );
+    }
+    return false;
+  }, [addToast, syncEngine.syncBackpressure.blocked, syncEngine.syncBackpressure.cap, syncEngine.syncBackpressure.pendingOps]);
 
   const countQueuedAnalysisJobs = useCallback(
     () =>
@@ -1313,6 +1340,9 @@ function App() {
   // --- Note Actions ---
   const handleAddNote = useCallback(
     async (content: string, presetType?: NoteType): Promise<CaptureSaveResult> => {
+      if (!assertSyncWritable()) {
+        return { ok: false };
+      }
       const captureStartedAt = performance.now();
       const id = `${Date.now()}${Math.random().toString().slice(2, 6)}`;
       const now = Date.now();
@@ -1359,11 +1389,12 @@ function App() {
       void persistCaptureWriteThrough(newNote.id, captureSignature, performance.now());
       return { ok: true };
     },
-    [addToast, enqueueAnalysis, persistCaptureWriteThrough]
+    [addToast, assertSyncWritable, enqueueAnalysis, persistCaptureWriteThrough]
   );
 
   const handleImportSharedNote = useCallback(() => {
     if (!sharedNotePayload) return;
+    if (!assertSyncWritable()) return;
 
     const now = Date.now();
     const content = sharedNotePayload.content;
@@ -1395,10 +1426,11 @@ function App() {
       hasDueDate: !!importedNote.dueDate,
     });
     addToast('Shared note imported', 'success');
-  }, [addToast, sharedNotePayload]);
+  }, [addToast, assertSyncWritable, sharedNotePayload]);
 
   const handleBatchNote = useCallback(
     async (content: string) => {
+      if (!assertSyncWritable()) return;
       setIsProcessingBatch(true);
       addToast('AI processing batch...', 'info');
 
@@ -1445,7 +1477,7 @@ function App() {
         setIsProcessingBatch(false);
       }
     },
-    [addToast, handleAddNote]
+    [addToast, assertSyncWritable, handleAddNote]
   );
 
   const handleCleanupDraft = useCallback(
@@ -1507,6 +1539,7 @@ function App() {
 
   const handleUpdateNote = useCallback(
     (id: string, newContent: string) => {
+      if (!assertSyncWritable()) return;
       const existing = notesRef.current.find(note => note.id === id);
       if (!existing) return;
 
@@ -1541,11 +1574,12 @@ function App() {
 
       addToast('Note updated', 'success');
     },
-    [cancelAnalysisForNote, enqueueAnalysis, addToast]
+    [assertSyncWritable, cancelAnalysisForNote, enqueueAnalysis, addToast]
   );
 
   const handleDeleteNote = useCallback(
     (id: string) => {
+      if (!assertSyncWritable()) return;
       cancelAnalysisForNote(id);
       const note = notesRef.current.find(n => n.id === id);
       if (note) {
@@ -1555,7 +1589,7 @@ function App() {
       setToasts(prev => prev.filter(t => !t.action));
       addToast('Note deleted', 'info', { label: 'Undo', onClick: handleUndo });
     },
-    [cancelAnalysisForNote, pushUndo, addToast, handleUndo]
+    [assertSyncWritable, cancelAnalysisForNote, pushUndo, addToast, handleUndo]
   );
 
   const handleCopyNote = useCallback(
@@ -1568,17 +1602,19 @@ function App() {
 
   const handleToggleComplete = useCallback(
     (id: string) => {
+      if (!assertSyncWritable()) return;
       const note = notesRef.current.find(n => n.id === id);
       if (note) {
         pushUndo({ type: 'TOGGLE_COMPLETE', noteSnapshot: { ...note }, timestamp: Date.now() });
       }
       setNotes(prev => prev.map(n => (n.id === id ? { ...n, isCompleted: !n.isCompleted } : n)));
     },
-    [pushUndo]
+    [assertSyncWritable, pushUndo]
   );
 
   const handleReanalyze = useCallback(
     (id: string) => {
+      if (!assertSyncWritable()) return;
       const note = notesRef.current.find(n => n.id === id);
       if (!note) return;
 
@@ -1610,15 +1646,17 @@ function App() {
         enqueuedAt: Date.now(),
       });
     },
-    [cancelAnalysisForNote, addToast, enqueueAnalysis]
+    [assertSyncWritable, cancelAnalysisForNote, addToast, enqueueAnalysis]
   );
 
   const handlePinNote = useCallback((id: string) => {
+    if (!assertSyncWritable()) return;
     setNotes(prev => prev.map(n => (n.id === id ? { ...n, isPinned: !n.isPinned } : n)));
-  }, []);
+  }, [assertSyncWritable]);
 
   const handleArchiveNote = useCallback(
     (id: string) => {
+      if (!assertSyncWritable()) return;
       const note = notesRef.current.find(n => n.id === id);
       if (note) {
         pushUndo({ type: 'ARCHIVE', noteSnapshot: { ...note }, timestamp: Date.now() });
@@ -1627,16 +1665,18 @@ function App() {
       setToasts(prev => prev.filter(t => !t.action));
       addToast(note?.isArchived ? 'Note unarchived' : 'Note archived', 'info', { label: 'Undo', onClick: handleUndo });
     },
-    [pushUndo, addToast, handleUndo]
+    [assertSyncWritable, pushUndo, addToast, handleUndo]
   );
 
   const handleSetDueDate = useCallback((id: string, date: number | undefined) => {
+    if (!assertSyncWritable()) return;
     setNotes(prev => prev.map(n => (n.id === id ? { ...n, dueDate: date } : n)));
-  }, []);
+  }, [assertSyncWritable]);
 
   const handleSetPriority = useCallback((id: string, priority: 'urgent' | 'normal' | 'low' | undefined) => {
+    if (!assertSyncWritable()) return;
     setNotes(prev => prev.map(n => (n.id === id ? { ...n, priority } : n)));
-  }, []);
+  }, [assertSyncWritable]);
 
   const handleEnterTodayView = useCallback(async () => {
     setViewMode('today');
@@ -1744,12 +1784,13 @@ function App() {
   }, [addToast, persistAnalysisQueueStateSafely]);
 
   const handleImportNotes = useCallback((newNotes: Note[]) => {
+    if (!assertSyncWritable()) return;
     setNotes(prev => {
       const existingIds = new Set(prev.map(n => n.id));
       const unique = newNotes.filter(n => !existingIds.has(n.id));
       return [...prev, ...unique];
     });
-  }, []);
+  }, [assertSyncWritable]);
 
   const handleSearch = useCallback(
     async (e: React.FormEvent) => {

@@ -19,6 +19,9 @@
     "worker:kv:create": "WRANGLER_SEND_METRICS=false XDG_CONFIG_HOME=.wrangler-home npx wrangler kv namespace create AI_SESSIONS --config worker/wrangler.toml",
     "worker:secret:set": "WRANGLER_SEND_METRICS=false XDG_CONFIG_HOME=.wrangler-home npx wrangler secret put KEY_ENCRYPTION_SECRET --config worker/wrangler.toml",
     "worker:bootstrap": "bash scripts/bootstrap-worker.sh",
+    "config:check": "node scripts/validate-runtime-config.mjs --scope all",
+    "config:check:server": "node scripts/validate-runtime-config.mjs --scope server",
+    "config:check:worker": "node scripts/validate-runtime-config.mjs --scope worker",
     "vps:precheck:remote": "bash scripts/deploy-vps-remote.sh --precheck-only",
     "vps:sync:remote": "bash scripts/deploy-vps-remote.sh --sync-only",
     "vps:deploy:remote": "bash scripts/deploy-vps-remote.sh"

@@ -30,6 +30,14 @@ if [[ "$SKIP_PULL" != "true" ]]; then
   git pull --ff-only
 fi
 
+echo "==> Validating server runtime config"
+NODE_ENV=production npm run config:check:server
+
+if [[ "$DEPLOY_WORKER" == "true" ]]; then
+  echo "==> Validating worker runtime config"
+  NODE_ENV=production npm run config:check:worker
+fi
+
 echo "==> Rebuilding and restarting containers"
 docker compose up -d --build
 

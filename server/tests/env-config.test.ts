@@ -26,12 +26,36 @@ describe('env config parsing', () => {
       NODE_ENV: 'production',
       ALLOW_INSECURE_DEV_AUTH: 'false',
       TRUST_PROXY: 'false',
+      REQUIRE_REDIS_FOR_READY: 'true',
       CLERK_SECRET_KEY: 'sk_test_123',
     });
 
     const module = await import('../src/config/env.js');
     expect(module.env.ALLOW_INSECURE_DEV_AUTH).toBe(false);
     expect(module.env.TRUST_PROXY).toBe(false);
+    expect(module.env.REQUIRE_REDIS_FOR_READY).toBe(true);
+  });
+
+  it('defaults REQUIRE_REDIS_FOR_READY to true in production', async () => {
+    setEnv({
+      NODE_ENV: 'production',
+      ALLOW_INSECURE_DEV_AUTH: 'false',
+      CLERK_SECRET_KEY: 'sk_test_123',
+      REQUIRE_REDIS_FOR_READY: undefined,
+    });
+
+    const module = await import('../src/config/env.js');
+    expect(module.env.REQUIRE_REDIS_FOR_READY).toBe(true);
+  });
+
+  it('defaults REQUIRE_REDIS_FOR_READY to false outside production', async () => {
+    setEnv({
+      NODE_ENV: 'test',
+      REQUIRE_REDIS_FOR_READY: undefined,
+    });
+
+    const module = await import('../src/config/env.js');
+    expect(module.env.REQUIRE_REDIS_FOR_READY).toBe(false);
   });
 
   it('fails closed in production when ALLOW_INSECURE_DEV_AUTH is true', async () => {

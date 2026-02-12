@@ -137,6 +137,12 @@ if [[ "$SYNC_ONLY" == "true" ]]; then
   exit 0
 fi
 
+if [[ "$SKIP_PULL" != "true" ]]; then
+  echo "==> Pulling remote repository before config validation"
+  ssh "${SSH_ARGS[@]}" "$VPS_HOST" "set -euo pipefail; cd $REMOTE_PROJECT_DIR; git pull --ff-only"
+  SKIP_PULL=true
+fi
+
 DEPLOY_FLAGS=()
 if [[ "$WITH_WORKER" == "true" ]]; then
   DEPLOY_FLAGS+=("--with-worker")
@@ -150,6 +156,14 @@ if [[ ${#DEPLOY_FLAGS[@]} -gt 0 ]]; then
   for flag in "${DEPLOY_FLAGS[@]}"; do
     DEPLOY_FLAGS_JOINED+=" $(quote_for_shell "$flag")"
   done
+fi
+
+echo "==> Validating remote server runtime config"
+ssh "${SSH_ARGS[@]}" "$VPS_HOST" "set -euo pipefail; cd $REMOTE_PROJECT_DIR; NODE_ENV=production npm run config:check:server"
+
+if [[ "$WITH_WORKER" == "true" ]]; then
+  echo "==> Validating remote worker runtime config"
+  ssh "${SSH_ARGS[@]}" "$VPS_HOST" "set -euo pipefail; cd $REMOTE_PROJECT_DIR; NODE_ENV=production npm run config:check:worker"
 fi
 
 echo "==> Running remote deploy workflow"

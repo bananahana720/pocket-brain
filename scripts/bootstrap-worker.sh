@@ -22,6 +22,9 @@ if [[ -z "${KEY_ENCRYPTION_SECRET:-}" ]]; then
   exit 1
 fi
 
+echo "Validating worker runtime config..."
+NODE_ENV=production npm run config:check:worker
+
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$ROOT_DIR/.wrangler-home}"
 export XDG_CONFIG_HOME
 export WRANGLER_SEND_METRICS=false

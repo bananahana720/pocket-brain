@@ -78,6 +78,13 @@ export interface SyncConflict {
   changedFields: string[];
 }
 
+export interface SyncBackpressure {
+  blocked: boolean;
+  pendingOps: number;
+  cap: number;
+  overflowBy: number;
+}
+
 export interface SyncPushRequest {
   operations: SyncOp[];
 }

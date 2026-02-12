@@ -34,7 +34,7 @@ cp server/.env.example server/.env
 - `NOTE_CHANGES_RETENTION_MS` (default `2592000000`)
 - `SYNC_BATCH_LIMIT` (default `100`)
 - `SYNC_PULL_LIMIT` (default `500`)
-- `REQUIRE_REDIS_FOR_READY` (default `false`; set `true` in multi-instance deployments that require distributed realtime fanout)
+- `REQUIRE_REDIS_FOR_READY` (defaults to `true` in production and `false` in development/test; set explicitly to override)
 
 For production, set `ALLOW_INSECURE_DEV_AUTH=false`.
 When `ALLOW_INSECURE_DEV_AUTH=false`, `CLERK_SECRET_KEY` is required.

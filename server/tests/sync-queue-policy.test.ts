@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applySyncQueuePolicies } from '../../storage/notesStore.ts';
+import { applySyncQueuePolicies, limitQueueToCapPreservingExisting } from '../../storage/notesStore.ts';
 import type { SyncOp } from '../../types.ts';
 
 function upsertOp(requestId: string, noteId: string): SyncOp {
@@ -37,11 +37,13 @@ describe('sync queue policy', () => {
       after: 2,
       cap: 50,
       compactionDrops: 2,
-      capDrops: 0,
+      blocked: false,
+      overflowBy: 0,
+      pendingOps: 2,
     });
   });
 
-  it('drops oldest queued operations after compaction when hard cap is exceeded', () => {
+  it('blocks additional writes when hard cap is reached without dropping operations', () => {
     const sourceQueue: SyncOp[] = [
       upsertOp('req-1', 'note-1'),
       upsertOp('req-2', 'note-2'),
@@ -52,13 +54,35 @@ describe('sync queue policy', () => {
 
     const result = applySyncQueuePolicies(sourceQueue, 3);
 
-    expect(result.queue.map(item => item.requestId)).toEqual(['req-3', 'req-4', 'req-5']);
+    expect(result.queue.map(item => item.requestId)).toEqual(['req-1', 'req-2', 'req-3', 'req-4', 'req-5']);
     expect(result.queuePolicy).toEqual({
       before: 5,
-      after: 3,
+      after: 5,
       cap: 3,
       compactionDrops: 0,
-      capDrops: 2,
+      blocked: true,
+      overflowBy: 2,
+      pendingOps: 5,
     });
+  });
+
+  it('keeps existing queued notes and fills remaining cap with new notes', () => {
+    const baseQueue: SyncOp[] = [
+      upsertOp('base-1', 'note-1'),
+      upsertOp('base-2', 'note-2'),
+      upsertOp('base-3', 'note-3'),
+    ];
+    const candidateQueue: SyncOp[] = [
+      upsertOp('base-1-retry', 'note-1'),
+      upsertOp('base-2-retry', 'note-2'),
+      upsertOp('base-3-retry', 'note-3'),
+      upsertOp('new-4', 'note-4'),
+      upsertOp('new-5', 'note-5'),
+      upsertOp('new-6', 'note-6'),
+    ];
+
+    const limited = limitQueueToCapPreservingExisting(baseQueue, candidateQueue, 5);
+
+    expect(limited.map(item => item.noteId)).toEqual(['note-1', 'note-2', 'note-3', 'note-4', 'note-5']);
   });
 });
