@@ -7,6 +7,16 @@ This Worker secures AI provider keys by storing encrypted keys server-side and i
 - `KEY_ENCRYPTION_SECRET`: High-entropy secret used to encrypt provider API keys at rest.
 - `KEY_ENCRYPTION_SECRET_PREV` (optional during rotation): previous secret kept temporarily so existing sessions can be decrypted and re-encrypted in-place.
 
+## Required auth vars
+
+Set these together for Clerk JWT verification:
+
+- `CLERK_JWKS_URL`
+- `CLERK_ISSUER`
+- `CLERK_AUDIENCE`
+
+Set `ALLOW_INSECURE_DEV_AUTH=false` in production. Keep insecure auth enabled only for loopback/local development when explicitly needed.
+
 ## Required KV namespace
 
 - `AI_SESSIONS`: Stores encrypted API key sessions with 24-hour TTL.
@@ -30,6 +40,7 @@ Or run manual sub-steps with:
 - update `worker/wrangler.toml` with the emitted namespace id
 - `npm run worker:secret:set`
 - `npm run worker:deploy`
+- set Clerk vars (`CLERK_JWKS_URL`, `CLERK_ISSUER`, `CLERK_AUDIENCE`) and `ALLOW_INSECURE_DEV_AUTH=false` for production
 
 ## Local Dev
 

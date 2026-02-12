@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "dev:proxy": "VITE_USE_AI_PROXY=true VITE_DEV_PROXY_WORKER=true vite",
+    "server:dev": "npm --prefix server run dev",
+    "server:build": "npm --prefix server run build",
+    "server:test": "npm --prefix server run test",
     "build": "vite build",
     "preview": "vite preview",
     "test": "playwright test",
@@ -17,6 +20,7 @@
     "worker:bootstrap": "bash scripts/bootstrap-worker.sh"
   },
   "dependencies": {
+    "@clerk/clerk-react": "^5.44.0",
     "@google/genai": "^1.30.0",
     "lucide-react": "^0.554.0",
     "react": "^19.2.0",

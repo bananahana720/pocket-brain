@@ -20,11 +20,15 @@ import TodayView from './components/TodayView';
 import Drawer from './components/Drawer';
 import ErrorBoundary from './components/ErrorBoundary';
 import DiagnosticsPanel from './components/DiagnosticsPanel';
+import ConflictResolutionModal from './components/ConflictResolutionModal';
+import SyncStatusBadge from './components/SyncStatusBadge';
 import { ToastContainer, ToastMessage, ToastAction } from './components/Toast';
 import { ThemeProvider } from './contexts/ThemeContext';
+import { useAuthContext } from './contexts/AuthContext';
 import { trackEvent } from './utils/analytics';
 import { hashContent } from './utils/hash';
 import { useDebouncedValue } from './hooks/useDebouncedValue';
+import { useSyncEngine } from './hooks/useSyncEngine';
 import { decodeSharedNotePayload, SharedNotePayload } from './utils/sharedNoteLink';
 import {
   AnalysisQueueState,
@@ -254,6 +258,7 @@ function normalizePersistedAnalysisQueue(
 }
 
 function App() {
+  const { isLoaded: isAuthLoaded, isSignedIn, userId, userEmail, openSignIn, signOut } = useAuthContext();
   const [notes, setNotes] = useState<Note[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const debouncedSearchQuery = useDebouncedValue(searchQuery, 120);
@@ -279,6 +284,13 @@ function App() {
   const [aiErrorMessage, setAiErrorMessage] = useState<string | null>(null);
   const [aiDegradedMessage, setAiDegradedMessage] = useState<string | null>(null);
   const [sharedNotePayload, setSharedNotePayload] = useState<SharedNotePayload | null>(null);
+
+  const syncEngine = useSyncEngine({
+    enabled: isAuthLoaded && isSignedIn,
+    userId,
+    notes,
+    setNotes,
+  });
 
   const searchInputRef = useRef<HTMLInputElement>(null);
   const inputAreaRef = useRef<InputAreaHandle>(null);
@@ -515,6 +527,12 @@ function App() {
   }, []);
 
   const refreshAiAuth = useCallback(async () => {
+    if (isProxyEnabled() && !isSignedIn) {
+      setAiAuth({ connected: false, scope: 'account' });
+      setAiDegradedMessage('Capture-only mode — sign in to sync AI key across devices.');
+      return;
+    }
+
     try {
       const status = await getAIAuthStatus();
       setAiAuth(status);
@@ -527,7 +545,7 @@ function App() {
         setAiDegradedMessage('Capture-only mode — AI auth service unavailable.');
       }
     }
-  }, []);
+  }, [isSignedIn]);
 
   const cancelAnalysisForNote = useCallback(
     (noteId: string) => {
@@ -1953,6 +1971,12 @@ function App() {
     setAiDegradedMessage('Capture-only mode — AI key disconnected.');
   }, []);
 
+  const handleSignOut = useCallback(async () => {
+    await signOut();
+    setAiAuth({ connected: false, scope: 'account' });
+    setAiDegradedMessage('Capture-only mode — sign in to sync AI key across devices.');
+  }, [signOut]);
+
   const sharedNotePreview = useMemo(() => {
     if (!sharedNotePayload) return '';
     if (sharedNotePayload.title) return sharedNotePayload.title;
@@ -1982,6 +2006,23 @@ function App() {
           onConnectAI={handleConnectAI}
           onDisconnectAI={handleDisconnectAI}
           onBackupRecorded={recordBackupCompletion}
+          isAuthLoaded={isAuthLoaded}
+          isSignedIn={isSignedIn}
+          userEmail={userEmail}
+          onSignIn={openSignIn}
+          onSignOut={handleSignOut}
+          syncStatus={syncEngine.syncStatus}
+          devices={syncEngine.devices}
+          currentDeviceId={syncEngine.currentDeviceId}
+          onRefreshDevices={syncEngine.refreshDevices}
+          onRevokeDevice={syncEngine.revokeDevice}
+        />
+
+        <ConflictResolutionModal
+          conflicts={syncEngine.conflicts}
+          onKeepServer={syncEngine.resolveConflictKeepServer}
+          onKeepLocal={syncEngine.resolveConflictKeepLocal}
+          onDismiss={syncEngine.dismissConflict}
         />
 
         {isProcessingBatch && (
@@ -2007,7 +2048,8 @@ function App() {
                   <p className="text-[10px] uppercase tracking-[0.2em] mission-muted">Personal Mission Console</p>
                 </div>
               </div>
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-2">
+                <SyncStatusBadge status={syncEngine.syncStatus} />
                 <button
                   onClick={handleTodayToggle}
                   className={`relative px-3 py-2 rounded-md transition-colors flex items-center gap-1.5 border ${

@@ -37,6 +37,11 @@ interface Env {
   KEY_ENCRYPTION_SECRET: string;
   KEY_ENCRYPTION_SECRET_PREV?: string;
   DEFAULT_MODEL?: string;
+  VPS_API_ORIGIN?: string;
+  CLERK_JWKS_URL?: string;
+  CLERK_ISSUER?: string;
+  CLERK_AUDIENCE?: string;
+  ALLOW_INSECURE_DEV_AUTH?: string;
 }
 
 type AIProvider = 'gemini' | 'openrouter';
@@ -63,6 +68,13 @@ interface SessionRecord {
   expiresAt: number;
 }
 
+interface AccountKeyRecord {
+  provider: AIProvider;
+  encryptedApiKey: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 interface Metrics {
   requests: number;
   authFailures: number;
@@ -74,6 +86,7 @@ interface Metrics {
 }
 
 const SESSION_COOKIE_NAME = 'pb_ai_session';
+const ACCOUNT_KEY_PREFIX = 'account:';
 const SESSION_TTL_SECONDS = 24 * 60 * 60;
 const RETRY_ATTEMPTS = 2;
 const REQUEST_TIMEOUT_MS = 12000;
@@ -117,6 +130,27 @@ type ControlPlaneCircuitFailureResponse = {
   openUntil: number;
 };
 
+interface JwtHeader {
+  alg?: string;
+  kid?: string;
+  typ?: string;
+}
+
+interface JwtPayload {
+  sub?: string;
+  iss?: string;
+  aud?: string | string[];
+  exp?: number;
+  nbf?: number;
+  iat?: number;
+}
+
+interface ClerkJwtVerificationConfig {
+  jwksUrl: string;
+  issuer: string;
+  audience: string;
+}
+
 const metrics: Metrics = {
   requests: 0,
   authFailures: 0,
@@ -132,6 +166,8 @@ const providerCircuit: Record<AIProvider, CircuitState> = {
   gemini: { consecutiveFailures: 0, openUntil: 0 },
   openrouter: { consecutiveFailures: 0, openUntil: 0 },
 };
+const JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
+const jwksCache = new Map<string, { expiresAt: number; keys: JsonWebKey[] }>();
 
 class ApiError extends Error {
   status: number;
@@ -336,6 +372,42 @@ function errorResponse(error: unknown): Response {
   );
 }
 
+async function proxyToVps(request: Request, env: Env, pathname: string): Promise<Response> {
+  const origin = (env.VPS_API_ORIGIN || '').trim();
+  if (!origin) {
+    throw new ApiError(503, 'SERVICE_UNAVAILABLE', 'VPS API origin is not configured', true);
+  }
+
+  const url = new URL(request.url);
+  const target = new URL(`${origin}${pathname}${url.search}`);
+
+  const headers = new Headers();
+  const forwardHeader = (name: string) => {
+    const value = request.headers.get(name);
+    if (value) headers.set(name, value);
+  };
+
+  forwardHeader('authorization');
+  forwardHeader('x-request-id');
+  forwardHeader('x-device-id');
+  forwardHeader('content-type');
+  forwardHeader('accept');
+  forwardHeader('cache-control');
+
+  const init: RequestInit = {
+    method: request.method,
+    headers,
+    body: request.method === 'GET' || request.method === 'HEAD' ? undefined : request.body,
+  };
+
+  const response = await fetch(target.toString(), init);
+  const passthroughHeaders = new Headers(response.headers);
+  return new Response(response.body, {
+    status: response.status,
+    headers: passthroughHeaders,
+  });
+}
+
 function parseCookies(request: Request): Record<string, string> {
   const cookieHeader = request.headers.get('Cookie') || '';
   const cookies: Record<string, string> = {};
@@ -366,6 +438,184 @@ function clearCookie(request: Request): string {
 function getSessionId(request: Request): string | null {
   const cookies = parseCookies(request);
   return cookies[SESSION_COOKIE_NAME] || null;
+}
+
+function base64UrlDecode(input: string): string {
+  const normalized = input.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+  return atob(padded);
+}
+
+function base64UrlDecodeBytes(input: string): Uint8Array {
+  const raw = base64UrlDecode(input);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    bytes[i] = raw.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function getBearerToken(request: Request): string | null {
+  const auth = request.headers.get('authorization') || request.headers.get('Authorization');
+  if (!auth) return null;
+  const [scheme, token] = auth.split(' ');
+  if (!scheme || !token || scheme.toLowerCase() !== 'bearer') return null;
+  return token;
+}
+
+function parseJwtPayload(token: string): JwtPayload | null {
+  const parts = token.split('.');
+  if (parts.length < 2) return null;
+
+  try {
+    return JSON.parse(base64UrlDecode(parts[1])) as JwtPayload;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchJwks(url: string): Promise<JsonWebKey[]> {
+  const cached = jwksCache.get(url);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.keys;
+  }
+
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+      'Cache-Control': 'no-cache',
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch JWKS (${response.status})`);
+  }
+
+  const payload = (await response.json()) as { keys?: JsonWebKey[] };
+  const keys = Array.isArray(payload?.keys) ? payload.keys : [];
+  jwksCache.set(url, {
+    expiresAt: Date.now() + JWKS_CACHE_TTL_MS,
+    keys,
+  });
+
+  return keys;
+}
+
+function audienceMatches(claim: string | string[] | undefined, expected: string | undefined): boolean {
+  if (!expected) return true;
+  if (!claim) return false;
+  if (typeof claim === 'string') return claim === expected;
+  return claim.includes(expected);
+}
+
+function getClerkJwtVerificationConfig(env: Env): ClerkJwtVerificationConfig | null {
+  const jwksUrl = (env.CLERK_JWKS_URL || '').trim();
+  const issuer = (env.CLERK_ISSUER || '').trim();
+  const audience = (env.CLERK_AUDIENCE || '').trim();
+  const definedCount = [jwksUrl, issuer, audience].filter(Boolean).length;
+
+  if (definedCount === 0) return null;
+  if (definedCount !== 3) {
+    throw new ApiError(
+      500,
+      'AUTH_CONFIG_INVALID',
+      'CLERK_JWKS_URL, CLERK_ISSUER, and CLERK_AUDIENCE must be set together.'
+    );
+  }
+
+  return {
+    jwksUrl,
+    issuer,
+    audience,
+  };
+}
+
+function allowInsecureDevAuth(request: Request, env: Env): boolean {
+  if (env.ALLOW_INSECURE_DEV_AUTH !== 'true') return false;
+  try {
+    const url = new URL(request.url);
+    return isLoopbackHost(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+async function verifyJwtClaimsAndSignature(
+  token: string,
+  config: ClerkJwtVerificationConfig
+): Promise<JwtPayload | null> {
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+
+  let header: JwtHeader;
+  let payload: JwtPayload;
+  try {
+    header = JSON.parse(base64UrlDecode(parts[0])) as JwtHeader;
+    payload = JSON.parse(base64UrlDecode(parts[1])) as JwtPayload;
+  } catch {
+    return null;
+  }
+
+  if (header.alg !== 'RS256' || !header.kid) return null;
+
+  const keys = await fetchJwks(config.jwksUrl);
+  const jwk = keys.find(key => key.kid === header.kid);
+  if (!jwk) return null;
+
+  const cryptoKey = await crypto.subtle.importKey(
+    'jwk',
+    jwk,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['verify']
+  );
+
+  const signedData = new TextEncoder().encode(`${parts[0]}.${parts[1]}`);
+  const signature = base64UrlDecodeBytes(parts[2]);
+  const signatureValid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', cryptoKey, signature, signedData);
+  if (!signatureValid) return null;
+
+  const now = Math.floor(Date.now() / 1000);
+  if (typeof payload.exp === 'number' && payload.exp <= now - 30) return null;
+  if (typeof payload.nbf === 'number' && payload.nbf > now + 30) return null;
+  if (typeof payload.iat === 'number' && payload.iat > now + 30) return null;
+
+  if (payload.iss !== config.issuer) return null;
+  if (!audienceMatches(payload.aud, config.audience)) return null;
+
+  return payload;
+}
+
+async function getAuthenticatedUserId(request: Request, env: Env): Promise<string | null> {
+  const token = getBearerToken(request);
+  if (!token) return null;
+
+  const clerkConfig = getClerkJwtVerificationConfig(env);
+  const insecureFallbackEnabled = allowInsecureDevAuth(request, env);
+  if (!clerkConfig && !insecureFallbackEnabled) {
+    throw new ApiError(
+      500,
+      'AUTH_CONFIG_INVALID',
+      'Clerk auth verification is not configured. Set CLERK_JWKS_URL, CLERK_ISSUER, and CLERK_AUDIENCE.'
+    );
+  }
+
+  try {
+    const verifiedPayload = clerkConfig ? await verifyJwtClaimsAndSignature(token, clerkConfig) : null;
+    if (verifiedPayload?.sub && verifiedPayload.sub.trim()) {
+      return verifiedPayload.sub.trim();
+    }
+  } catch {
+    // Continue to optional insecure dev fallback.
+  }
+
+  if (insecureFallbackEnabled) {
+    const decodedPayload = parseJwtPayload(token);
+    const sub = typeof decodedPayload?.sub === 'string' ? decodedPayload.sub.trim() : '';
+    return sub || null;
+  }
+
+  return null;
 }
 
 function getClientIp(request: Request): string {
@@ -399,9 +649,9 @@ function ensureEncryptionSecretConfigured(env: Env): void {
   }
 }
 
-function enforceRateLimitLocal(request: Request, sessionId?: string): void {
+function enforceRateLimitLocal(request: Request, identityKey?: string): void {
   const now = Date.now();
-  const key = `${sessionId || 'anon'}:${getClientIp(request)}`;
+  const key = `${identityKey || 'anon'}:${getClientIp(request)}`;
 
   if (rateLimits.size > 5000) {
     for (const [entryKey, entry] of rateLimits.entries()) {
@@ -478,8 +728,8 @@ async function callControlPlane<T>(env: Env, name: string, path: string, body: R
   return (await response.json()) as T;
 }
 
-async function enforceRateLimit(request: Request, env: Env, sessionId?: string): Promise<void> {
-  const key = `${sessionId || 'anon'}:${getClientIp(request)}`;
+async function enforceRateLimit(request: Request, env: Env, identityKey?: string): Promise<void> {
+  const key = `${identityKey || 'anon'}:${getClientIp(request)}`;
   try {
     const result = await callControlPlane<ControlPlaneRateCheckResponse>(env, `rate:${key}`, '/rate/check', {
       now: Date.now(),
@@ -495,7 +745,7 @@ async function enforceRateLimit(request: Request, env: Env, sessionId?: string):
     if (error instanceof ApiError && error.code === 'RATE_LIMITED') {
       throw error;
     }
-    enforceRateLimitLocal(request, sessionId);
+    enforceRateLimitLocal(request, identityKey);
   }
 }
 
@@ -984,7 +1234,10 @@ async function validateApiKey(provider: AIProvider, apiKey: string, env: Env): P
   }
 }
 
-async function requireSession(request: Request, env: Env): Promise<{ sessionId: string; provider: AIProvider; apiKey: string; expiresAt: number }> {
+async function requireLegacySession(
+  request: Request,
+  env: Env
+): Promise<{ sessionId: string; provider: AIProvider; apiKey: string; expiresAt: number }> {
   ensureEncryptionSecretConfigured(env);
 
   const sessionId = getSessionId(request);
@@ -1048,6 +1301,78 @@ async function requireSession(request: Request, env: Env): Promise<{ sessionId: 
     provider: record.provider,
     apiKey,
     expiresAt: record.expiresAt,
+  };
+}
+
+async function loadAccountKeyRecord(userId: string, env: Env): Promise<AccountKeyRecord | null> {
+  const raw = await env.AI_SESSIONS.get(`${ACCOUNT_KEY_PREFIX}${userId}`, 'text');
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw) as AccountKeyRecord;
+  } catch {
+    await env.AI_SESSIONS.delete(`${ACCOUNT_KEY_PREFIX}${userId}`);
+    return null;
+  }
+}
+
+async function storeAccountKeyRecord(userId: string, record: AccountKeyRecord, env: Env): Promise<void> {
+  await env.AI_SESSIONS.put(`${ACCOUNT_KEY_PREFIX}${userId}`, JSON.stringify(record));
+}
+
+async function requireAiCredentials(
+  request: Request,
+  env: Env
+): Promise<{ provider: AIProvider; apiKey: string; identityKey: string; userId?: string }> {
+  ensureEncryptionSecretConfigured(env);
+
+  const userId = await getAuthenticatedUserId(request, env);
+  if (userId) {
+    const accountRecord = await loadAccountKeyRecord(userId, env);
+    if (accountRecord) {
+      let apiKey = '';
+      let usedPreviousSecret = false;
+
+      try {
+        const decrypted = await decryptSessionApiKey(accountRecord.encryptedApiKey, env);
+        apiKey = decrypted.apiKey;
+        usedPreviousSecret = decrypted.usedPreviousSecret;
+      } catch {
+        await env.AI_SESSIONS.delete(`${ACCOUNT_KEY_PREFIX}${userId}`);
+        throw new ApiError(403, 'AUTH_EXPIRED', 'AI key record is invalid. Reconnect your key to continue.');
+      }
+
+      if (usedPreviousSecret) {
+        try {
+          const encryptedApiKey = await encryptApiKey(apiKey, env.KEY_ENCRYPTION_SECRET);
+          await storeAccountKeyRecord(
+            userId,
+            {
+              ...accountRecord,
+              encryptedApiKey,
+              updatedAt: Date.now(),
+            },
+            env
+          );
+        } catch {
+          // Ignore migration failure and continue with previous-secret decryption.
+        }
+      }
+
+      return {
+        provider: accountRecord.provider,
+        apiKey,
+        identityKey: `user:${userId}`,
+        userId,
+      };
+    }
+  }
+
+  const legacy = await requireLegacySession(request, env);
+  return {
+    provider: legacy.provider,
+    apiKey: legacy.apiKey,
+    identityKey: `session:${legacy.sessionId}`,
   };
 }
 
@@ -1206,30 +1531,51 @@ export default {
         return jsonResponse({ metrics });
       }
 
+      if (pathname.startsWith('/api/v2/')) {
+        return proxyToVps(request, env, pathname);
+      }
+
       if (pathname === '/api/v1/auth/status' && request.method === 'GET') {
+        const userId = await getAuthenticatedUserId(request, env);
+        if (userId) {
+          const record = await loadAccountKeyRecord(userId, env);
+          if (!record) {
+            return jsonResponse({ connected: false, scope: 'account' });
+          }
+          return jsonResponse({
+            connected: true,
+            provider: record.provider,
+            scope: 'account',
+            connectedAt: record.createdAt,
+            updatedAt: record.updatedAt,
+          });
+        }
+
         const sessionId = getSessionId(request);
-        if (!sessionId) return jsonResponse({ connected: false });
+        if (!sessionId) return jsonResponse({ connected: false, scope: 'device' });
 
         const raw = await env.AI_SESSIONS.get(`session:${sessionId}`, 'text');
-        if (!raw) return jsonResponse({ connected: false });
+        if (!raw) return jsonResponse({ connected: false, scope: 'device' });
 
         const record = JSON.parse(raw) as SessionRecord;
         if (record.expiresAt < Date.now()) {
           await env.AI_SESSIONS.delete(`session:${sessionId}`);
-          return jsonResponse({ connected: false });
+          return jsonResponse({ connected: false, scope: 'device' });
         }
 
         return jsonResponse({
           connected: true,
           provider: record.provider,
           expiresAt: record.expiresAt,
+          scope: 'device',
         });
       }
 
       if (pathname === '/api/v1/auth/connect' && request.method === 'POST') {
         requireJsonContentType(request);
         ensureEncryptionSecretConfigured(env);
-        await enforceRateLimit(request, env);
+        const userId = await getAuthenticatedUserId(request, env);
+        await enforceRateLimit(request, env, userId ? `user:${userId}` : undefined);
         const body = await parseJson(request);
         const provider = parseProvider(body);
         const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
@@ -1241,6 +1587,29 @@ export default {
         await validateApiKey(provider, apiKey, env);
 
         const encryptedApiKey = await encryptApiKey(apiKey, env.KEY_ENCRYPTION_SECRET);
+
+        if (userId) {
+          const now = Date.now();
+          await storeAccountKeyRecord(
+            userId,
+            {
+              provider,
+              encryptedApiKey,
+              createdAt: now,
+              updatedAt: now,
+            },
+            env
+          );
+
+          return jsonResponse({
+            connected: true,
+            provider,
+            scope: 'account',
+            connectedAt: now,
+            updatedAt: now,
+          });
+        }
+
         const sessionId = crypto.randomUUID();
         const expiresAt = Date.now() + SESSION_TTL_SECONDS * 1000;
 
@@ -1260,6 +1629,7 @@ export default {
             connected: true,
             provider,
             expiresAt,
+            scope: 'device',
           },
           200,
           {
@@ -1269,6 +1639,15 @@ export default {
       }
 
       if (pathname === '/api/v1/auth/disconnect' && request.method === 'POST') {
+        const userId = await getAuthenticatedUserId(request, env);
+        if (userId) {
+          await env.AI_SESSIONS.delete(`${ACCOUNT_KEY_PREFIX}${userId}`);
+          return jsonResponse({
+            connected: false,
+            scope: 'account',
+          });
+        }
+
         const sessionId = getSessionId(request);
         if (sessionId) {
           await env.AI_SESSIONS.delete(`session:${sessionId}`);
@@ -1277,6 +1656,7 @@ export default {
         return jsonResponse(
           {
             connected: false,
+            scope: 'device',
           },
           200,
           {
@@ -1287,8 +1667,8 @@ export default {
 
       if (pathname.startsWith('/api/v1/ai/') && request.method === 'POST') {
         requireJsonContentType(request);
-        await enforceRateLimit(request, env, getSessionId(request) || undefined);
-        const session = await requireSession(request, env);
+        const credentials = await requireAiCredentials(request, env);
+        await enforceRateLimit(request, env, credentials.identityKey);
         const body = await parseJson(request);
 
         if (pathname === '/api/v1/ai/analyze') {
@@ -1296,7 +1676,7 @@ export default {
 
           const prompt = buildAnalyzePrompt(content);
           const text = await withRetries(() =>
-            callProvider(env, session.provider, session.apiKey, prompt, env.DEFAULT_MODEL)
+            callProvider(env, credentials.provider, credentials.apiKey, prompt, env.DEFAULT_MODEL)
           );
           const parsed = safeParseJson<any>(text);
           return jsonResponse({
@@ -1318,7 +1698,7 @@ export default {
 
           const prompt = buildBatchPrompt(content);
           const text = await withRetries(() =>
-            callProvider(env, session.provider, session.apiKey, prompt, env.DEFAULT_MODEL)
+            callProvider(env, credentials.provider, credentials.apiKey, prompt, env.DEFAULT_MODEL)
           );
           const parsed = safeParseJson<any>(text);
           const items = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.items) ? parsed.items : [];
@@ -1339,14 +1719,14 @@ export default {
           const mode = parseCleanupMode(body.mode ?? 'single');
           const prompt = buildCleanupPrompt(content, mode);
           const text = await withRetries(() =>
-            callProvider(env, session.provider, session.apiKey, prompt, env.DEFAULT_MODEL)
+            callProvider(env, credentials.provider, credentials.apiKey, prompt, env.DEFAULT_MODEL)
           );
           const parsed = safeParseJson<any>(text);
           return jsonResponse({ result: normalizeCleanupResult(content, mode, parsed) });
         }
 
         if (pathname === '/api/v1/ai/transcribe') {
-          if (session.provider !== 'gemini') {
+          if (credentials.provider !== 'gemini') {
             throw new ApiError(
               400,
               'BAD_REQUEST',
@@ -1356,7 +1736,7 @@ export default {
 
           const { audioBase64, mimeType, language } = parseTranscriptionRequest(body);
           const result = await withRetries(() =>
-            callGeminiTranscription(session.apiKey, audioBase64, mimeType, language)
+            callGeminiTranscription(credentials.apiKey, audioBase64, mimeType, language)
           );
           return jsonResponse({ result });
         }
@@ -1367,7 +1747,7 @@ export default {
 
           const prompt = buildSearchPrompt(query, notes);
           const result = await withRetries(() =>
-            callProvider(env, session.provider, session.apiKey, prompt, env.DEFAULT_MODEL)
+            callProvider(env, credentials.provider, credentials.apiKey, prompt, env.DEFAULT_MODEL)
           );
           return jsonResponse({ result });
         }
@@ -1380,7 +1760,7 @@ export default {
           }
 
           const result = await withRetries(() =>
-            callProvider(env, session.provider, session.apiKey, prompt, env.DEFAULT_MODEL)
+            callProvider(env, credentials.provider, credentials.apiKey, prompt, env.DEFAULT_MODEL)
           );
           return jsonResponse({ result });
         }

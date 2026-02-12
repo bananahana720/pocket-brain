@@ -17,8 +17,13 @@ import {
   KeyRound,
   Link2,
   Unplug,
+  LogIn,
+  LogOut,
+  RefreshCcw,
+  Laptop,
+  Smartphone,
 } from 'lucide-react';
-import { AIAuthState, AIProvider, Note, NoteType } from '../types';
+import { AIAuthState, AIProvider, DeviceSession, Note, NoteType } from '../types';
 import { useTheme } from '../contexts/ThemeContext';
 import { exportAsMarkdown, exportAsCSV, validateImport } from '../utils/exporters';
 import { createEncryptedBackupPayload } from '../utils/encryptedExport';
@@ -40,6 +45,16 @@ interface DrawerProps {
   onConnectAI: (provider: AIProvider, apiKey: string) => Promise<void>;
   onDisconnectAI: () => Promise<void>;
   onBackupRecorded: () => void;
+  isAuthLoaded: boolean;
+  isSignedIn: boolean;
+  userEmail: string | null;
+  onSignIn: () => void;
+  onSignOut: () => Promise<void>;
+  syncStatus: 'disabled' | 'syncing' | 'synced' | 'offline' | 'conflict' | 'degraded';
+  devices: DeviceSession[];
+  currentDeviceId: string | null;
+  onRefreshDevices: () => Promise<void>;
+  onRevokeDevice: (deviceId: string) => Promise<void>;
 }
 
 const Drawer: React.FC<DrawerProps> = ({
@@ -59,11 +74,24 @@ const Drawer: React.FC<DrawerProps> = ({
   onConnectAI,
   onDisconnectAI,
   onBackupRecorded,
+  isAuthLoaded,
+  isSignedIn,
+  userEmail,
+  onSignIn,
+  onSignOut,
+  syncStatus,
+  devices,
+  currentDeviceId,
+  onRefreshDevices,
+  onRevokeDevice,
 }) => {
   const { theme, toggle } = useTheme();
   const [showExportOptions, setShowExportOptions] = useState(false);
   const [isConnectingAI, setIsConnectingAI] = useState(false);
   const [isDisconnectingAI, setIsDisconnectingAI] = useState(false);
+  const [isSigningOut, setIsSigningOut] = useState(false);
+  const [isRefreshingDevices, setIsRefreshingDevices] = useState(false);
+  const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null);
   const [provider, setProvider] = useState<AIProvider>('gemini');
   const [apiKeyInput, setApiKeyInput] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -223,6 +251,12 @@ const Drawer: React.FC<DrawerProps> = ({
   };
 
   const handleConnectAI = async () => {
+    if (!isSignedIn) {
+      addToast?.('Sign in first to connect an AI key across devices', 'info');
+      onSignIn();
+      return;
+    }
+
     const trimmed = apiKeyInput.trim();
     if (!trimmed) {
       addToast?.('Paste an API key first', 'error');
@@ -250,6 +284,39 @@ const Drawer: React.FC<DrawerProps> = ({
       addToast?.('Unable to disconnect AI key', 'error');
     } finally {
       setIsDisconnectingAI(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    setIsSigningOut(true);
+    try {
+      await onSignOut();
+      addToast?.('Signed out', 'info');
+    } catch {
+      addToast?.('Unable to sign out', 'error');
+    } finally {
+      setIsSigningOut(false);
+    }
+  };
+
+  const handleRefreshDevices = async () => {
+    setIsRefreshingDevices(true);
+    try {
+      await onRefreshDevices();
+    } finally {
+      setIsRefreshingDevices(false);
+    }
+  };
+
+  const handleRevokeDevice = async (deviceId: string) => {
+    setRevokingDeviceId(deviceId);
+    try {
+      await onRevokeDevice(deviceId);
+      addToast?.('Device revoked', 'success');
+    } catch {
+      addToast?.('Unable to revoke device', 'error');
+    } finally {
+      setRevokingDeviceId(null);
     }
   };
 
@@ -329,6 +396,90 @@ const Drawer: React.FC<DrawerProps> = ({
           </div>
         </button>
 
+        {/* Account + Sync */}
+        <div className="mission-note mb-6 rounded-xl border border-zinc-200/70 p-4 dark:border-zinc-700/70">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <h3 className="font-display text-lg leading-none text-zinc-600 dark:text-zinc-300">Account + Sync</h3>
+            <span className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">{syncStatus}</span>
+          </div>
+
+          {!isAuthLoaded ? (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">Loading account status...</p>
+          ) : isSignedIn ? (
+            <div className="space-y-3">
+              <p className="text-xs text-zinc-700 dark:text-zinc-200">{userEmail || 'Signed in'}</p>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleRefreshDevices}
+                  disabled={isRefreshingDevices}
+                  className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-semibold mission-tag-chip text-zinc-700 dark:text-zinc-200"
+                >
+                  <RefreshCcw className={`h-3.5 w-3.5 ${isRefreshingDevices ? 'animate-spin' : ''}`} />
+                  Refresh devices
+                </button>
+                <button
+                  onClick={handleSignOut}
+                  disabled={isSigningOut}
+                  className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-semibold mission-tag-chip text-zinc-700 dark:text-zinc-200"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                  {isSigningOut ? 'Signing out...' : 'Sign out'}
+                </button>
+              </div>
+
+              <div className="space-y-1.5">
+                {devices.length === 0 ? (
+                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400">No active devices recorded yet.</p>
+                ) : (
+                  devices.slice(0, 5).map(device => {
+                    const isCurrent = currentDeviceId === device.id;
+                    const isRevoking = revokingDeviceId === device.id;
+                    return (
+                      <div
+                        key={device.id}
+                        className="flex items-center justify-between gap-2 rounded-lg border border-zinc-200/70 px-2 py-1.5 text-[11px] dark:border-zinc-700/70"
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            {device.platform.includes('mobile') ? (
+                              <Smartphone className="h-3.5 w-3.5 text-zinc-500" />
+                            ) : (
+                              <Laptop className="h-3.5 w-3.5 text-zinc-500" />
+                            )}
+                            <span className="truncate text-zinc-700 dark:text-zinc-200">{device.label}</span>
+                          </div>
+                          <p className="text-[10px] text-zinc-400">{isCurrent ? 'This device' : new Date(device.lastSeenAt).toLocaleString()}</p>
+                        </div>
+                        {!isCurrent && !device.revokedAt && (
+                          <button
+                            onClick={() => handleRevokeDevice(device.id)}
+                            disabled={isRevoking}
+                            className="rounded-md px-2 py-1 text-[10px] font-semibold text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/20"
+                          >
+                            {isRevoking ? '...' : 'Revoke'}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">Sign in to sync notes and AI key across screens.</p>
+              <button
+                onClick={onSignIn}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-brand-700"
+              >
+                <LogIn className="h-3.5 w-3.5" />
+                Sign in
+              </button>
+            </div>
+          )}
+        </div>
+
         {/* AI Security */}
         <div className="mission-note mb-6 rounded-xl border border-zinc-200/70 p-4 dark:border-zinc-700/70">
           <div className="mb-3 flex items-center gap-2">
@@ -393,7 +544,7 @@ const Drawer: React.FC<DrawerProps> = ({
                 {isConnectingAI ? 'Connecting...' : 'Connect key securely'}
               </button>
               <p className="text-[10px] leading-relaxed text-zinc-500 dark:text-zinc-400">
-                Keys are sent once to the secure AI proxy and bound to an HttpOnly session.
+                Keys are encrypted server-side and attached to your signed-in account.
               </p>
             </div>
           )}

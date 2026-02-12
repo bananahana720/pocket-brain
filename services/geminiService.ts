@@ -1,6 +1,7 @@
 import type { GoogleGenAI } from '@google/genai';
 import { AIAnalysisResult, AIAuthState, AIProvider, Note, NoteType } from '../types';
 import { incrementMetric, recordAiPayloadBytes } from '../utils/telemetry';
+import { apiFetch } from './apiClient';
 
 const OPENROUTER_MODEL = 'google/gemini-2.5-flash';
 const USE_AI_PROXY = !!(import.meta.env?.PROD || import.meta.env?.VITE_USE_AI_PROXY === 'true');
@@ -277,9 +278,8 @@ async function proxyJson<T>(
     const { signal, cleanup } = timeoutController(options?.signal, PROXY_TIMEOUT_MS);
 
     try {
-      const response = await fetch(url, {
+      const response = await apiFetch(url, {
         ...init,
-        credentials: 'include',
         signal,
       });
 
@@ -583,6 +583,8 @@ export async function getAIAuthStatus(options?: RequestOptions): Promise<AIAuthS
       connected: !!provider,
       ...(provider ? { provider } : {}),
       ...(provider ? { expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000 } : {}),
+      ...(provider ? { scope: 'device' as const } : {}),
+      ...(provider ? { connectedAt: Date.now(), updatedAt: Date.now() } : {}),
     };
   }
 

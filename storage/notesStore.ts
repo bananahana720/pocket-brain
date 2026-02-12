@@ -1,12 +1,14 @@
-import { Note } from '../types';
+import { Note, SyncOp } from '../types';
 
 const DB_NAME = 'pocketbrain_store';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const SNAPSHOT_STORE = 'snapshots';
 const OPS_STORE = 'ops';
 const ANALYSIS_QUEUE_STORE = 'analysis_queue';
+const SYNC_STATE_STORE = 'sync_state';
 const SNAPSHOT_KEY = 'current';
 const ANALYSIS_QUEUE_KEY = 'current';
+const SYNC_STATE_KEY = 'current';
 
 export type NoteOp =
   | { type: 'upsert'; note: Note }
@@ -53,6 +55,20 @@ interface AnalysisQueueRecord extends AnalysisQueueState {
   updatedAt: number;
 }
 
+interface SyncStateRecord {
+  id: string;
+  updatedAt: number;
+  cursor: number;
+  queue: SyncOp[];
+  bootstrappedUserId: string | null;
+}
+
+export interface PersistedSyncState {
+  cursor: number;
+  queue: SyncOp[];
+  bootstrappedUserId: string | null;
+}
+
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
@@ -68,6 +84,9 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(ANALYSIS_QUEUE_STORE)) {
         db.createObjectStore(ANALYSIS_QUEUE_STORE, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(SYNC_STATE_STORE)) {
+        db.createObjectStore(SYNC_STATE_STORE, { keyPath: 'id' });
       }
     };
 
@@ -106,6 +125,43 @@ function sanitizeAnalysisQueue(raw: unknown): PersistedAnalysisJob[] {
   return raw
     .map(sanitizeAnalysisJob)
     .filter((job): job is PersistedAnalysisJob => !!job);
+}
+
+function sanitizeSyncOp(raw: unknown): SyncOp | null {
+  if (!raw || typeof raw !== 'object') return null;
+
+  const value = raw as Record<string, unknown>;
+  const requestId = typeof value.requestId === 'string' ? value.requestId : '';
+  const op = value.op === 'upsert' || value.op === 'delete' ? value.op : null;
+  const noteId = typeof value.noteId === 'string' ? value.noteId : '';
+  const baseVersion = typeof value.baseVersion === 'number' ? Math.max(0, Math.floor(value.baseVersion)) : 0;
+  const note = value.note && typeof value.note === 'object' ? (value.note as Note) : undefined;
+  const clientChangedFields = Array.isArray(value.clientChangedFields)
+    ? value.clientChangedFields.filter((field): field is string => typeof field === 'string' && field.length > 0)
+    : undefined;
+  const baseNote = value.baseNote && typeof value.baseNote === 'object' ? (value.baseNote as Partial<Note>) : undefined;
+  const autoMergeAttempted = value.autoMergeAttempted === true;
+
+  if (!requestId || !op || !noteId) return null;
+  if (op === 'upsert' && !note) return null;
+
+  return {
+    requestId,
+    op,
+    noteId,
+    baseVersion,
+    ...(note ? { note } : {}),
+    ...(clientChangedFields ? { clientChangedFields } : {}),
+    ...(baseNote ? { baseNote } : {}),
+    ...(autoMergeAttempted ? { autoMergeAttempted } : {}),
+  };
+}
+
+function sanitizeSyncQueue(raw: unknown): SyncOp[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map(sanitizeSyncOp)
+    .filter((op): op is SyncOp => !!op);
 }
 
 function promisifyRequest<T = unknown>(request: IDBRequest<T>): Promise<T> {
@@ -166,6 +222,106 @@ export async function loadAnalysisQueueState(): Promise<AnalysisQueueState> {
   } finally {
     db.close();
   }
+}
+
+export async function loadSyncState(): Promise<PersistedSyncState> {
+  const db = await openDb();
+  try {
+    const tx = db.transaction(SYNC_STATE_STORE, 'readonly');
+    const store = tx.objectStore(SYNC_STATE_STORE);
+    const record = (await promisifyRequest(store.get(SYNC_STATE_KEY))) as SyncStateRecord | undefined;
+
+    if (!record) {
+      return {
+        cursor: 0,
+        queue: [],
+        bootstrappedUserId: null,
+      };
+    }
+
+    return {
+      cursor: typeof record.cursor === 'number' ? Math.max(0, Math.floor(record.cursor)) : 0,
+      queue: sanitizeSyncQueue(record.queue),
+      bootstrappedUserId: typeof record.bootstrappedUserId === 'string' ? record.bootstrappedUserId : null,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+export async function saveSyncState(state: PersistedSyncState): Promise<void> {
+  const db = await openDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(SYNC_STATE_STORE, 'readwrite');
+      tx.objectStore(SYNC_STATE_STORE).put({
+        id: SYNC_STATE_KEY,
+        updatedAt: Date.now(),
+        cursor: Math.max(0, Math.floor(state.cursor || 0)),
+        queue: state.queue,
+        bootstrappedUserId: state.bootstrappedUserId,
+      } satisfies SyncStateRecord);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('Failed to save sync state'));
+      tx.onabort = () => reject(tx.error || new Error('Sync state save aborted'));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+export async function enqueueSyncOps(ops: SyncOp[]): Promise<PersistedSyncState> {
+  if (ops.length === 0) return loadSyncState();
+  const current = await loadSyncState();
+  const nextQueue = [...current.queue];
+
+  for (const op of ops) {
+    const existingIndex = nextQueue.findIndex(item => item.requestId === op.requestId);
+    if (existingIndex >= 0) {
+      nextQueue[existingIndex] = op;
+    } else {
+      nextQueue.push(op);
+    }
+  }
+
+  const updated: PersistedSyncState = {
+    ...current,
+    queue: nextQueue,
+  };
+  await saveSyncState(updated);
+  return updated;
+}
+
+export async function removeQueuedSyncOps(requestIds: string[]): Promise<PersistedSyncState> {
+  if (requestIds.length === 0) return loadSyncState();
+  const idSet = new Set(requestIds);
+  const current = await loadSyncState();
+  const updated: PersistedSyncState = {
+    ...current,
+    queue: current.queue.filter(item => !idSet.has(item.requestId)),
+  };
+  await saveSyncState(updated);
+  return updated;
+}
+
+export async function setSyncCursor(cursor: number): Promise<PersistedSyncState> {
+  const current = await loadSyncState();
+  const updated: PersistedSyncState = {
+    ...current,
+    cursor: Math.max(current.cursor, Math.max(0, Math.floor(cursor || 0))),
+  };
+  await saveSyncState(updated);
+  return updated;
+}
+
+export async function markSyncBootstrapped(userId: string): Promise<PersistedSyncState> {
+  const current = await loadSyncState();
+  const updated: PersistedSyncState = {
+    ...current,
+    bootstrappedUserId: userId,
+  };
+  await saveSyncState(updated);
+  return updated;
 }
 
 export async function saveAnalysisQueueState(state: AnalysisQueueState): Promise<void> {
@@ -324,10 +480,11 @@ export async function resetNotesStore(): Promise<void> {
   const db = await openDb();
   try {
     await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction([SNAPSHOT_STORE, OPS_STORE, ANALYSIS_QUEUE_STORE], 'readwrite');
+      const tx = db.transaction([SNAPSHOT_STORE, OPS_STORE, ANALYSIS_QUEUE_STORE, SYNC_STATE_STORE], 'readwrite');
       tx.objectStore(SNAPSHOT_STORE).clear();
       tx.objectStore(OPS_STORE).clear();
       tx.objectStore(ANALYSIS_QUEUE_STORE).clear();
+      tx.objectStore(SYNC_STATE_STORE).clear();
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error || new Error('Failed to clear IndexedDB store'));
       tx.onabort = () => reject(tx.error || new Error('Clear IndexedDB store aborted'));

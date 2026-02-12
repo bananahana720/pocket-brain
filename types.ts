@@ -10,12 +10,19 @@ export interface AIAuthState {
   connected: boolean;
   provider?: AIProvider;
   expiresAt?: number;
+  scope?: 'account' | 'device';
+  connectedAt?: number;
+  updatedAt?: number;
 }
 
 export interface Note {
   id: string;
   content: string;
   createdAt: number;
+  updatedAt?: number;
+  version?: number;
+  deletedAt?: number;
+  lastModifiedByDeviceId?: string;
   // AI Generated fields
   title?: string;
   tags?: string[];
@@ -49,4 +56,57 @@ export interface UndoAction {
   type: 'DELETE' | 'ARCHIVE' | 'EDIT' | 'TOGGLE_COMPLETE';
   noteSnapshot: Note;
   timestamp: number;
+}
+
+export interface SyncOp {
+  requestId: string;
+  op: 'upsert' | 'delete';
+  noteId: string;
+  baseVersion: number;
+  note?: Note;
+  clientChangedFields?: string[];
+  baseNote?: Partial<Note>;
+  autoMergeAttempted?: boolean;
+}
+
+export interface SyncConflict {
+  requestId: string;
+  noteId: string;
+  baseVersion: number;
+  currentVersion: number;
+  serverNote: Note;
+  changedFields: string[];
+}
+
+export interface SyncPushRequest {
+  operations: SyncOp[];
+}
+
+export interface SyncPushResponse {
+  applied: Array<{
+    requestId: string;
+    note: Note;
+    cursor: number;
+  }>;
+  conflicts: SyncConflict[];
+  nextCursor: number;
+}
+
+export interface SyncCursor {
+  value: number;
+}
+
+export interface DeviceSession {
+  id: string;
+  label: string;
+  platform: string;
+  lastSeenAt: number;
+  revokedAt?: number | null;
+  createdAt: number;
+}
+
+export interface SyncBootstrapState {
+  imported: number;
+  alreadyBootstrapped: boolean;
+  cursor: number;
 }

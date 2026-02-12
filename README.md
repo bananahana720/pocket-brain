@@ -52,6 +52,9 @@ PocketBrain is an AI-powered note-taking app that captures your thoughts, tasks,
 - **Dark mode** -- auto-detects system preference, manual toggle in drawer
 - **Offline support** -- notes save locally in IndexedDB, offline banner when disconnected
 - **Undo** -- undo delete, complete, and archive actions (Cmd+Z or toast button)
+- **Login-optional mode** -- use PocketBrain fully offline without signing in
+- **Account sync** -- signed-in users get account-backed sync across devices with conflict handling
+- **Account-level AI key** -- when signed in, AI provider keys are stored once per account (not per device)
 
 ---
 
@@ -95,7 +98,18 @@ Create a `.env.local` file in the project root.
 
 1. Deploy the Cloudflare Worker in `/worker` and route `/api/*` to it.
 2. Set Worker secret: `KEY_ENCRYPTION_SECRET`.
-3. Create/connect your API key from the in-app drawer (`Menu > AI Security`).
+3. Set Worker Clerk JWT verification vars together:
+   - `CLERK_JWKS_URL`
+   - `CLERK_ISSUER`
+   - `CLERK_AUDIENCE`
+4. Set Worker `ALLOW_INSECURE_DEV_AUTH=false` in production.
+5. Configure server auth env:
+   - `CLERK_SECRET_KEY`
+   - `CLERK_PUBLISHABLE_KEY`
+   - `ALLOW_INSECURE_DEV_AUTH=false`
+6. Create/connect your API key from the in-app drawer (`Menu > AI Security`).
+
+If Worker Clerk vars are partial/missing while a bearer token is provided, the Worker responds with `AUTH_CONFIG_INVALID`.
 
 Worker bootstrap commands:
 
@@ -107,6 +121,16 @@ npm run worker:bootstrap
 ```
 
 In this mode, provider keys are not stored in frontend code or browser storage.
+
+### Sync Semantics
+
+- Sync is enabled only when signed in. If not signed in, the app runs in local-only mode.
+- Local edits are queued and retried automatically when connectivity returns.
+- Pull/push is cursor-based and idempotent via request IDs.
+- Field-level conflicts are handled safely:
+  - disjoint local/server field changes are auto-merged and retried once
+  - true field collisions are surfaced in the conflict modal for manual resolution
+- Deletes are tombstoned and retained for reconciliation before pruning.
 
 **Local development fallback (optional):**
 

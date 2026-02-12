@@ -23,7 +23,10 @@ Everything you need to know to get the most out of PocketBrain -- your instant-a
 15. [Import and Export](#import-and-export)
 16. [Keyboard Shortcuts](#keyboard-shortcuts)
 17. [Tips and Tricks](#tips-and-tricks)
-18. [Troubleshooting](#troubleshooting)
+18. [Login and Sync](#login-and-sync)
+19. [AI Key Scope (Account vs Device)](#ai-key-scope-account-vs-device)
+20. [Deployment Environment Requirements](#deployment-environment-requirements)
+21. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -480,6 +483,58 @@ Note: Cmd is used on macOS, Ctrl on Windows and Linux.
 **Watch for the red dot.** A red dot on the Today button means you have overdue tasks. Do not ignore it.
 
 **Use the tag cloud for discovery.** Open the drawer and browse your tags. You might find patterns in what you capture and think about most.
+
+---
+
+## Login and Sync
+
+PocketBrain supports two operating modes:
+
+- **Login-optional local mode:** If you are not signed in, the app remains fully usable for capture, organization, export/import, and offline persistence.
+- **Signed-in sync mode:** If you sign in, note sync is enabled across devices via `/api/v2` push/pull APIs.
+
+Sync behavior:
+
+- Changes are queued locally and retried automatically.
+- Each push operation is idempotent via request IDs.
+- If two devices edit the same note concurrently:
+  - disjoint field updates are auto-merged safely and retried once
+  - true field collisions are shown in the conflict modal for manual choice
+- Deletes use tombstones so other devices can reconcile before retention pruning.
+
+If connectivity drops, sync status switches to **Offline** and queued operations replay when the device is back online.
+
+---
+
+## AI Key Scope (Account vs Device)
+
+In proxy mode, AI provider keys are always encrypted server-side, but scope depends on auth state:
+
+- **Signed in:** key scope is **account-level** (shared across your signed-in devices).
+- **Not signed in:** key scope is **device-level** (stored as a device session).
+
+This means login is optional for local capture workflows, but recommended if you want one AI key and synced notes across devices.
+
+---
+
+## Deployment Environment Requirements
+
+For production deployments, configure both server and worker auth environment values explicitly.
+
+Worker (`worker/wrangler.toml` / Worker env):
+
+- `CLERK_JWKS_URL`
+- `CLERK_ISSUER`
+- `CLERK_AUDIENCE`
+- `ALLOW_INSECURE_DEV_AUTH=false`
+
+Server (`server/.env`):
+
+- `CLERK_SECRET_KEY`
+- `CLERK_PUBLISHABLE_KEY`
+- `ALLOW_INSECURE_DEV_AUTH=false`
+
+If a bearer token is present but Clerk worker vars are missing/partial, requests now return `AUTH_CONFIG_INVALID` to prevent silent insecure behavior.
 
 ---
 

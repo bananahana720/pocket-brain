@@ -19,3 +19,8 @@ new_sqlite_classes = ["ControlPlaneDO"]
 
 [vars]
 DEFAULT_MODEL = "google/gemini-2.5-flash"
+VPS_API_ORIGIN = "http://127.0.0.1:8788"
+CLERK_JWKS_URL = ""
+CLERK_ISSUER = ""
+CLERK_AUDIENCE = ""
+ALLOW_INSECURE_DEV_AUTH = "false"
