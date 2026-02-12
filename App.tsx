@@ -59,8 +59,42 @@ interface AnalysisJob {
   attempts: number;
 }
 
-function noteEqual(a: Note, b: Note): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+function buildNoteSearchText(note: Note): string {
+  return `${note.content} ${note.title || ''} ${(note.tags || []).join(' ')}`.toLowerCase();
+}
+
+function addNoteToIndexes(
+  note: Note,
+  searchTextIndex: Map<string, string>,
+  tagIndex: Map<string, Set<string>>
+): void {
+  searchTextIndex.set(note.id, buildNoteSearchText(note));
+
+  for (const tag of note.tags || []) {
+    const key = tag.toLowerCase();
+    if (!tagIndex.has(key)) {
+      tagIndex.set(key, new Set());
+    }
+    tagIndex.get(key)!.add(note.id);
+  }
+}
+
+function removeNoteFromIndexes(
+  note: Note,
+  searchTextIndex: Map<string, string>,
+  tagIndex: Map<string, Set<string>>
+): void {
+  searchTextIndex.delete(note.id);
+
+  for (const tag of note.tags || []) {
+    const key = tag.toLowerCase();
+    const ids = tagIndex.get(key);
+    if (!ids) continue;
+    ids.delete(note.id);
+    if (ids.size === 0) {
+      tagIndex.delete(key);
+    }
+  }
 }
 
 function buildOps(prevNotes: Note[], nextNotes: Note[]): NoteOp[] {
@@ -71,7 +105,7 @@ function buildOps(prevNotes: Note[], nextNotes: Note[]): NoteOp[] {
 
   for (const note of nextNotes) {
     const prev = prevById.get(note.id);
-    if (!prev || !noteEqual(prev, note)) {
+    if (!prev || prev !== note) {
       ops.push({ type: 'upsert', note });
     }
   }
@@ -192,8 +226,12 @@ function App() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const inputAreaRef = useRef<InputAreaHandle>(null);
   const handleUndoRef = useRef<() => void>(() => {});
+  const notesRef = useRef<Note[]>([]);
   const isAiSearchRef = useRef(false);
   const isDrawerOpenRef = useRef(false);
+  const searchTextIndexRef = useRef<Map<string, string>>(new Map());
+  const tagIndexRef = useRef<Map<string, Set<string>>>(new Map());
+  const indexedNotesRef = useRef<Note[]>([]);
 
   const hasLoadedRef = useRef(false);
   const previousNotesRef = useRef<Note[]>([]);
@@ -206,6 +244,7 @@ function App() {
   const backupReminderShownRef = useRef(false);
   const loadMoreRef = useRef<HTMLDivElement>(null);
   const notesListRef = useRef<HTMLDivElement>(null);
+  const virtualRangeRafRef = useRef<number | null>(null);
 
   // --- Toast System ---
   const addToast = useCallback(
@@ -508,6 +547,42 @@ function App() {
   }, [notes.length, addToast]);
 
   useEffect(() => {
+    notesRef.current = notes;
+  }, [notes]);
+
+  useEffect(() => {
+    const prevNotes = indexedNotesRef.current;
+
+    if (prevNotes.length === 0 && notes.length === 0) {
+      return;
+    }
+
+    const prevById = new Map(prevNotes.map(note => [note.id, note]));
+    const nextById = new Map(notes.map(note => [note.id, note]));
+
+    for (const prevNote of prevNotes) {
+      if (!nextById.has(prevNote.id)) {
+        removeNoteFromIndexes(prevNote, searchTextIndexRef.current, tagIndexRef.current);
+      }
+    }
+
+    for (const nextNote of notes) {
+      const prevNote = prevById.get(nextNote.id);
+      if (!prevNote) {
+        addNoteToIndexes(nextNote, searchTextIndexRef.current, tagIndexRef.current);
+        continue;
+      }
+
+      if (prevNote !== nextNote) {
+        removeNoteFromIndexes(prevNote, searchTextIndexRef.current, tagIndexRef.current);
+        addNoteToIndexes(nextNote, searchTextIndexRef.current, tagIndexRef.current);
+      }
+    }
+
+    indexedNotesRef.current = notes;
+  }, [notes]);
+
+  useEffect(() => {
     isAiSearchRef.current = isAiSearch;
   }, [isAiSearch]);
 
@@ -754,7 +829,7 @@ function App() {
 
   const handleUpdateNote = useCallback(
     (id: string, newContent: string) => {
-      const existing = notes.find(note => note.id === id);
+      const existing = notesRef.current.find(note => note.id === id);
       if (!existing) return;
 
       cancelAnalysisForNote(id);
@@ -787,13 +862,13 @@ function App() {
 
       addToast('Note updated', 'success');
     },
-    [notes, cancelAnalysisForNote, enqueueAnalysis, addToast]
+    [cancelAnalysisForNote, enqueueAnalysis, addToast]
   );
 
   const handleDeleteNote = useCallback(
     (id: string) => {
       cancelAnalysisForNote(id);
-      const note = notes.find(n => n.id === id);
+      const note = notesRef.current.find(n => n.id === id);
       if (note) {
         pushUndo({ type: 'DELETE', noteSnapshot: { ...note }, timestamp: Date.now() });
       }
@@ -801,7 +876,7 @@ function App() {
       setToasts(prev => prev.filter(t => !t.action));
       addToast('Note deleted', 'info', { label: 'Undo', onClick: handleUndo });
     },
-    [cancelAnalysisForNote, notes, pushUndo, addToast, handleUndo]
+    [cancelAnalysisForNote, pushUndo, addToast, handleUndo]
   );
 
   const handleCopyNote = useCallback(
@@ -814,18 +889,18 @@ function App() {
 
   const handleToggleComplete = useCallback(
     (id: string) => {
-      const note = notes.find(n => n.id === id);
+      const note = notesRef.current.find(n => n.id === id);
       if (note) {
         pushUndo({ type: 'TOGGLE_COMPLETE', noteSnapshot: { ...note }, timestamp: Date.now() });
       }
       setNotes(prev => prev.map(n => (n.id === id ? { ...n, isCompleted: !n.isCompleted } : n)));
     },
-    [notes, pushUndo]
+    [pushUndo]
   );
 
   const handleReanalyze = useCallback(
     (id: string) => {
-      const note = notes.find(n => n.id === id);
+      const note = notesRef.current.find(n => n.id === id);
       if (!note) return;
 
       cancelAnalysisForNote(id);
@@ -849,7 +924,7 @@ function App() {
       addToast('Re-analyzing...', 'info');
       enqueueAnalysis({ noteId: id, content: note.content, version, contentHash: signature, attempts: 0 });
     },
-    [notes, cancelAnalysisForNote, addToast, enqueueAnalysis]
+    [cancelAnalysisForNote, addToast, enqueueAnalysis]
   );
 
   const handlePinNote = useCallback((id: string) => {
@@ -858,7 +933,7 @@ function App() {
 
   const handleArchiveNote = useCallback(
     (id: string) => {
-      const note = notes.find(n => n.id === id);
+      const note = notesRef.current.find(n => n.id === id);
       if (note) {
         pushUndo({ type: 'ARCHIVE', noteSnapshot: { ...note }, timestamp: Date.now() });
       }
@@ -866,7 +941,7 @@ function App() {
       setToasts(prev => prev.filter(t => !t.action));
       addToast(note?.isArchived ? 'Note unarchived' : 'Note archived', 'info', { label: 'Undo', onClick: handleUndo });
     },
-    [notes, pushUndo, addToast, handleUndo]
+    [pushUndo, addToast, handleUndo]
   );
 
   const handleSetDueDate = useCallback((id: string, date: number | undefined) => {
@@ -993,51 +1068,54 @@ function App() {
     [searchQuery, isAiSearch, notes]
   );
 
-  const indexedViews = useMemo(() => {
-    const searchText = new Map<string, string>();
-    const tags = new Map<string, Set<string>>();
-
-    for (const note of notes) {
-      searchText.set(
-        note.id,
-        `${note.content} ${note.title || ''} ${(note.tags || []).join(' ')}`.toLowerCase()
-      );
-      for (const tag of note.tags || []) {
-        const key = tag.toLowerCase();
-        if (!tags.has(key)) tags.set(key, new Set());
-        tags.get(key)!.add(note.id);
-      }
-    }
-
-    return { searchText, tags };
-  }, [notes]);
-
   const filteredNotes = useMemo(() => {
     const activeTagLower = activeTag?.toLowerCase() || null;
     const lowerQ = !isAiSearch && debouncedSearchQuery ? debouncedSearchQuery.toLowerCase() : null;
-    const activeTagSet = activeTagLower ? indexedViews.tags.get(activeTagLower) : null;
+    const activeTagSet = activeTagLower ? tagIndexRef.current.get(activeTagLower) : null;
+    const result: Note[] = [];
+    let sawPinned = false;
+    let sawUnpinned = false;
 
-    return notes
-      .filter(note => {
-        if (!showArchived && note.isArchived) return false;
-        if (showArchived && !note.isArchived) return false;
-        if (filter !== 'ALL' && note.type !== filter) return false;
+    for (const note of notes) {
+      if (!showArchived && note.isArchived) continue;
+      if (showArchived && !note.isArchived) continue;
+      if (filter !== 'ALL' && note.type !== filter) continue;
 
-        if (activeTagSet && !activeTagSet.has(note.id)) return false;
-        if (lowerQ && !(indexedViews.searchText.get(note.id) || '').includes(lowerQ)) return false;
-        return true;
-      })
-      .sort((a, b) => {
-        if (a.isPinned && !b.isPinned) return -1;
-        if (!a.isPinned && b.isPinned) return 1;
-        if (filter === NoteType.TASK) {
-          const aDue = a.dueDate ?? Infinity;
-          const bDue = b.dueDate ?? Infinity;
-          if (aDue !== bDue) return aDue - bDue;
+      if (activeTagLower) {
+        const matchesTagIndex = !!activeTagSet?.has(note.id);
+        if (!matchesTagIndex) {
+          const hasTag = (note.tags || []).some(tag => tag.toLowerCase() === activeTagLower);
+          if (!hasTag) continue;
         }
-        return 0;
-      });
-  }, [notes, showArchived, filter, activeTag, isAiSearch, debouncedSearchQuery, indexedViews]);
+      }
+
+      if (lowerQ) {
+        const searchText = searchTextIndexRef.current.get(note.id) || buildNoteSearchText(note);
+        if (!searchText.includes(lowerQ)) continue;
+      }
+
+      result.push(note);
+      if (note.isPinned) sawPinned = true;
+      else sawUnpinned = true;
+    }
+
+    const needsPinSort = sawPinned && sawUnpinned;
+    const needsTaskSort = filter === NoteType.TASK;
+    if (!needsPinSort && !needsTaskSort) {
+      return result;
+    }
+
+    return result.sort((a, b) => {
+      if (a.isPinned && !b.isPinned) return -1;
+      if (!a.isPinned && b.isPinned) return 1;
+      if (filter === NoteType.TASK) {
+        const aDue = a.dueDate ?? Infinity;
+        const bDue = b.dueDate ?? Infinity;
+        if (aDue !== bDue) return aDue - bDue;
+      }
+      return 0;
+    });
+  }, [notes, showArchived, filter, activeTag, isAiSearch, debouncedSearchQuery]);
 
   const isVirtualized = viewMode === 'all' && filteredNotes.length > LARGE_DATASET_THRESHOLD;
 
@@ -1085,16 +1163,28 @@ function App() {
       const visibleRows = Math.ceil(window.innerHeight / VIRTUAL_ROW_HEIGHT) + VIRTUAL_OVERSCAN * 2;
       const end = Math.min(filteredNotes.length, start + visibleRows);
 
-      setVirtualRange({ start, end });
+      setVirtualRange(prev => (prev.start === start && prev.end === end ? prev : { start, end }));
+    };
+
+    const scheduleUpdateRange = () => {
+      if (virtualRangeRafRef.current !== null) return;
+      virtualRangeRafRef.current = window.requestAnimationFrame(() => {
+        virtualRangeRafRef.current = null;
+        updateRange();
+      });
     };
 
     updateRange();
-    window.addEventListener('scroll', updateRange, { passive: true });
-    window.addEventListener('resize', updateRange);
+    window.addEventListener('scroll', scheduleUpdateRange, { passive: true });
+    window.addEventListener('resize', scheduleUpdateRange);
 
     return () => {
-      window.removeEventListener('scroll', updateRange);
-      window.removeEventListener('resize', updateRange);
+      if (virtualRangeRafRef.current !== null) {
+        window.cancelAnimationFrame(virtualRangeRafRef.current);
+        virtualRangeRafRef.current = null;
+      }
+      window.removeEventListener('scroll', scheduleUpdateRange);
+      window.removeEventListener('resize', scheduleUpdateRange);
     };
   }, [isVirtualized, filteredNotes.length]);
 

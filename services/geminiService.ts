@@ -1,10 +1,13 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import type { GoogleGenAI } from '@google/genai';
 import { AIAnalysisResult, AIAuthState, AIProvider, Note, NoteType } from '../types';
 
 const OPENROUTER_MODEL = 'google/gemini-2.5-flash';
 const USE_AI_PROXY = !!(import.meta.env?.PROD || import.meta.env?.VITE_USE_AI_PROXY === 'true');
 const PROXY_TIMEOUT_MS = 12000;
 const PROXY_RETRIES = 2;
+
+type GoogleGenAIModule = typeof import('@google/genai');
+let googleGenAIModulePromise: Promise<GoogleGenAIModule> | null = null;
 
 type Provider = 'gemini' | 'openrouter';
 export type AIErrorCode =
@@ -59,10 +62,21 @@ function getProvider(): Provider | null {
   return null;
 }
 
-function getGeminiClient(): GoogleGenAI | null {
+async function loadGoogleGenAIModule(): Promise<GoogleGenAIModule> {
+  if (!googleGenAIModulePromise) {
+    googleGenAIModulePromise = import('@google/genai');
+  }
+  return googleGenAIModulePromise;
+}
+
+async function getGeminiRuntime(): Promise<{ ai: GoogleGenAI; Type: GoogleGenAIModule['Type'] } | null> {
   const key = getDevGeminiKey();
-  if (!key) return null;
-  return new GoogleGenAI({ apiKey: key });
+  if (!key) {
+    return null;
+  }
+
+  const { GoogleGenAI, Type } = await loadGoogleGenAIModule();
+  return { ai: new GoogleGenAI({ apiKey: key }), Type };
 }
 
 function isTransientStatus(status: number): boolean {
@@ -482,8 +496,9 @@ export const analyzeNote = async (
       return parseAnalysisResult(JSON.parse(text));
     }
 
-    const ai = getGeminiClient();
-    if (!ai) throw new AIServiceError('Gemini key missing.', 'AUTH_REQUIRED', false);
+    const gemini = await getGeminiRuntime();
+    if (!gemini) throw new AIServiceError('Gemini key missing.', 'AUTH_REQUIRED', false);
+    const { ai, Type } = gemini;
 
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
@@ -541,8 +556,9 @@ export const processBatchEntry = async (
       }));
     }
 
-    const ai = getGeminiClient();
-    if (!ai) throw new AIServiceError('Gemini key missing.', 'AUTH_REQUIRED', false);
+    const gemini = await getGeminiRuntime();
+    if (!gemini) throw new AIServiceError('Gemini key missing.', 'AUTH_REQUIRED', false);
+    const { ai, Type } = gemini;
 
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
@@ -614,8 +630,9 @@ export const cleanupNoteDraft = async (
       return normalizeCleanupResult(trimmed, mode, JSON.parse(text));
     }
 
-    const ai = getGeminiClient();
-    if (!ai) throw new AIServiceError('Gemini key missing.', 'AUTH_REQUIRED', false);
+    const gemini = await getGeminiRuntime();
+    if (!gemini) throw new AIServiceError('Gemini key missing.', 'AUTH_REQUIRED', false);
+    const { ai, Type } = gemini;
 
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
@@ -730,8 +747,9 @@ export const generateDailyBrief = async (notes: Note[], options?: RequestOptions
       return (await openRouterChat(prompt)) || "Couldn't generate your daily brief right now.";
     }
 
-    const ai = getGeminiClient();
-    if (!ai) return "Couldn't generate your daily brief right now.";
+    const gemini = await getGeminiRuntime();
+    if (!gemini) return "Couldn't generate your daily brief right now.";
+    const { ai } = gemini;
 
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
@@ -774,8 +792,9 @@ Be concise and friendly.`;
       return (await openRouterChat(prompt)) || 'No answer generated.';
     }
 
-    const ai = getGeminiClient();
-    if (!ai) return 'No answer generated.';
+    const gemini = await getGeminiRuntime();
+    if (!gemini) return 'No answer generated.';
+    const { ai } = gemini;
 
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
