@@ -215,6 +215,7 @@ test.describe('sync multi-context', () => {
 
       await createNoteViaUI(desktop, 'Desktop sync note');
       await expect(desktop.getByText('Desktop sync note')).toBeVisible();
+      await expect.poll(() => notes.size, { timeout: 10_000 }).toBeGreaterThan(0);
 
       await mobile.reload();
       await expect(mobile.getByText('Desktop sync note')).toBeVisible();

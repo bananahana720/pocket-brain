@@ -103,6 +103,10 @@ function ClerkBridge({ children }: { children: React.ReactNode }) {
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  if (resolveDevAuthUserId()) {
+    return <AnonymousAuthProvider>{children}</AnonymousAuthProvider>;
+  }
+
   if (!CLERK_PUBLISHABLE_KEY) {
     return <AnonymousAuthProvider>{children}</AnonymousAuthProvider>;
   }
