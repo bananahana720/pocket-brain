@@ -5,7 +5,9 @@ export type AnalyticsEventName =
   | 'daily_brief_share_clicked'
   | 'daily_brief_share_opened'
   | 'note_share_clicked'
-  | 'note_share_completed';
+  | 'note_share_completed'
+  | 'note_share_opened'
+  | 'note_share_imported';
 
 interface AnalyticsEvent {
   name: AnalyticsEventName;

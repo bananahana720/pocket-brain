@@ -23,6 +23,7 @@ import { ThemeProvider } from './contexts/ThemeContext';
 import { trackEvent } from './utils/analytics';
 import { hashContent } from './utils/hash';
 import { useDebouncedValue } from './hooks/useDebouncedValue';
+import { decodeSharedNotePayload, SharedNotePayload } from './utils/sharedNoteLink';
 import {
   NoteOp,
   compactSnapshot,
@@ -184,6 +185,7 @@ function App() {
   const [aiAuth, setAiAuth] = useState<AIAuthState>({ connected: false });
   const [aiErrorMessage, setAiErrorMessage] = useState<string | null>(null);
   const [aiDegradedMessage, setAiDegradedMessage] = useState<string | null>(null);
+  const [sharedNotePayload, setSharedNotePayload] = useState<SharedNotePayload | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
   const inputAreaRef = useRef<InputAreaHandle>(null);
@@ -421,12 +423,37 @@ function App() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get('via') !== 'daily_brief_share') return;
+    const via = params.get('via');
+    if (!via) return;
 
-    trackEvent('daily_brief_share_opened');
-    addToast('Opened from a shared PocketBrain brief', 'info');
+    let shouldCleanUrl = false;
 
+    if (via === 'daily_brief_share') {
+      trackEvent('daily_brief_share_opened');
+      addToast('Opened from a shared PocketBrain brief', 'info');
+      shouldCleanUrl = true;
+    }
+
+    if (via === 'note_share') {
+      const encoded = params.get('shared_note');
+      const shared = encoded ? decodeSharedNotePayload(encoded) : null;
+      if (shared) {
+        setSharedNotePayload(shared);
+        trackEvent('note_share_opened', {
+          noteType: shared.type || NoteType.NOTE,
+          tagCount: shared.tags?.length || 0,
+          hasDueDate: !!shared.dueDate,
+        });
+        addToast('Shared note ready to import', 'info');
+      } else {
+        addToast('Shared note link is invalid', 'error');
+      }
+      shouldCleanUrl = true;
+    }
+
+    if (!shouldCleanUrl) return;
     params.delete('via');
+    params.delete('shared_note');
     const query = params.toString();
     const nextUrl = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`;
     window.history.replaceState({}, '', nextUrl);
@@ -579,6 +606,41 @@ function App() {
     },
     [addToast, enqueueAnalysis]
   );
+
+  const handleImportSharedNote = useCallback(() => {
+    if (!sharedNotePayload) return;
+
+    const now = Date.now();
+    const content = sharedNotePayload.content;
+    const importedType = sharedNotePayload.type || NoteType.NOTE;
+    const importedNote: Note = {
+      id: `${now}${Math.random().toString().slice(2, 6)}`,
+      content,
+      createdAt: now,
+      isProcessed: true,
+      title: sharedNotePayload.title || content.slice(0, 50),
+      tags: sharedNotePayload.tags || [],
+      type: importedType,
+      isCompleted: false,
+      analysisVersion: 0,
+      contentHash: hashContent(content),
+      analysisState: 'complete',
+      lastAnalyzedAt: now,
+      ...(sharedNotePayload.dueDate ? { dueDate: sharedNotePayload.dueDate } : {}),
+      ...(sharedNotePayload.priority ? { priority: sharedNotePayload.priority } : {}),
+    };
+
+    setNotes(prev => [importedNote, ...prev]);
+    setShowArchived(false);
+    setViewMode('all');
+    setSharedNotePayload(null);
+    trackEvent('note_share_imported', {
+      noteType: importedType,
+      tagCount: importedNote.tags?.length || 0,
+      hasDueDate: !!importedNote.dueDate,
+    });
+    addToast('Shared note imported', 'success');
+  }, [addToast, sharedNotePayload]);
 
   const handleBatchNote = useCallback(
     async (content: string) => {
@@ -1046,6 +1108,13 @@ function App() {
     setAiDegradedMessage('Capture-only mode — AI key disconnected.');
   }, []);
 
+  const sharedNotePreview = useMemo(() => {
+    if (!sharedNotePayload) return '';
+    if (sharedNotePayload.title) return sharedNotePayload.title;
+    if (sharedNotePayload.content.length <= 80) return sharedNotePayload.content;
+    return `${sharedNotePayload.content.slice(0, 77)}...`;
+  }, [sharedNotePayload]);
+
   return (
     <ThemeProvider>
       <div className="min-h-screen bg-subtle dark:bg-zinc-900 relative overflow-hidden transition-colors duration-200">
@@ -1189,6 +1258,31 @@ function App() {
           <div className="bg-rose-50 dark:bg-rose-900/20 border-b border-rose-200 dark:border-rose-800/50 transition-colors">
             <div className="max-w-2xl mx-auto px-4 py-2 text-xs font-medium text-rose-700 dark:text-rose-300">
               {aiDegradedMessage}
+            </div>
+          </div>
+        )}
+
+        {sharedNotePayload && (
+          <div className="bg-emerald-50 dark:bg-emerald-900/20 border-b border-emerald-200 dark:border-emerald-800/40 transition-colors">
+            <div className="max-w-2xl mx-auto px-4 py-2.5 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold text-emerald-700 dark:text-emerald-300">Shared note received</p>
+                <p className="text-xs text-emerald-700/80 dark:text-emerald-300/80 truncate">{sharedNotePreview}</p>
+              </div>
+              <div className="shrink-0 flex items-center gap-2">
+                <button
+                  onClick={handleImportSharedNote}
+                  className="px-3 py-1 text-[11px] font-semibold rounded-full bg-emerald-600 text-white hover:bg-emerald-700 transition-colors"
+                >
+                  Import
+                </button>
+                <button
+                  onClick={() => setSharedNotePayload(null)}
+                  className="px-2 py-1 text-[11px] font-medium text-emerald-700 dark:text-emerald-300 hover:underline"
+                >
+                  Dismiss
+                </button>
+              </div>
             </div>
           </div>
         )}

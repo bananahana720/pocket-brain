@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Note, NoteType } from '../types';
 import { Edit2, Check, Clock, MoreVertical, Trash2, Copy, RefreshCw, CheckSquare, Square, Pin, Archive, Calendar, AlertCircle, Share2 } from 'lucide-react';
 import { trackEvent } from '../utils/analytics';
+import { encodeSharedNotePayload } from '../utils/sharedNoteLink';
 
 interface NoteCardProps {
   note: Note;
@@ -17,13 +18,16 @@ interface NoteCardProps {
   onSetPriority: (id: string, priority: 'urgent' | 'normal' | 'low' | undefined) => void;
 }
 
-function formatNoteForSharing(note: Note): string {
+function formatNoteForSharing(note: Note): { shareText: string; shareUrl: string } {
   const typeEmoji = note.type === 'TASK' ? '✅' : note.type === 'IDEA' ? '💡' : '📝';
   const header = note.title || (note.content.length > 50 ? note.content.slice(0, 50) + '...' : note.content);
   const tags = note.tags?.length ? '\n' + note.tags.map(t => `#${t}`).join(' ') : '';
   const appUrl = window.location.origin + window.location.pathname;
+  const payload = encodeSharedNotePayload(note);
+  const shareUrl = payload ? `${appUrl}?via=note_share&shared_note=${encodeURIComponent(payload)}` : appUrl;
+  const shareText = `${typeEmoji} ${header}\n\n${note.content}${tags}\n\n---\nCaptured with PocketBrain\n${shareUrl}`;
 
-  return `${typeEmoji} ${header}\n\n${note.content}${tags}\n\n---\nCaptured with PocketBrain\n${appUrl}`;
+  return { shareText, shareUrl };
 }
 
 const CREATED_AT_FORMATTER = new Intl.DateTimeFormat('en-US', {
@@ -95,19 +99,21 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
   };
 
   const handleShare = async () => {
-    const text = formatNoteForSharing(note);
+    const { shareText, shareUrl } = formatNoteForSharing(note);
 
     trackEvent('note_share_clicked', {
       noteType: note.type || 'NOTE',
       hasTitle: !!note.title,
       tagCount: note.tags?.length || 0,
+      hasDeepLink: !!shareUrl.includes('shared_note='),
     });
 
     if (navigator.share) {
       try {
         await navigator.share({
           title: note.title || 'PocketBrain Note',
-          text,
+          text: shareText,
+          url: shareUrl,
         });
         trackEvent('note_share_completed', { method: 'native', noteType: note.type || 'NOTE' });
         setShareStatus('Shared!');
@@ -121,7 +127,7 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
     }
 
     try {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(shareText);
       trackEvent('note_share_completed', { method: 'clipboard', noteType: note.type || 'NOTE' });
       setShareStatus('Copied!');
       setTimeout(() => setShareStatus(null), 2000);
