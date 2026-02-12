@@ -65,7 +65,7 @@ jobs:
     name: Deploy to VPS
     runs-on: ubuntu-latest
     needs: ci
-    if: ${{ (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && secrets.VPS_SSH_HOST != '' && secrets.VPS_PROJECT_DIR != '' && secrets.VPS_SSH_PRIVATE_KEY != '' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     timeout-minutes: 40
     environment: production
     concurrency:
@@ -85,19 +85,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Install server dependencies
-        run: npm ci --prefix server
-
-      - name: Validate required deployment secrets
+      - name: Evaluate deploy prerequisites
+        id: deploy_gate
         env:
           VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
         run: |
@@ -109,11 +98,35 @@ jobs:
             fi
           done
           if (( ${#missing[@]} > 0 )); then
-            echo "Missing required repo secrets: ${missing[*]}" >&2
-            exit 1
+            printf 'enabled=false\n' >> "$GITHUB_OUTPUT"
+            printf 'missing=%s\n' "${missing[*]}" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          printf 'enabled=true\n' >> "$GITHUB_OUTPUT"
+          printf 'missing=\n' >> "$GITHUB_OUTPUT"
+
+      - name: Skip deploy (missing secrets)
+        if: ${{ steps.deploy_gate.outputs.enabled != 'true' }}
+        run: |
+          echo "Skipping VPS deploy because required secrets are missing: ${{ steps.deploy_gate.outputs.missing }}"
+
+      - name: Setup Node
+        if: ${{ steps.deploy_gate.outputs.enabled == 'true' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        if: ${{ steps.deploy_gate.outputs.enabled == 'true' }}
+        run: npm ci
+
+      - name: Install server dependencies
+        if: ${{ steps.deploy_gate.outputs.enabled == 'true' }}
+        run: npm ci --prefix server
 
       - name: Configure SSH key and known_hosts
+        if: ${{ steps.deploy_gate.outputs.enabled == 'true' }}
         env:
           VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
         run: |
@@ -127,13 +140,14 @@ jobs:
           chmod 644 ~/.ssh/known_hosts
 
       - name: Apply manual dispatch overrides
-        if: ${{ github.event_name == 'workflow_dispatch' }}
+        if: ${{ steps.deploy_gate.outputs.enabled == 'true' && github.event_name == 'workflow_dispatch' }}
         run: |
           set -euo pipefail
           echo "VPS_READY_RETRIES=${{ inputs.ready_retries }}" >> "$GITHUB_ENV"
           echo "VPS_READY_DELAY_SECONDS=${{ inputs.ready_delay_seconds }}" >> "$GITHUB_ENV"
 
       - name: Determine deploy flags
+        if: ${{ steps.deploy_gate.outputs.enabled == 'true' }}
         id: deploy_flags
         run: |
           set -euo pipefail
@@ -149,12 +163,15 @@ jobs:
           printf 'value=%s\n' "${flags[*]}" >> "$GITHUB_OUTPUT"
 
       - name: Remote precheck
+        if: ${{ steps.deploy_gate.outputs.enabled == 'true' }}
         run: npm run vps:precheck:remote
 
       - name: Remote sync
+        if: ${{ steps.deploy_gate.outputs.enabled == 'true' }}
         run: npm run vps:sync:remote
 
       - name: Remote deploy
+        if: ${{ steps.deploy_gate.outputs.enabled == 'true' }}
         env:
           DEPLOY_FLAGS: ${{ steps.deploy_flags.outputs.value }}
         run: |
@@ -166,4 +183,5 @@ jobs:
           fi
 
       - name: Remote verify
+        if: ${{ steps.deploy_gate.outputs.enabled == 'true' }}
         run: npm run vps:verify:remote
