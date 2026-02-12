@@ -72,12 +72,13 @@ You can clear your text at any time by tapping the small X that appears inside t
 
 ### Voice Input
 
-If your browser supports the Web Speech API (Chrome, Edge, and most Chromium-based browsers), you will see a microphone button next to the text input.
+If voice input is available in your browser, you will see a microphone button next to the text input.
 
 1. Tap the **Mic** button. The input area border turns red, and a pulsing red dot appears to indicate recording.
-2. Speak naturally. Your words are transcribed in real time and appended to the text area.
+2. Speak naturally while recording.
 3. Tap the **Mic** button again (now showing a mic-off icon) to stop recording.
-4. Review the transcription, then save it like any other note.
+4. PocketBrain transcribes and appends your speech to the text area. In AI proxy mode with a connected Gemini key, it uses high-accuracy AI transcription. Otherwise it falls back to browser speech recognition when available.
+5. Review the transcription, then save it like any other note.
 
 You can also start voice input from the quick action pills (see below).
 
@@ -486,14 +487,16 @@ Note: Cmd is used on macOS, Ctrl on Windows and Linux.
 
 ### Voice input is not working
 
-Voice input requires the Web Speech API, which is only available in Chromium-based browsers (Chrome, Edge, Brave, Arc). It is not supported in Firefox or Safari.
+Voice input now has two paths:
+- High-accuracy AI transcription (requires AI proxy mode + connected Gemini provider).
+- Browser speech recognition fallback (Web Speech API; mainly Chromium browsers).
 
-If you are using a supported browser and it still does not work:
+If voice input still does not work:
 - Make sure you have granted microphone permissions to the site.
 - Check that no other application is using the microphone.
 - Try refreshing the page.
 
-If the Voice pill and microphone button do not appear at all, your browser does not support the Web Speech API.
+If the Voice pill and microphone button do not appear at all, your browser likely does not support microphone capture APIs for this app.
 
 ### AI features are not working
 

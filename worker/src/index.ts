@@ -52,6 +52,7 @@ const SESSION_COOKIE_NAME = 'pb_ai_session';
 const SESSION_TTL_SECONDS = 24 * 60 * 60;
 const RETRY_ATTEMPTS = 2;
 const REQUEST_TIMEOUT_MS = 12000;
+const MAX_TRANSCRIPTION_AUDIO_BASE64_CHARS = 6 * 1024 * 1024;
 const metrics: Metrics = {
   authFailures: 0,
   providerFailures: 0,
@@ -255,6 +256,31 @@ function parseCleanupMode(value: unknown): CleanupMode {
   throw new ApiError(400, 'BAD_REQUEST', 'mode must be "single" or "batch"');
 }
 
+function parseTranscriptionRequest(body: any): { audioBase64: string; mimeType: string; language?: string } {
+  const audioBase64 = typeof body?.audioBase64 === 'string' ? body.audioBase64.trim() : '';
+  if (!audioBase64) {
+    throw new ApiError(400, 'BAD_REQUEST', 'audioBase64 is required');
+  }
+  if (audioBase64.length > MAX_TRANSCRIPTION_AUDIO_BASE64_CHARS) {
+    throw new ApiError(413, 'BAD_REQUEST', 'Audio payload is too large');
+  }
+  if (!/^[A-Za-z0-9+/=\s]+$/.test(audioBase64)) {
+    throw new ApiError(400, 'BAD_REQUEST', 'audioBase64 must be a valid base64 string');
+  }
+
+  const mimeType = typeof body?.mimeType === 'string' ? body.mimeType.trim().toLowerCase() : '';
+  if (!mimeType || !mimeType.startsWith('audio/')) {
+    throw new ApiError(400, 'BAD_REQUEST', 'Unsupported audio mimeType');
+  }
+
+  const language = typeof body?.language === 'string' ? body.language.trim() : '';
+  if (language && !/^[A-Za-z-]{2,10}$/.test(language)) {
+    throw new ApiError(400, 'BAD_REQUEST', 'language must be an ISO language code');
+  }
+
+  return language ? { audioBase64, mimeType, language } : { audioBase64, mimeType };
+}
+
 async function parseJson(request: Request): Promise<any> {
   try {
     return await request.json();
@@ -298,6 +324,81 @@ async function callGemini(apiKey: string, prompt: string): Promise<string> {
     if (!text || typeof text !== 'string') {
       throw new ApiError(502, 'PROVIDER_UNAVAILABLE', 'Gemini returned no text output', true);
     }
+    return text;
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    if (error instanceof DOMException && error.name === 'TimeoutError') {
+      metrics.timeouts += 1;
+      throw new ApiError(504, 'TIMEOUT', 'Provider request timed out', true);
+    }
+    throw new ApiError(503, 'NETWORK', 'Network error while contacting Gemini', true);
+  } finally {
+    cleanup();
+  }
+}
+
+function buildTranscriptionPrompt(language?: string): string {
+  const languageHint = language ? ` The spoken language is likely ${language}.` : '';
+  return `Transcribe this audio accurately as plain text with punctuation.${languageHint}
+Return only the transcript text with no extra commentary.
+If no clear speech is detected, return an empty string.`;
+}
+
+async function callGeminiTranscription(
+  apiKey: string,
+  audioBase64: string,
+  mimeType: string,
+  language?: string
+): Promise<string> {
+  const { signal, cleanup } = timeoutSignal(REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                { text: buildTranscriptionPrompt(language) },
+                { inline_data: { mime_type: mimeType, data: audioBase64 } },
+              ],
+            },
+          ],
+          generationConfig: {
+            temperature: 0,
+          },
+        }),
+        signal,
+      }
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new ApiError(
+        response.status,
+        response.status === 401 ? 'AUTH_REQUIRED' : response.status === 429 ? 'RATE_LIMITED' : 'PROVIDER_UNAVAILABLE',
+        `Gemini transcription failed: ${body.slice(0, 200)}`,
+        isTransientStatus(response.status)
+      );
+    }
+
+    const data = (await response.json()) as any;
+    const parts = data?.candidates?.[0]?.content?.parts;
+    const text = Array.isArray(parts)
+      ? parts
+          .map(part => (typeof part?.text === 'string' ? part.text : ''))
+          .join('\n')
+          .trim()
+      : '';
+
+    if (!text) {
+      throw new ApiError(502, 'PROVIDER_UNAVAILABLE', 'Gemini returned no transcript', true);
+    }
+
     return text;
   } catch (error) {
     if (error instanceof ApiError) throw error;
@@ -701,6 +802,22 @@ export default {
           const text = await withRetries(() => callProvider(session.provider, session.apiKey, prompt, env.DEFAULT_MODEL));
           const parsed = safeParseJson<any>(text);
           return jsonResponse({ result: normalizeCleanupResult(content, mode, parsed) });
+        }
+
+        if (pathname === '/api/v1/ai/transcribe') {
+          if (session.provider !== 'gemini') {
+            throw new ApiError(
+              400,
+              'BAD_REQUEST',
+              'Accurate speech transcription currently requires a Gemini provider session.'
+            );
+          }
+
+          const { audioBase64, mimeType, language } = parseTranscriptionRequest(body);
+          const result = await withRetries(() =>
+            callGeminiTranscription(session.apiKey, audioBase64, mimeType, language)
+          );
+          return jsonResponse({ result });
         }
 
         if (pathname === '/api/v1/ai/search') {

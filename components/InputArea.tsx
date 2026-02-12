@@ -59,6 +59,7 @@ interface InputAreaProps {
   onSave: (content: string, presetType?: NoteType) => void;
   onBatchSave: (content: string) => void;
   onCleanupDraft: (content: string, mode: 'single' | 'batch') => Promise<{ cleanedText: string; items?: string[] }>;
+  onTranscribe?: (audio: Blob) => Promise<string>;
 }
 
 export interface InputAreaHandle {
@@ -97,18 +98,30 @@ function buildDraftDiff(originalText: string, cleanedText: string): DraftDiffLin
   });
 }
 
-const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatchSave, onCleanupDraft }, ref) => {
+const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatchSave, onCleanupDraft, onTranscribe }, ref) => {
   const [text, setText] = useState('');
   const [isListening, setIsListening] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [presetType, setPresetType] = useState<NoteType | null>(null);
   const [isFocused, setIsFocused] = useState(false);
   const [isBatchMode, setIsBatchMode] = useState(false);
   const [isCleaning, setIsCleaning] = useState(false);
   const [cleanupPreview, setCleanupPreview] = useState<CleanupPreviewState | null>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recorderStreamRef = useRef<MediaStream | null>(null);
+  const recorderChunksRef = useRef<Blob[]>([]);
+  const transcriptionRequestRef = useRef(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const hasSpeechAPI = typeof window !== 'undefined' && ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
+  const hasMediaRecorder =
+    typeof window !== 'undefined' &&
+    typeof window.MediaRecorder !== 'undefined' &&
+    typeof navigator !== 'undefined' &&
+    !!navigator.mediaDevices?.getUserMedia;
+  const canUseAIDictation = !!onTranscribe && hasMediaRecorder;
+  const hasVoiceInput = canUseAIDictation || hasSpeechAPI;
 
   useImperativeHandle(ref, () => ({
     focus: () => {
@@ -146,14 +159,6 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
       };
 
       recognitionRef.current = recognition;
-
-      return () => {
-        try {
-          recognition.stop();
-        } catch {
-          // no-op: stopping an inactive recognizer can throw on some browsers.
-        }
-      };
     }
   }, []);
 
@@ -165,7 +170,115 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
     textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
   };
 
-  const stopListening = () => {
+  const appendTranscript = (transcript: string) => {
+    const cleaned = transcript.trim();
+    if (!cleaned) return;
+    setText(prev => (prev.trim() ? `${prev.trimEnd()} ${cleaned}` : cleaned));
+    requestAnimationFrame(() => resizeTextarea(isBatchMode));
+  };
+
+  const stopRecorderStream = () => {
+    if (recorderStreamRef.current) {
+      recorderStreamRef.current.getTracks().forEach(track => track.stop());
+      recorderStreamRef.current = null;
+    }
+  };
+
+  const transcribeAudioBlob = async (audioBlob: Blob) => {
+    if (!onTranscribe) return;
+    const requestId = ++transcriptionRequestRef.current;
+    setIsTranscribing(true);
+
+    try {
+      const transcript = await onTranscribe(audioBlob);
+      if (requestId !== transcriptionRequestRef.current) return;
+      appendTranscript(transcript);
+    } catch (error) {
+      console.error('Audio transcription failed:', error);
+    } finally {
+      if (requestId === transcriptionRequestRef.current) {
+        setIsTranscribing(false);
+      }
+    }
+  };
+
+  const startRecorderListening = async (): Promise<boolean> => {
+    if (!canUseAIDictation || !onTranscribe) return false;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+      });
+
+      const preferredMimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+      const mimeType = preferredMimeTypes.find(type => window.MediaRecorder.isTypeSupported(type));
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+
+      recorderStreamRef.current = stream;
+      recorderChunksRef.current = [];
+
+      recorder.ondataavailable = event => {
+        if (event.data.size > 0) {
+          recorderChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onerror = event => {
+        console.error('Media recorder error:', event);
+        setIsListening(false);
+        stopRecorderStream();
+        recorderRef.current = null;
+      };
+
+      recorder.onstop = () => {
+        const recordedBlob = new Blob(recorderChunksRef.current, {
+          type: recorder.mimeType || 'audio/webm',
+        });
+        recorderChunksRef.current = [];
+        recorderRef.current = null;
+        stopRecorderStream();
+        setIsListening(false);
+
+        if (recordedBlob.size > 0) {
+          void transcribeAudioBlob(recordedBlob);
+        }
+      };
+
+      recorderRef.current = recorder;
+      recorder.start(250);
+      setIsListening(true);
+      return true;
+    } catch (error) {
+      console.error('Failed to start audio recorder:', error);
+      stopRecorderStream();
+      recorderRef.current = null;
+      return false;
+    }
+  };
+
+  const stopListening = (updateState = true) => {
+    const recorder = recorderRef.current;
+    if (recorder && recorder.state !== 'inactive') {
+      if (!updateState) {
+        recorder.onstop = null;
+        recorder.onerror = null;
+        recorder.ondataavailable = null;
+      }
+      recorder.stop();
+      if (!updateState) {
+        recorderRef.current = null;
+        stopRecorderStream();
+      }
+    } else if (recorder) {
+      recorderRef.current = null;
+      stopRecorderStream();
+    }
+
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
@@ -173,29 +286,55 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
         // no-op: recognizer may already be stopped.
       }
     }
-    setIsListening(false);
+    if (updateState) {
+      setIsListening(false);
+    }
   };
 
-  const toggleListening = () => {
-    if (!recognitionRef.current) {
-      alert('Speech recognition is not supported in this browser.');
+  const toggleListening = async () => {
+    if (isTranscribing) return;
+
+    if (!hasVoiceInput) {
+      alert('Voice recording is not supported in this browser.');
       return;
     }
 
     if (isListening) {
       stopListening();
-    } else {
-      try {
-        recognitionRef.current.start();
-        setIsListening(true);
-      } catch (e) {
-        console.error('Failed to start speech recognition:', e);
-      }
+      return;
+    }
+
+    const startedRecorder = await startRecorderListening();
+    if (startedRecorder) return;
+
+    if (!recognitionRef.current) {
+      alert('Voice recording is not supported in this browser.');
+      return;
+    }
+
+    try {
+      recognitionRef.current.start();
+      setIsListening(true);
+    } catch (e) {
+      console.error('Failed to start speech recognition:', e);
     }
   };
 
+  useEffect(() => {
+    return () => {
+      transcriptionRequestRef.current += 1;
+      stopListening(false);
+      stopRecorderStream();
+      try {
+        recognitionRef.current?.stop();
+      } catch {
+        // no-op: stopping an inactive recognizer can throw on some browsers.
+      }
+    };
+  }, []);
+
   const handleSave = () => {
-    if (!text.trim() || isCleaning || cleanupPreview) return;
+    if (!text.trim() || isCleaning || isTranscribing || cleanupPreview) return;
     if (isBatchMode) {
       onBatchSave(text);
     } else {
@@ -205,12 +344,14 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
   };
 
   const handleBatchSave = () => {
-    if (!text.trim() || isCleaning || cleanupPreview) return;
+    if (!text.trim() || isCleaning || isTranscribing || cleanupPreview) return;
     onBatchSave(text);
     resetInput();
   };
 
   const resetInput = () => {
+    transcriptionRequestRef.current += 1;
+    setIsTranscribing(false);
     stopListening();
     setText('');
     setPresetType(null);
@@ -234,7 +375,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
     } else if (action === 'voice') {
       setPresetType(null);
       setIsBatchMode(false);
-      toggleListening();
+      void toggleListening();
     } else if (action === 'batch') {
       setIsBatchMode(prev => !prev);
       setPresetType(null);
@@ -245,11 +386,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
 
   const handleCleanup = async () => {
     const content = text.trim();
-    if (!content || isCleaning || cleanupPreview) return;
-
-    if (isListening) {
-      stopListening();
-    }
+    if (!content || isCleaning || isTranscribing || cleanupPreview || isListening) return;
 
     setIsCleaning(true);
     try {
@@ -308,6 +445,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
   }, [cleanupPreview]);
 
   const getPlaceholder = () => {
+    if (isTranscribing) return "Transcribing...";
     if (isCleaning) return "Cleaning draft...";
     if (isListening) return "Listening...";
     if (presetType === NoteType.TASK) return "Creating a Task...";
@@ -334,7 +472,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
       <div className="h-12 bg-gradient-to-t from-white/100 dark:from-zinc-900/100 to-transparent pointer-events-none" />
       
       {/* Main Input Bar */}
-      <div className={`bg-white/80 dark:bg-zinc-900/80 backdrop-blur-xl border-t border-zinc-200/50 dark:border-zinc-700/50 pb-safe px-4 pt-3 transition-all duration-500 ${isListening ? 'shadow-[0_-4px_20px_rgba(244,63,94,0.15)]' : ''}`}>
+      <div className={`bg-white/80 dark:bg-zinc-900/80 backdrop-blur-xl border-t border-zinc-200/50 dark:border-zinc-700/50 pb-safe px-4 pt-3 transition-all duration-500 ${isListening ? 'shadow-[0_-4px_20px_rgba(244,63,94,0.15)]' : isTranscribing ? 'shadow-[0_-4px_20px_rgba(37,99,235,0.15)]' : ''}`}>
         {/* Quick Actions */}
         <div className={`max-w-2xl mx-auto overflow-hidden transition-all duration-300 ${isFocused && !presetType && !isBatchMode ? 'max-h-0 opacity-0 mb-0' : 'max-h-12 opacity-100 mb-2'}`}>
           <div className="flex gap-2">
@@ -358,12 +496,15 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
             >
               <Lightbulb className="w-3.5 h-3.5" /> Idea
             </button>
-            {hasSpeechAPI && (
+            {hasVoiceInput && (
             <button
               onClick={() => handleQuickAction('voice')}
+              disabled={isTranscribing}
               className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-all ${
                 isListening
                   ? 'bg-rose-100 dark:bg-rose-900/40 text-rose-700 dark:text-rose-400 border border-rose-200 dark:border-rose-800'
+                  : isTranscribing
+                    ? 'bg-brand-100 dark:bg-brand-900/40 text-brand-700 dark:text-brand-300 border border-brand-200 dark:border-brand-700'
                   : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700'
               }`}
             >
@@ -389,6 +530,8 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
           <div className={`relative flex-1 border rounded-[20px] transition-all shadow-sm overflow-hidden ${
              isListening
              ? 'bg-white dark:bg-zinc-800 border-rose-200 ring-2 ring-rose-500/20'
+             : isTranscribing
+               ? 'bg-white dark:bg-zinc-800 border-brand-200 ring-2 ring-brand-500/20'
              : 'bg-zinc-100/50 dark:bg-zinc-800/50 border-zinc-200 dark:border-zinc-700 focus-within:bg-white dark:focus-within:bg-zinc-800 focus-within:ring-2 focus-within:ring-brand-500/20 focus-within:border-brand-500/50 hover:shadow-md'
           }`}>
               {isListening && (
@@ -412,7 +555,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
                 rows={1}
               />
               
-              {text.length > 0 && !isListening && (
+              {text.length > 0 && !isListening && !isTranscribing && (
                   <button 
                       onClick={() => setText('')}
                       className="absolute right-2 top-2.5 p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors rounded-full hover:bg-zinc-100 dark:hover:bg-zinc-700"
@@ -425,17 +568,20 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
           {/* Action Buttons */}
           <div className="flex gap-2 shrink-0">
             {/* Mic Toggle */}
-            {hasSpeechAPI && (
+            {hasVoiceInput && (
             <button
-              onClick={toggleListening}
+              onClick={() => void toggleListening()}
+              disabled={isTranscribing}
               className={`h-12 w-12 rounded-full flex items-center justify-center transition-all duration-300 border ${
                 isListening
                   ? 'bg-rose-50 dark:bg-rose-900/30 border-rose-200 dark:border-rose-800 text-rose-600 animate-pulse shadow-inner'
+                  : isTranscribing
+                    ? 'bg-brand-50 dark:bg-brand-900/30 border-brand-200 dark:border-brand-800 text-brand-600 shadow-inner'
                   : 'bg-white dark:bg-zinc-800 border-zinc-200 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:border-zinc-300 shadow-sm'
-              }`}
+              } disabled:opacity-60 disabled:cursor-not-allowed`}
               aria-label="Toggle voice recording"
             >
-              {isListening ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+              {isListening ? <MicOff className="w-5 h-5" /> : <Mic className={`w-5 h-5 ${isTranscribing ? 'animate-pulse' : ''}`} />}
             </button>
             )}
             
@@ -444,7 +590,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
                 <>
                     <button
                         onClick={handleCleanup}
-                        disabled={isCleaning || !!cleanupPreview}
+                        disabled={isCleaning || isListening || isTranscribing || !!cleanupPreview}
                         title={isBatchMode ? "Clean + split draft for review" : "Clean draft for review"}
                         className={`h-12 w-12 rounded-full flex items-center justify-center transition-all duration-300 border shadow-sm disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100 ${
                           isBatchMode
@@ -459,8 +605,9 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
                    {!isBatchMode && (
                      <button
                           onClick={handleBatchSave}
+                          disabled={isListening || isTranscribing || isCleaning || !!cleanupPreview}
                           title="AI Batch Split"
-                          className="h-12 w-12 rounded-full flex items-center justify-center transition-all duration-300 bg-violet-100 border border-violet-200 text-violet-600 hover:bg-violet-200 hover:scale-105 shadow-sm"
+                          className="h-12 w-12 rounded-full flex items-center justify-center transition-all duration-300 bg-violet-100 border border-violet-200 text-violet-600 hover:bg-violet-200 hover:scale-105 shadow-sm disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100"
                       >
                           <Wand2 className="w-5 h-5" />
                       </button>
@@ -469,7 +616,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
                     {/* Standard Save */}
                     <button
                         onClick={handleSave}
-                        disabled={isCleaning || !!cleanupPreview}
+                        disabled={isCleaning || isListening || isTranscribing || !!cleanupPreview}
                         title={isBatchMode ? "Batch Split (⌘+Enter)" : "Save (⌘+Enter)"}
                         className={`h-12 w-12 rounded-full flex items-center justify-center transition-all duration-300 hover:scale-105 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100 shadow-md ${
                           isBatchMode

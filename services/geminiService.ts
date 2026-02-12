@@ -39,6 +39,10 @@ export interface DraftCleanupResult {
   items?: string[];
 }
 
+export interface SpeechTranscriptionOptions extends RequestOptions {
+  language?: string;
+}
+
 function getDevGeminiKey(): string {
   return process.env.GEMINI_API_KEY || '';
 }
@@ -397,6 +401,33 @@ function hasProxy(): boolean {
   return USE_AI_PROXY;
 }
 
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = reader.result;
+      if (typeof result !== 'string') {
+        reject(new AIServiceError('Failed to encode audio payload', 'BAD_REQUEST', false));
+        return;
+      }
+      const base64 = result.split(',')[1];
+      if (!base64) {
+        reject(new AIServiceError('Failed to encode audio payload', 'BAD_REQUEST', false));
+        return;
+      }
+      resolve(base64);
+    };
+    reader.onerror = () => reject(new AIServiceError('Failed to read audio payload', 'BAD_REQUEST', false));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function normalizeTranscript(text: string): string {
+  return text
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export async function getAIAuthStatus(options?: RequestOptions): Promise<AIAuthState> {
   if (!hasProxy()) {
     const provider = getProvider();
@@ -612,6 +643,32 @@ export const cleanupNoteDraft = async (
     if (error instanceof AIServiceError) throw error;
     throw new AIServiceError('Error cleaning note draft.', 'PROVIDER_UNAVAILABLE', true);
   }
+};
+
+export const transcribeAudio = async (
+  audio: Blob,
+  options?: SpeechTranscriptionOptions
+): Promise<string> => {
+  if (!(audio instanceof Blob) || audio.size === 0) {
+    throw new AIServiceError('Audio payload is empty.', 'BAD_REQUEST', false);
+  }
+
+  if (!hasProxy()) {
+    throw new AIServiceError('Accurate speech transcription requires AI proxy mode.', 'BAD_REQUEST', false);
+  }
+
+  const base64 = await blobToBase64(audio);
+  const payload = await proxyPost<{ result: string }>(
+    '/api/v1/ai/transcribe',
+    {
+      audioBase64: base64,
+      mimeType: audio.type || 'audio/webm',
+      ...(options?.language ? { language: options.language } : {}),
+    },
+    options
+  );
+
+  return normalizeTranscript(payload.result || '');
 };
 
 export const generateDailyBrief = async (notes: Note[], options?: RequestOptions): Promise<string | null> => {

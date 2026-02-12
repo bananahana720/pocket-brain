@@ -12,6 +12,7 @@ import {
   getAIAuthStatus,
   isProxyEnabled,
   processBatchEntry,
+  transcribeAudio,
 } from './services/geminiService';
 import NoteCard from './components/NoteCard';
 import InputArea, { InputAreaHandle } from './components/InputArea';
@@ -728,6 +729,29 @@ function App() {
     [addToast]
   );
 
+  const handleTranscribeAudio = useCallback(
+    async (audio: Blob) => {
+      try {
+        const startedAt = performance.now();
+        incrementMetric('ai_requests');
+        const transcript = await transcribeAudio(audio, { language: 'en-US' });
+        recordAiLatency(performance.now() - startedAt);
+        setAiErrorMessage(null);
+        setAiDegradedMessage(null);
+        return transcript;
+      } catch (error) {
+        const mapped = toAiMessage(error);
+        incrementMetric('ai_failures');
+        recordAiErrorCode(mapped.code);
+        setAiErrorMessage(mapped.message);
+        setAiDegradedMessage(mapped.degradedMessage);
+        addToast('AI transcription is unavailable right now.', 'error');
+        throw error;
+      }
+    },
+    [addToast]
+  );
+
   const handleUpdateNote = useCallback(
     (id: string, newContent: string) => {
       const existing = notes.find(note => note.id === id);
@@ -1438,6 +1462,7 @@ function App() {
             onSave={handleAddNote}
             onBatchSave={handleBatchNote}
             onCleanupDraft={handleCleanupDraft}
+            onTranscribe={isProxyEnabled() && aiAuth.connected && aiAuth.provider === 'gemini' ? handleTranscribeAudio : undefined}
           />
         </ErrorBoundary>
 
