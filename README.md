@@ -211,6 +211,7 @@ Deploy script now:
 - validates compose config before restart
 - auto-creates database `pocketbrain` if missing
 - checks readiness on both direct API (`:8788/ready`) and nginx (`:8080/ready`)
+- acquires a deploy lock (`/tmp/pocketbrain-deploy.lock`) to prevent overlapping runs
 - prints compose status + logs on failure
 
 `/ready` is the deployment health endpoint. `/` on nginx may return `404` and is not a deployment-failure signal.

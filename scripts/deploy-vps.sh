@@ -10,6 +10,7 @@ READY_RETRIES="${VPS_READY_RETRIES:-30}"
 READY_DELAY_SECONDS="${VPS_READY_DELAY_SECONDS:-2}"
 POSTGRES_READY_RETRIES="${VPS_POSTGRES_READY_RETRIES:-20}"
 POSTGRES_READY_DELAY_SECONDS="${VPS_POSTGRES_READY_DELAY_SECONDS:-2}"
+DEPLOY_LOCK_FILE="${VPS_DEPLOY_LOCK_FILE:-/tmp/pocketbrain-deploy.lock}"
 
 usage() {
   cat <<'EOF'
@@ -92,6 +93,21 @@ wait_for_http_200() {
   return 1
 }
 
+acquire_deploy_lock() {
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "==> flock not found; deploy lock disabled"
+    return 0
+  fi
+
+  exec 9>"$DEPLOY_LOCK_FILE"
+  if ! flock -n 9; then
+    echo "Another deploy is already running (lock: $DEPLOY_LOCK_FILE)." >&2
+    exit 1
+  fi
+
+  echo "==> Acquired deploy lock: $DEPLOY_LOCK_FILE"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --with-worker)
@@ -129,6 +145,7 @@ validate_positive_integer "$POSTGRES_READY_DELAY_SECONDS" "postgres retry delay"
 
 echo "==> Deploying PocketBrain backend from: $ROOT_DIR"
 echo "==> Readiness retries: ${READY_RETRIES} (delay ${READY_DELAY_SECONDS}s)"
+acquire_deploy_lock
 
 if [[ "$SKIP_PULL" != "true" ]]; then
   echo "==> Pulling latest git changes"
