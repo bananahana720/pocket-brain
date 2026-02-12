@@ -20,6 +20,7 @@ test-results/
 .env
 .env.*
 !.env.example
+.vps-remote.env
 
 # Editor directories and files
 .vscode/*

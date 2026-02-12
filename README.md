@@ -223,7 +223,21 @@ Prerequisites:
 
 You can run VPS deploy/sync actions over SSH from your local repo checkout.
 
-Set once per shell:
+Preferred (persistent local config, not committed):
+
+```bash
+cp .vps-remote.env.example .vps-remote.env
+# edit values once
+```
+
+The remote scripts auto-load `.vps-remote.env` and then `.env` for:
+- `VPS_SSH_HOST`
+- `VPS_PROJECT_DIR`
+- `VPS_SSH_PORT`
+- `VPS_SSH_IDENTITY`
+- `VPS_SSH_RETRY_ATTEMPTS`
+
+One-off shell exports also work:
 
 ```bash
 export VPS_SSH_HOST=ubuntu@your-vps-host
@@ -248,6 +262,8 @@ Optional deploy flags:
 bash scripts/deploy-vps-remote.sh --with-worker
 bash scripts/deploy-vps-remote.sh --skip-pull
 bash scripts/deploy-vps-remote.sh --allow-stash
+bash scripts/deploy-vps-remote.sh --ssh-retries 5
+bash scripts/verify-vps-remote.sh --ready-retries 30 --ready-delay 2
 ```
 
 Safe CD run order:
@@ -261,6 +277,8 @@ Notes:
 - `vps:deploy:remote` now fails if the remote repo is dirty.
 - Use `--allow-stash` only when you intentionally want to stash remote drift.
 - Deploy automatically renders `server/.env` from root `.env` before runtime config validation.
+- If `VPS_SSH_HOST` is set as a raw IP/hostname, scripts default to `ubuntu@<host>`.
+- If `VPS_SSH_IDENTITY` is unset and `~/.ssh/id_ed25519` exists, scripts use it automatically.
 
 ---
 

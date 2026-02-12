@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/load-vps-env.sh"
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -11,7 +14,12 @@ Options:
   --path <remote-path>      Remote PocketBrain repo path. Defaults to VPS_PROJECT_DIR env var.
   --port <port>             SSH port. Defaults to VPS_SSH_PORT env var or 22.
   --identity <file>         SSH private key path. Defaults to VPS_SSH_IDENTITY env var.
+  --ssh-retries <count>     SSH retry attempts for verification command.
+  --ready-retries <count>   Readiness retries on remote host. Default: 15.
+  --ready-delay <seconds>   Delay between readiness retries. Default: 2.
   --help                    Show this help text.
+
+The script auto-loads VPS vars from `.vps-remote.env` (preferred) and `.env`.
 EOF
 }
 
@@ -27,6 +35,9 @@ VPS_HOST="${VPS_SSH_HOST:-}"
 PROJECT_DIR="${VPS_PROJECT_DIR:-}"
 SSH_PORT="${VPS_SSH_PORT:-22}"
 SSH_IDENTITY="${VPS_SSH_IDENTITY:-}"
+SSH_RETRIES="${VPS_SSH_RETRY_ATTEMPTS:-3}"
+READY_RETRIES="${VPS_READY_RETRIES:-15}"
+READY_DELAY_SECONDS="${VPS_READY_DELAY_SECONDS:-2}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -44,6 +55,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --identity)
       SSH_IDENTITY="${2:-}"
+      shift 2
+      ;;
+    --ssh-retries)
+      SSH_RETRIES="${2:-}"
+      shift 2
+      ;;
+    --ready-retries)
+      READY_RETRIES="${2:-}"
+      shift 2
+      ;;
+    --ready-delay)
+      READY_DELAY_SECONDS="${2:-}"
       shift 2
       ;;
     --help|-h)
@@ -68,6 +91,19 @@ if [[ -z "$PROJECT_DIR" ]]; then
   exit 1
 fi
 
+if ! [[ "$SSH_RETRIES" =~ ^[0-9]+$ ]] || [[ "$SSH_RETRIES" -lt 1 ]]; then
+  echo "Invalid SSH retry count: $SSH_RETRIES (expected integer >= 1)." >&2
+  exit 1
+fi
+if ! [[ "$READY_RETRIES" =~ ^[0-9]+$ ]] || [[ "$READY_RETRIES" -lt 1 ]]; then
+  echo "Invalid ready retry count: $READY_RETRIES (expected integer >= 1)." >&2
+  exit 1
+fi
+if ! [[ "$READY_DELAY_SECONDS" =~ ^[0-9]+$ ]] || [[ "$READY_DELAY_SECONDS" -lt 1 ]]; then
+  echo "Invalid ready retry delay: $READY_DELAY_SECONDS (expected integer >= 1)." >&2
+  exit 1
+fi
+
 SSH_ARGS=(
   -p "$SSH_PORT"
   -o BatchMode=yes
@@ -80,8 +116,33 @@ fi
 
 REMOTE_PROJECT_DIR="$(quote_for_shell "$PROJECT_DIR")"
 
-echo "==> Verifying remote deploy target: $VPS_HOST ($PROJECT_DIR)"
+run_ssh() {
+  local remote_cmd="$1"
+  local label="$2"
+  local attempts="${3:-$SSH_RETRIES}"
+  local attempt=1
+  local exit_code=0
 
-ssh "${SSH_ARGS[@]}" "$VPS_HOST" "set -euo pipefail; cd $REMOTE_PROJECT_DIR; echo \"remote_head=\$(git rev-parse --short HEAD)\"; if [[ -n \"\$(git status --porcelain)\" ]]; then echo \"remote_repo_status=dirty\"; git status --short; else echo \"remote_repo_status=clean\"; fi; READY_STATUS=\$(curl -s -o /tmp/pocketbrain-ready.json -w \"%{http_code}\" http://127.0.0.1:8080/ready || true); echo \"ready_status=\$READY_STATUS\"; echo \"ready_summary=\"; cat /tmp/pocketbrain-ready.json; [[ \"\$READY_STATUS\" == \"200\" ]]"
+  while (( attempt <= attempts )); do
+    if ssh "${SSH_ARGS[@]}" "$VPS_HOST" "$remote_cmd"; then
+      return 0
+    fi
+    exit_code=$?
+    if (( attempt == attempts )); then
+      echo "Remote command failed after ${attempts} attempt(s): $label" >&2
+      return "$exit_code"
+    fi
+    local delay=$((attempt * 2))
+    echo "Remote command failed (${label}), retrying in ${delay}s (${attempt}/${attempts})..." >&2
+    sleep "$delay"
+    attempt=$((attempt + 1))
+  done
+
+  return "$exit_code"
+}
+
+echo "==> Verifying remote deploy target: $VPS_HOST ($PROJECT_DIR)"
+echo "==> Ready retries: $READY_RETRIES (delay ${READY_DELAY_SECONDS}s)"
+run_ssh "set -euo pipefail; cd $REMOTE_PROJECT_DIR; echo \"remote_head=\$(git rev-parse --short HEAD)\"; if [[ -n \"\$(git status --porcelain)\" ]]; then echo \"remote_repo_status=dirty\"; git status --short; else echo \"remote_repo_status=clean\"; fi; READY_STATUS=\"\"; for attempt in \$(seq 1 $READY_RETRIES); do READY_STATUS=\$(curl -s -o /tmp/pocketbrain-ready.json -w \"%{http_code}\" http://127.0.0.1:8080/ready || true); if [[ \"\$READY_STATUS\" == \"200\" ]]; then break; fi; sleep $READY_DELAY_SECONDS; done; echo \"ready_status=\$READY_STATUS\"; echo \"ready_summary=\"; cat /tmp/pocketbrain-ready.json; [[ \"\$READY_STATUS\" == \"200\" ]]" "remote_verify"
 
 echo "==> Remote verification complete"

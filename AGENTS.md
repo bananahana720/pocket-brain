@@ -113,23 +113,28 @@ Playwright uses `npm run dev` as its web server and targets `http://localhost:30
 Deploy script rebuilds containers, applies `server/drizzle/0000_initial.sql`, and validates readiness via `http://127.0.0.1:8080/ready`.
 
 ### 14) Remote VPS management from local machine (SSH)
-1. Export remote connection vars:
+1. Preferred: create local remote config file once:
+   - `cp .vps-remote.env.example .vps-remote.env`
+   - Edit `VPS_SSH_HOST`, `VPS_PROJECT_DIR`, and optional SSH/retry fields.
+2. Alternative: export remote connection vars per shell:
    - `export VPS_SSH_HOST=ubuntu@your-vps-host`
    - `export VPS_PROJECT_DIR=/srv/pocket-brain`
    - Optional: `export VPS_SSH_PORT=22`
    - Optional: `export VPS_SSH_IDENTITY=~/.ssh/id_ed25519`
-2. Validate connectivity and remote repo layout:
+3. Validate connectivity and remote repo layout:
    - `npm run vps:precheck:remote`
-3. Sync only (git pull on VPS):
+4. Sync only (git pull on VPS):
    - `npm run vps:sync:remote`
-4. Full deploy via remote `scripts/deploy-vps.sh`:
+5. Full deploy via remote `scripts/deploy-vps.sh`:
    - `npm run vps:deploy:remote -- --skip-pull` (recommended after sync step)
-5. Post-deploy verify (remote SHA + `/ready` summary):
+6. Post-deploy verify (remote SHA + `/ready` summary):
    - `npm run vps:verify:remote`
-6. Optional direct flags:
+7. Optional direct flags:
    - `bash scripts/deploy-vps-remote.sh --with-worker`
    - `bash scripts/deploy-vps-remote.sh --skip-pull`
    - `bash scripts/deploy-vps-remote.sh --allow-stash`
+   - `bash scripts/deploy-vps-remote.sh --ssh-retries 5`
+   - `bash scripts/verify-vps-remote.sh --ready-retries 30 --ready-delay 2`
 
 ## Command Reference
 
