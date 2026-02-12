@@ -190,9 +190,9 @@ const Drawer: React.FC<DrawerProps> = ({
 
   const getHeatmapColor = (count: number) => {
     if (count === 0) return 'bg-zinc-200 dark:bg-zinc-700';
-    if (count <= 2) return 'bg-violet-200 dark:bg-violet-800';
-    if (count <= 5) return 'bg-violet-400 dark:bg-violet-600';
-    return 'bg-violet-600 dark:bg-violet-400';
+    if (count <= 2) return 'bg-cyan-200 dark:bg-cyan-800';
+    if (count <= 5) return 'bg-cyan-400 dark:bg-cyan-600';
+    return 'bg-cyan-600 dark:bg-cyan-400';
   };
 
   // Export handlers
@@ -302,15 +302,15 @@ const Drawer: React.FC<DrawerProps> = ({
     <div className="fixed inset-0 z-50 flex justify-start">
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-zinc-900/20 backdrop-blur-sm animate-fade-in"
+        className="absolute inset-0 bg-zinc-950/35 backdrop-blur-sm animate-fade-in"
         onClick={onClose}
       />
 
       {/* Panel */}
-      <div className="relative w-[80%] max-w-xs bg-white dark:bg-zinc-900 h-full shadow-2xl border-r border-zinc-200 dark:border-zinc-700 p-6 flex flex-col animate-slide-right transition-colors duration-200 overflow-y-auto">
+      <div className="mission-drawer relative w-[85%] max-w-sm h-full shadow-2xl border-r border-zinc-200/70 dark:border-zinc-700/70 p-6 flex flex-col animate-slide-right transition-colors duration-200 overflow-y-auto">
         <div className="flex items-center justify-between mb-6">
-            <h2 className="text-xl font-bold text-zinc-800 dark:text-zinc-100 tracking-tight">Menu</h2>
-            <button onClick={onClose} className="p-2 -mr-2 rounded-full hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-500 dark:text-zinc-400">
+            <h2 className="font-display text-3xl leading-none text-zinc-800 dark:text-zinc-100">Menu</h2>
+            <button onClick={onClose} className="mission-tag-chip p-2 -mr-2 rounded-md hover:bg-zinc-100/70 dark:hover:bg-zinc-800/50 text-zinc-500 dark:text-zinc-400">
                 <X className="w-5 h-5" />
             </button>
         </div>
@@ -318,7 +318,7 @@ const Drawer: React.FC<DrawerProps> = ({
         {/* Theme Toggle */}
         <button
           onClick={toggle}
-          className="flex items-center justify-between w-full px-4 py-3 rounded-xl bg-zinc-50 dark:bg-zinc-800 border border-zinc-100 dark:border-zinc-700 mb-6 transition-colors"
+          className="mission-tag-chip flex items-center justify-between w-full px-4 py-3 rounded-xl border mb-6 transition-colors"
         >
           <div className="flex items-center gap-3">
             {theme === 'dark' ? <Moon className="w-4 h-4 text-brand-400" /> : <Sun className="w-4 h-4 text-amber-500" />}
@@ -330,10 +330,10 @@ const Drawer: React.FC<DrawerProps> = ({
         </button>
 
         {/* AI Security */}
-        <div className="mb-6 rounded-xl border border-zinc-100 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800/80">
+        <div className="mission-note mb-6 rounded-xl border border-zinc-200/70 p-4 dark:border-zinc-700/70">
           <div className="mb-3 flex items-center gap-2">
             <Shield className="h-4 w-4 text-brand-500" />
-            <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">AI Security</h3>
+            <h3 className="font-display text-lg leading-none text-zinc-600 dark:text-zinc-300">AI Security</h3>
           </div>
 
           {aiAuth.connected ? (
@@ -349,7 +349,7 @@ const Drawer: React.FC<DrawerProps> = ({
               <button
                 onClick={handleDisconnectAI}
                 disabled={isDisconnectingAI}
-                className="mt-1 inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-semibold text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-60 dark:border-zinc-600 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                className="mt-1 inline-flex items-center gap-1.5 mission-tag-chip rounded-md border px-3 py-1.5 text-xs font-semibold text-zinc-700 transition-colors hover:bg-zinc-100/70 disabled:opacity-60 dark:text-zinc-200 dark:hover:bg-zinc-700/40"
               >
                 <Unplug className="h-3.5 w-3.5" />
                 {isDisconnectingAI ? 'Disconnecting...' : 'Disconnect'}
@@ -362,10 +362,10 @@ const Drawer: React.FC<DrawerProps> = ({
                   <button
                     key={p}
                     onClick={() => setProvider(p)}
-                    className={`rounded-full px-3 py-1 text-[11px] font-semibold transition-colors ${
+                    className={`rounded-md px-3 py-1 text-[11px] font-semibold transition-colors ${
                       provider === p
                         ? 'bg-brand-600 text-white'
-                        : 'bg-white text-zinc-600 hover:bg-zinc-100 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600'
+                        : 'mission-tag-chip text-zinc-600 hover:bg-zinc-100/70 dark:text-zinc-300 dark:hover:bg-zinc-700/40'
                     }`}
                   >
                     {p === 'openrouter' ? 'OpenRouter' : 'Gemini'}
@@ -381,7 +381,7 @@ const Drawer: React.FC<DrawerProps> = ({
                   type="password"
                   autoComplete="off"
                   spellCheck={false}
-                  className="w-full rounded-lg border border-zinc-200 bg-white py-2 pl-8 pr-2 text-xs text-zinc-700 outline-none focus:border-brand-500 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-100"
+                  className="w-full mission-tag-chip rounded-lg border py-2 pl-8 pr-2 text-xs text-zinc-700 outline-none focus:border-brand-500 dark:text-zinc-100"
                 />
               </div>
               <button
@@ -407,7 +407,7 @@ const Drawer: React.FC<DrawerProps> = ({
 
         {/* Productivity Stats */}
         <div className="space-y-4 mb-6">
-          <h3 className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Activity</h3>
+          <h3 className="font-display text-lg leading-none text-zinc-500 dark:text-zinc-400">Activity</h3>
 
           {/* Streak + Today row */}
           <div className="flex items-center gap-3">
@@ -460,21 +460,21 @@ const Drawer: React.FC<DrawerProps> = ({
 
         {/* Overview stats (compact) */}
         <div className="mb-6">
-            <h3 className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3">Overview</h3>
+            <h3 className="font-display text-lg leading-none text-zinc-500 dark:text-zinc-400 mb-3">Overview</h3>
             <div className="grid grid-cols-4 gap-2">
-                <div className="bg-zinc-50 dark:bg-zinc-800 p-2 rounded-lg border border-zinc-100 dark:border-zinc-700 text-center">
+                <div className="mission-tag-chip p-2 rounded-lg border text-center">
                     <span className="text-lg font-bold text-zinc-800 dark:text-zinc-100 block">{stats.total}</span>
                     <span className="text-[9px] font-medium text-zinc-400 uppercase">Total</span>
                 </div>
-                <div className="bg-zinc-50 dark:bg-zinc-800 p-2 rounded-lg border border-zinc-100 dark:border-zinc-700 text-center">
+                <div className="mission-tag-chip p-2 rounded-lg border text-center">
                     <span className="text-lg font-bold text-zinc-800 dark:text-zinc-100 block">{stats.notes}</span>
                     <span className="text-[9px] font-medium text-zinc-400 uppercase">Notes</span>
                 </div>
-                <div className="bg-zinc-50 dark:bg-zinc-800 p-2 rounded-lg border border-zinc-100 dark:border-zinc-700 text-center">
+                <div className="mission-tag-chip p-2 rounded-lg border text-center">
                     <span className="text-lg font-bold text-emerald-700 dark:text-emerald-400 block">{stats.tasks}</span>
                     <span className="text-[9px] font-medium text-zinc-400 uppercase">Tasks</span>
                 </div>
-                <div className="bg-zinc-50 dark:bg-zinc-800 p-2 rounded-lg border border-zinc-100 dark:border-zinc-700 text-center">
+                <div className="mission-tag-chip p-2 rounded-lg border text-center">
                     <span className="text-lg font-bold text-amber-700 dark:text-amber-400 block">{stats.ideas}</span>
                     <span className="text-[9px] font-medium text-zinc-400 uppercase">Ideas</span>
                 </div>
@@ -486,7 +486,7 @@ const Drawer: React.FC<DrawerProps> = ({
         {/* Top Tags */}
         {topTags.length > 0 && (
           <div className="mb-6">
-            <h3 className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+            <h3 className="font-display text-lg leading-none text-zinc-500 dark:text-zinc-400 mb-3 flex items-center gap-2">
               <Tag className="w-3.5 h-3.5" /> Top Tags
             </h3>
             <div className="space-y-1.5">
@@ -494,9 +494,9 @@ const Drawer: React.FC<DrawerProps> = ({
                 <button
                   key={tag}
                   onClick={() => { onTagClick?.(tag); onClose(); }}
-                  className="w-full flex items-center justify-between px-3 py-1.5 rounded-lg hover:bg-violet-50 dark:hover:bg-violet-900/20 text-sm transition-colors text-left"
+                  className="w-full flex items-center justify-between px-3 py-1.5 rounded-lg mission-tag-chip hover:bg-cyan-50/80 dark:hover:bg-cyan-900/20 text-sm transition-colors text-left"
                 >
-                  <span className="text-violet-700 dark:text-violet-400 font-medium">#{tag}</span>
+                  <span className="text-cyan-700 dark:text-cyan-400 font-medium">#{tag}</span>
                   <span className="text-[10px] font-bold text-zinc-400 bg-zinc-100 dark:bg-zinc-700 px-1.5 py-0.5 rounded-full">{count}</span>
                 </button>
               ))}
@@ -510,13 +510,13 @@ const Drawer: React.FC<DrawerProps> = ({
         {/* All Tags cloud (if more than top 5) */}
         {sortedTags.length > 5 && (
           <div className="mb-6">
-            <h3 className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3">All Tags</h3>
+            <h3 className="font-display text-lg leading-none text-zinc-500 dark:text-zinc-400 mb-3">All Tags</h3>
             <div className="flex flex-wrap gap-2">
               {sortedTags.map(([tag, count]) => (
                 <button
                   key={tag}
                   onClick={() => { onTagClick?.(tag); onClose(); }}
-                  className={`bg-violet-50 dark:bg-violet-900/30 text-violet-700 dark:text-violet-400 hover:bg-violet-100 dark:hover:bg-violet-900/50 rounded-full px-2.5 py-1 font-medium transition-colors ${
+                  className={`bg-cyan-50/70 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-400 hover:bg-cyan-100 dark:hover:bg-cyan-900/50 rounded-md px-2.5 py-1 font-medium transition-colors ${
                     count >= 11 ? 'text-base' : count >= 4 ? 'text-sm' : 'text-xs'
                   }`}
                 >
@@ -530,7 +530,7 @@ const Drawer: React.FC<DrawerProps> = ({
         {/* If 5 or fewer tags, show them as the original cloud */}
         {sortedTags.length > 0 && sortedTags.length <= 5 && (
           <div className="mb-6">
-            <h3 className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+            <h3 className="font-display text-lg leading-none text-zinc-500 dark:text-zinc-400 mb-3 flex items-center gap-2">
               <Tag className="w-3.5 h-3.5" /> All Tags
             </h3>
             <div className="flex flex-wrap gap-2">
@@ -538,7 +538,7 @@ const Drawer: React.FC<DrawerProps> = ({
                 <button
                   key={tag}
                   onClick={() => { onTagClick?.(tag); onClose(); }}
-                  className={`bg-violet-50 dark:bg-violet-900/30 text-violet-700 dark:text-violet-400 hover:bg-violet-100 dark:hover:bg-violet-900/50 rounded-full px-2.5 py-1 font-medium transition-colors ${
+                  className={`bg-cyan-50/70 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-400 hover:bg-cyan-100 dark:hover:bg-cyan-900/50 rounded-md px-2.5 py-1 font-medium transition-colors ${
                     count >= 11 ? 'text-base' : count >= 4 ? 'text-sm' : 'text-xs'
                   }`}
                 >
@@ -552,7 +552,7 @@ const Drawer: React.FC<DrawerProps> = ({
         {/* Archive */}
         <button
           onClick={onShowArchived}
-          className="w-full flex items-center justify-between px-4 py-3 rounded-xl hover:bg-zinc-50 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 font-medium text-sm transition-colors text-left mb-6"
+          className="w-full flex items-center justify-between px-4 py-3 rounded-xl mission-tag-chip hover:bg-zinc-50/70 dark:hover:bg-zinc-800/40 text-zinc-700 dark:text-zinc-300 font-medium text-sm transition-colors text-left mb-6"
         >
           <div className="flex items-center gap-3">
             <Archive className="w-4 h-4" />
@@ -567,12 +567,12 @@ const Drawer: React.FC<DrawerProps> = ({
 
         {/* Data Actions */}
         <div className="space-y-2">
-            <h3 className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-4">Data Management</h3>
+            <h3 className="font-display text-lg leading-none text-zinc-500 dark:text-zinc-400 mb-4">Data Management</h3>
 
             {/* Export dropdown */}
             <button
                 onClick={() => setShowExportOptions(!showExportOptions)}
-                className="w-full flex items-center justify-between px-4 py-3 rounded-xl hover:bg-zinc-50 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 font-medium text-sm transition-colors text-left"
+                className="w-full flex items-center justify-between px-4 py-3 rounded-xl mission-tag-chip hover:bg-zinc-50/70 dark:hover:bg-zinc-800/40 text-zinc-700 dark:text-zinc-300 font-medium text-sm transition-colors text-left"
             >
                 <div className="flex items-center gap-3">
                   <Download className="w-4 h-4" />
@@ -585,25 +585,25 @@ const Drawer: React.FC<DrawerProps> = ({
               <div className="ml-4 space-y-1 animate-fade-in">
                 <button
                   onClick={() => { onExport(); onClose(); }}
-                  className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-400 text-xs font-medium transition-colors text-left"
+                  className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg hover:bg-zinc-50/70 dark:hover:bg-zinc-800/40 text-zinc-600 dark:text-zinc-400 text-xs font-medium transition-colors text-left"
                 >
                   <FileJson className="w-3.5 h-3.5" /> JSON
                 </button>
                 <button
                   onClick={handleEncryptedExport}
-                  className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-400 text-xs font-medium transition-colors text-left"
+                  className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg hover:bg-zinc-50/70 dark:hover:bg-zinc-800/40 text-zinc-600 dark:text-zinc-400 text-xs font-medium transition-colors text-left"
                 >
                   <Shield className="w-3.5 h-3.5" /> Encrypted Backup
                 </button>
                 <button
                   onClick={handleExportMarkdown}
-                  className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-400 text-xs font-medium transition-colors text-left"
+                  className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg hover:bg-zinc-50/70 dark:hover:bg-zinc-800/40 text-zinc-600 dark:text-zinc-400 text-xs font-medium transition-colors text-left"
                 >
                   <FileMarkdown className="w-3.5 h-3.5" /> Markdown
                 </button>
                 <button
                   onClick={handleExportCSV}
-                  className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-400 text-xs font-medium transition-colors text-left"
+                  className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg hover:bg-zinc-50/70 dark:hover:bg-zinc-800/40 text-zinc-600 dark:text-zinc-400 text-xs font-medium transition-colors text-left"
                 >
                   <Table className="w-3.5 h-3.5" /> CSV
                 </button>
@@ -620,7 +620,7 @@ const Drawer: React.FC<DrawerProps> = ({
             />
             <button
                 onClick={() => fileInputRef.current?.click()}
-                className="w-full flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-zinc-50 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 font-medium text-sm transition-colors text-left"
+                className="w-full flex items-center gap-3 px-4 py-3 rounded-xl mission-tag-chip hover:bg-zinc-50/70 dark:hover:bg-zinc-800/40 text-zinc-700 dark:text-zinc-300 font-medium text-sm transition-colors text-left"
             >
                 <Upload className="w-4 h-4" />
                 Import JSON

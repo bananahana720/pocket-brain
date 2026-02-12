@@ -24,7 +24,7 @@ export const ToastContainer: React.FC<ToastContainerProps> = ({ toasts, removeTo
       {toasts.map((toast) => (
         <div
           key={toast.id}
-          className="pointer-events-auto flex items-center gap-3 bg-zinc-900/95 dark:bg-zinc-800/95 text-white px-4 py-3 rounded-2xl shadow-xl shadow-zinc-900/20 backdrop-blur-md animate-fade-in text-sm font-medium border border-zinc-800 dark:border-zinc-600 transform transition-all"
+          className="mission-toast pointer-events-auto flex items-center gap-3 text-white px-4 py-3 rounded-2xl shadow-xl shadow-zinc-900/20 backdrop-blur-md animate-fade-in text-sm font-medium border border-zinc-800 dark:border-zinc-600 transform transition-all"
           role="alert"
         >
           {toast.type === 'success' && <CheckCircle className="w-4 h-4 text-emerald-400" />}

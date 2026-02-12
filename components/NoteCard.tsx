@@ -207,10 +207,10 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
   return (
     <div
       style={cardStyle}
-      className={`group relative bg-white dark:bg-zinc-800 rounded-2xl p-5 border transition-all duration-200 animate-slide-up ${getPriorityBorder()} ${
+      className={`mission-note group relative rounded-2xl p-5 border transition-all duration-200 animate-slide-up ${getPriorityBorder()} ${
         note.isCompleted
-        ? 'opacity-60 shadow-none border-zinc-100 dark:border-zinc-700 bg-zinc-50/50 dark:bg-zinc-800/50'
-        : 'shadow-[0_2px_8px_-2px_rgba(0,0,0,0.05)] border-zinc-100 dark:border-zinc-700 hover:shadow-md hover:border-zinc-200 dark:hover:border-zinc-600'
+        ? 'opacity-60 shadow-none border-zinc-200/50 dark:border-zinc-700/70 bg-zinc-200/20 dark:bg-zinc-900/20'
+        : 'shadow-[0_2px_8px_-2px_rgba(0,0,0,0.05)] border-zinc-200/60 dark:border-zinc-700/70 hover:shadow-md hover:border-brand-300/40 dark:hover:border-brand-600/50'
     }`}
     >
       {/* Header */}
@@ -221,7 +221,7 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
           ) : (
             <div className="w-16 h-4 bg-zinc-100 dark:bg-zinc-700 rounded-full animate-pulse" />
           )}
-          <h3 className={`font-bold text-sm tracking-tight truncate ${
+          <h3 className={`font-display text-xl leading-none truncate ${
               note.isCompleted ? 'text-zinc-400 line-through' : 'text-zinc-800 dark:text-zinc-100'
             } ${!note.title ? 'text-zinc-400 italic' : ''}`}>
             {note.title || 'Processing...'}
@@ -249,7 +249,7 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
                     onClick={() => onPin(note.id)}
                     className={`p-1 rounded-md transition-colors ${
                         note.isPinned
-                        ? 'text-violet-500 hover:text-violet-600 hover:bg-violet-50'
+                        ? 'text-cyan-500 hover:text-cyan-600 hover:bg-cyan-50'
                         : 'text-zinc-300 hover:text-zinc-500 hover:bg-zinc-100 opacity-0 group-hover:opacity-100'
                     }`}
                     title={note.isPinned ? 'Unpin' : 'Pin'}
@@ -298,7 +298,7 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
                     
                     {/* Dropdown Menu */}
                     {showMenu && (
-                        <div className="absolute right-0 top-full mt-1 w-44 bg-white dark:bg-zinc-800 rounded-xl shadow-xl border border-zinc-100 dark:border-zinc-700 z-20 overflow-hidden animate-fade-in">
+                        <div className="mission-note absolute right-0 top-full mt-1 w-44 rounded-xl shadow-xl border border-zinc-200/60 dark:border-zinc-700/70 z-20 overflow-hidden animate-fade-in">
                             <button
                                 onClick={() => { setIsEditing(true); setShowMenu(false); }}
                                 className="w-full flex items-center gap-2 px-3 py-2.5 text-xs font-medium text-zinc-600 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-zinc-100 text-left"
@@ -386,7 +386,7 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
               setShowDatePicker(false);
             }}
             onBlur={() => setShowDatePicker(false)}
-            className="text-xs border border-zinc-200 rounded-lg px-2 py-1 outline-none focus:border-brand-300"
+            className="text-xs mission-tag-chip border rounded-lg px-2 py-1 outline-none focus:border-brand-300"
           />
         </div>
       )}
@@ -440,7 +440,7 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
                       e.target.style.height = e.target.scrollHeight + 'px';
                   }}
                   onKeyDown={handleKeyDown}
-                  className="w-full p-3 -ml-3 bg-zinc-50 dark:bg-zinc-900 border border-brand-200 dark:border-brand-700 rounded-xl text-sm leading-relaxed text-zinc-800 dark:text-zinc-100 focus:ring-2 focus:ring-brand-500/20 outline-none resize-none min-h-[100px]"
+                  className="w-full p-3 -ml-3 mission-note border border-brand-200/70 dark:border-brand-700/60 rounded-xl text-sm leading-relaxed text-zinc-800 dark:text-zinc-100 focus:ring-2 focus:ring-brand-500/20 outline-none resize-none min-h-[100px]"
               />
               <div className="flex justify-end gap-2 mt-3">
                   <button 
@@ -472,7 +472,7 @@ const NoteCard: React.FC<NoteCardProps> = ({ note, onUpdate, onDelete, onCopy, o
 
       {/* Tags */}
       {note.tags && note.tags.length > 0 && !isEditing && (
-        <div className="flex flex-wrap gap-1.5 mt-4 pt-3 border-t border-dashed border-zinc-100 dark:border-zinc-700">
+        <div className="flex flex-wrap gap-1.5 mt-4 pt-3 border-t border-dashed border-zinc-200/70 dark:border-zinc-700/80">
           {note.tags.map((tag, idx) => (
             <span
               key={idx}

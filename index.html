@@ -4,6 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>PocketBrain</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Teko:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       tailwind.config = {
@@ -12,27 +18,27 @@
           extend: {
             colors: {
               brand: {
-                50: '#f5f3ff',
-                100: '#ede9fe',
-                200: '#ddd6fe',
-                300: '#c4b5fd',
-                400: '#a78bfa',
-                500: '#8b5cf6',
-                600: '#7c3aed', // Violet-600 as primary
-                700: '#6d28d9',
-                800: '#5b21b6',
-                900: '#4c1d95',
+                50: '#ecfeff',
+                100: '#cffafe',
+                200: '#a5f3fc',
+                300: '#67e8f9',
+                400: '#22d3ee',
+                500: '#06b6d4',
+                600: '#0891b2',
+                700: '#0e7490',
+                800: '#155e75',
+                900: '#164e63',
               },
-              surface: '#ffffff',
-              subtle: '#fafafa', // Zinc-50 equivalent
             },
             fontFamily: {
-              sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
+              sans: ['Barlow', 'Segoe UI', 'sans-serif'],
+              display: ['Teko', 'Impact', 'sans-serif'],
             },
             animation: {
-              'fade-in': 'fadeIn 0.4s ease-out forwards',
-              'slide-up': 'slideUp 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) forwards',
-              'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+              'fade-in': 'fadeIn 0.35s ease-out forwards',
+              'slide-up': 'slideUp 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) forwards',
+              'slide-right': 'slideRight 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) forwards',
+              'signal-sweep': 'signalSweep 4.5s linear infinite',
             },
             keyframes: {
               fadeIn: {
@@ -40,45 +46,214 @@
                 '100%': { opacity: '1' },
               },
               slideUp: {
-                '0%': { transform: 'translateY(16px)', opacity: '0' },
+                '0%': { transform: 'translateY(14px)', opacity: '0' },
                 '100%': { transform: 'translateY(0)', opacity: '1' },
-              }
-            }
+              },
+              slideRight: {
+                '0%': { transform: 'translateX(-22px)', opacity: '0' },
+                '100%': { transform: 'translateX(0)', opacity: '1' },
+              },
+              signalSweep: {
+                '0%': { transform: 'translateX(-130%) skewX(-28deg)' },
+                '100%': { transform: 'translateX(220%) skewX(-28deg)' },
+              },
+            },
           },
         },
-      }
+      };
     </script>
     <style>
-      /* Hide scrollbar for clean mobile look */
+      :root {
+        --pb-bg: #e8e3d3;
+        --pb-bg-secondary: #cbc4b0;
+        --pb-panel: rgba(248, 244, 230, 0.84);
+        --pb-panel-solid: #f7f2e2;
+        --pb-border: rgba(15, 23, 42, 0.18);
+        --pb-text: #111827;
+        --pb-muted: #475569;
+        --pb-brand: #0891b2;
+        --pb-accent: #c2410c;
+      }
+
+      html.dark {
+        --pb-bg: #060b0f;
+        --pb-bg-secondary: #0a1620;
+        --pb-panel: rgba(10, 23, 31, 0.8);
+        --pb-panel-solid: #0d1f29;
+        --pb-border: rgba(34, 211, 238, 0.24);
+        --pb-text: #d8f3ff;
+        --pb-muted: #8fb1be;
+        --pb-brand: #22d3ee;
+        --pb-accent: #fb923c;
+      }
+
+      * {
+        text-rendering: geometricPrecision;
+      }
+
+      html,
+      body,
+      #root {
+        min-height: 100%;
+      }
+
+      body {
+        margin: 0;
+        font-family: 'Barlow', 'Segoe UI', sans-serif;
+        background:
+          radial-gradient(120% 140% at 88% -10%, rgba(34, 211, 238, 0.18) 0%, rgba(34, 211, 238, 0) 60%),
+          radial-gradient(120% 120% at 10% 108%, rgba(251, 146, 60, 0.2) 0%, rgba(251, 146, 60, 0) 62%),
+          linear-gradient(135deg, var(--pb-bg) 0%, var(--pb-bg-secondary) 100%);
+        color: var(--pb-text);
+        transition: background-color 0.25s ease, color 0.25s ease;
+      }
+
+      body::before {
+        content: '';
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        opacity: 0.23;
+        background-image:
+          linear-gradient(to right, rgba(2, 6, 23, 0.22) 1px, transparent 1px),
+          linear-gradient(to bottom, rgba(2, 6, 23, 0.18) 1px, transparent 1px);
+        background-size: 36px 36px;
+        mix-blend-mode: multiply;
+      }
+
+      html.dark body::before {
+        opacity: 0.24;
+        background-image:
+          linear-gradient(to right, rgba(34, 211, 238, 0.11) 1px, transparent 1px),
+          linear-gradient(to bottom, rgba(34, 211, 238, 0.09) 1px, transparent 1px);
+        mix-blend-mode: screen;
+      }
+
+      body::after {
+        content: '';
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background: radial-gradient(ellipse at center, transparent 52%, rgba(0, 0, 0, 0.34) 100%);
+        opacity: 0.62;
+      }
+
+      .font-display {
+        font-family: 'Teko', 'Impact', sans-serif;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+
+      .mission-shell {
+        position: relative;
+        isolation: isolate;
+      }
+
+      .mission-shell::before {
+        content: '';
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: -1;
+        background: repeating-linear-gradient(
+          -68deg,
+          rgba(251, 146, 60, 0.06) 0,
+          rgba(251, 146, 60, 0.06) 16px,
+          rgba(34, 211, 238, 0.03) 16px,
+          rgba(34, 211, 238, 0.03) 36px
+        );
+        opacity: 0.42;
+      }
+
+      .mission-header {
+        border-bottom-color: var(--pb-border) !important;
+        background: color-mix(in srgb, var(--pb-panel) 78%, transparent) !important;
+        box-shadow: 0 14px 32px -22px rgba(2, 6, 23, 0.75);
+      }
+
+      .mission-header::after {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 42%;
+        height: 100%;
+        background: linear-gradient(90deg, rgba(34, 211, 238, 0.2), transparent 80%);
+        filter: blur(1px);
+        pointer-events: none;
+      }
+
+      .mission-signal-sweep {
+        position: absolute;
+        inset: 0;
+        overflow: hidden;
+        pointer-events: none;
+      }
+
+      .mission-signal-sweep::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 22%;
+        background: linear-gradient(90deg, transparent, rgba(34, 211, 238, 0.22), transparent);
+        animation: signalSweep 5s linear infinite;
+      }
+
+      .mission-note,
+      .mission-dock-panel,
+      .mission-drawer,
+      .mission-modal-panel {
+        background: var(--pb-panel) !important;
+        border-color: var(--pb-border) !important;
+        backdrop-filter: blur(18px);
+        -webkit-backdrop-filter: blur(18px);
+      }
+
+      .mission-toast {
+        background: rgba(9, 20, 30, 0.92) !important;
+        border-color: rgba(34, 211, 238, 0.28) !important;
+      }
+
+      .mission-note {
+        box-shadow: 0 16px 38px -28px rgba(2, 6, 23, 0.85) !important;
+      }
+
+      .mission-tag-chip {
+        border: 1px solid var(--pb-border);
+        background: color-mix(in srgb, var(--pb-panel-solid) 70%, transparent);
+      }
+
+      .mission-muted {
+        color: var(--pb-muted) !important;
+      }
+
+      .mission-highlight {
+        color: var(--pb-brand) !important;
+      }
+
+      .mission-accent {
+        color: var(--pb-accent) !important;
+      }
+
       .no-scrollbar::-webkit-scrollbar {
         display: none;
       }
+
       .no-scrollbar {
         -ms-overflow-style: none;
         scrollbar-width: none;
       }
-      body {
-        background-color: #fafafa; /* zinc-50 */
-        color: #18181b; /* zinc-900 */
-        transition: background-color 0.2s, color 0.2s;
-      }
-      .dark body,
-      html.dark body {
-        background-color: #18181b; /* zinc-900 */
-        color: #f4f4f5; /* zinc-100 */
-        -webkit-tap-highlight-color: transparent;
-        -webkit-font-smoothing: antialiased;
-      }
-      
-      /* Mobile Safe Areas */
+
       .pb-safe {
         padding-bottom: env(safe-area-inset-bottom);
       }
+
       .pt-safe {
         padding-top: env(safe-area-inset-top);
       }
     </style>
-</head>
+  </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/index.tsx"></script>

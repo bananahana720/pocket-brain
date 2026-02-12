@@ -1266,7 +1266,7 @@ function App() {
 
   return (
     <ThemeProvider>
-      <div className="min-h-screen bg-subtle dark:bg-zinc-900 relative overflow-hidden transition-colors duration-200">
+      <div className="mission-shell min-h-screen relative overflow-hidden transition-colors duration-300">
         <ToastContainer toasts={toasts} removeToast={removeToast} />
 
         <Drawer
@@ -1289,31 +1289,35 @@ function App() {
         />
 
         {isProcessingBatch && (
-          <div className="fixed inset-0 z-[70] bg-white/80 dark:bg-zinc-900/80 backdrop-blur-sm flex flex-col items-center justify-center animate-fade-in">
-            <div className="bg-white dark:bg-zinc-800 p-6 rounded-2xl shadow-xl border border-violet-100 dark:border-zinc-700 flex flex-col items-center">
+          <div className="fixed inset-0 z-[70] bg-zinc-950/35 backdrop-blur-sm flex flex-col items-center justify-center animate-fade-in">
+            <div className="mission-modal-panel p-6 rounded-2xl shadow-xl border flex flex-col items-center">
               <BrainCircuit className="w-10 h-10 text-brand-600 animate-pulse mb-4" />
-              <h3 className="text-lg font-bold text-zinc-800 dark:text-zinc-100">Organizing thoughts...</h3>
-              <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-2">Splitting your batch entry into atomic notes.</p>
+              <h3 className="font-display text-2xl leading-none text-zinc-800 dark:text-zinc-100">Organizing thoughts...</h3>
+              <p className="text-sm mission-muted mt-2">Splitting your batch entry into atomic notes.</p>
             </div>
           </div>
         )}
 
-        <header className="sticky top-0 z-40 bg-white/80 dark:bg-zinc-900/80 backdrop-blur-xl border-b border-zinc-200/50 dark:border-zinc-700/50 pt-safe transition-colors duration-200">
-          <div className="max-w-2xl mx-auto px-4 py-3">
+        <header className="mission-header sticky top-0 z-40 backdrop-blur-xl border-b pt-safe transition-colors duration-200">
+          <div className="mission-signal-sweep" />
+          <div className="max-w-3xl mx-auto px-4 py-3 relative">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2.5">
-                <div className="bg-brand-600 text-white p-2 rounded-xl shadow-lg shadow-brand-600/20">
+                <div className="bg-brand-600 text-zinc-950 p-2 rounded-md shadow-lg shadow-brand-600/30 border border-brand-300/40">
                   <Zap className="w-4 h-4 fill-current" />
                 </div>
-                <h1 className="text-lg font-bold text-zinc-800 dark:text-zinc-100 tracking-tight">PocketBrain</h1>
+                <div>
+                  <h1 className="font-display text-3xl leading-none text-zinc-800 dark:text-zinc-100">PocketBrain</h1>
+                  <p className="text-[10px] uppercase tracking-[0.2em] mission-muted">Personal Mission Console</p>
+                </div>
               </div>
               <div className="flex items-center gap-1">
                 <button
                   onClick={handleTodayToggle}
-                  className={`relative p-2 rounded-full transition-colors flex items-center gap-1.5 ${
+                  className={`relative px-3 py-2 rounded-md transition-colors flex items-center gap-1.5 border ${
                     viewMode === 'today'
-                      ? 'bg-brand-100 dark:bg-brand-900/50 text-brand-700 dark:text-brand-300'
-                      : 'text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                      ? 'bg-brand-100/60 dark:bg-brand-900/40 border-brand-300/60 text-brand-700 dark:text-brand-300'
+                      : 'mission-tag-chip mission-muted hover:text-zinc-700 dark:hover:text-zinc-100'
                   }`}
                   title="Today view"
                 >
@@ -1325,7 +1329,7 @@ function App() {
                 </button>
                 <button
                   onClick={handleOpenDrawer}
-                  className="p-2 -mr-2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-full transition-colors"
+                  className="p-2 -mr-2 mission-muted hover:text-zinc-700 dark:hover:text-zinc-100 mission-tag-chip rounded-md transition-colors"
                 >
                   <Menu className="w-5 h-5" />
                 </button>
@@ -1333,7 +1337,7 @@ function App() {
             </div>
 
             <div className="relative group">
-              <div className={`absolute inset-0 rounded-xl transition-all duration-300 ${isAiSearch ? 'bg-brand-500/10 blur-md' : 'bg-transparent'}`} />
+              <div className={`absolute inset-0 rounded-lg transition-all duration-300 ${isAiSearch ? 'bg-brand-500/10 blur-md' : 'bg-transparent'}`} />
               <form onSubmit={handleSearch} className="relative flex items-center">
                 <Search className={`absolute left-3.5 w-4 h-4 ${isAiSearch ? 'text-brand-600' : 'text-zinc-400'}`} />
                 <input
@@ -1342,19 +1346,19 @@ function App() {
                   value={searchQuery}
                   onChange={handleSearchInputChange}
                   placeholder={isAiSearch ? 'Ask your second brain...' : 'Search your thoughts...'}
-                  className={`w-full pl-10 pr-20 py-3 rounded-xl text-sm font-medium transition-all outline-none border shadow-sm ${
+                  className={`w-full pl-10 pr-20 py-3 rounded-lg text-sm font-medium transition-all outline-none border shadow-sm ${
                     isAiSearch
-                      ? 'bg-white dark:bg-zinc-800 border-brand-200 dark:border-brand-700 text-brand-900 dark:text-brand-100 placeholder-brand-300 dark:placeholder-brand-500 focus:ring-2 focus:ring-brand-500/20'
-                      : 'bg-zinc-50 dark:bg-zinc-800 border-zinc-200 dark:border-zinc-700 text-zinc-800 dark:text-zinc-100 placeholder-zinc-400 focus:bg-white dark:focus:bg-zinc-800 focus:border-zinc-300 dark:focus:border-zinc-600 focus:shadow-md'
+                      ? 'mission-note border-brand-300/50 text-brand-900 dark:text-brand-100 placeholder-brand-400 dark:placeholder-brand-500 focus:ring-2 focus:ring-brand-500/20'
+                      : 'mission-note border-zinc-300/40 dark:border-zinc-700/70 text-zinc-800 dark:text-zinc-100 placeholder-zinc-500 focus:border-brand-300/50 focus:shadow-md'
                   }`}
                 />
                 <button
                   type="button"
                   onClick={handleToggleAiSearch}
-                  className={`absolute right-2 top-1.5 bottom-1.5 px-3 rounded-lg text-[10px] font-bold tracking-wide uppercase transition-all flex items-center gap-1.5 ${
+                  className={`absolute right-2 top-1.5 bottom-1.5 px-3 rounded-md text-[10px] font-semibold tracking-[0.16em] uppercase transition-all flex items-center gap-1.5 ${
                     isAiSearch
                       ? 'bg-brand-100 dark:bg-brand-900/50 text-brand-700 dark:text-brand-300 hover:bg-brand-200 dark:hover:bg-brand-900/70'
-                      : 'bg-zinc-100 dark:bg-zinc-700 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-600'
+                      : 'mission-tag-chip mission-muted hover:text-zinc-700 dark:hover:text-zinc-200'
                   }`}
                 >
                   <Sparkles className={`w-3 h-3 ${isAiSearch ? 'fill-brand-700' : ''}`} />
@@ -1369,10 +1373,10 @@ function App() {
                   <button
                     key={t}
                     onClick={() => setFilter(t)}
-                    className={`px-4 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition-all border ${
+                    className={`px-4 py-1.5 rounded-md text-xs font-semibold whitespace-nowrap transition-all border ${
                       filter === t
-                        ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 border-zinc-900 dark:border-zinc-100 shadow-md'
-                        : 'bg-white dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border-zinc-200 dark:border-zinc-700 hover:border-zinc-300 dark:hover:border-zinc-600 hover:bg-zinc-50 dark:hover:bg-zinc-700'
+                        ? 'bg-brand-500 text-zinc-950 border-brand-300 shadow-md shadow-brand-500/20'
+                        : 'mission-tag-chip mission-muted hover:text-zinc-700 dark:hover:text-zinc-200'
                     }`}
                   >
                     {t === 'ALL' ? 'All' : t.charAt(0) + t.slice(1).toLowerCase() + 's'}
@@ -1383,9 +1387,9 @@ function App() {
 
             {activeTag && (
               <div className="flex items-center gap-2 mt-3">
-                <span className="inline-flex items-center gap-1.5 bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-400 rounded-full px-3 py-1 text-xs font-medium">
+                <span className="mission-tag-chip inline-flex items-center gap-1.5 text-cyan-700 dark:text-cyan-400 rounded-md px-3 py-1 text-xs font-medium">
                   #{activeTag}
-                  <button onClick={() => setActiveTag(null)} className="ml-0.5 hover:text-violet-900 transition-colors">
+                  <button onClick={() => setActiveTag(null)} className="ml-0.5 hover:text-cyan-900 transition-colors">
                     <X className="w-3 h-3" />
                   </button>
                 </span>
@@ -1395,8 +1399,8 @@ function App() {
         </header>
 
         {isOffline && (
-          <div className="bg-amber-50 dark:bg-amber-900/20 border-b border-amber-200 dark:border-amber-800/50 transition-colors">
-            <div className="max-w-2xl mx-auto px-4 py-2 flex items-center gap-2 text-amber-700 dark:text-amber-400 text-xs font-medium">
+          <div className="bg-amber-50/80 dark:bg-amber-900/25 border-b border-amber-200/80 dark:border-amber-800/50 transition-colors">
+            <div className="max-w-3xl mx-auto px-4 py-2 flex items-center gap-2 text-amber-700 dark:text-amber-300 text-xs font-medium uppercase tracking-wide">
               <WifiOff className="w-3.5 h-3.5" />
               Offline — notes saved locally
             </div>
@@ -1404,16 +1408,16 @@ function App() {
         )}
 
         {aiDegradedMessage && (
-          <div className="bg-rose-50 dark:bg-rose-900/20 border-b border-rose-200 dark:border-rose-800/50 transition-colors">
-            <div className="max-w-2xl mx-auto px-4 py-2 text-xs font-medium text-rose-700 dark:text-rose-300">
+          <div className="bg-rose-50/80 dark:bg-rose-900/25 border-b border-rose-200/80 dark:border-rose-800/60 transition-colors">
+            <div className="max-w-3xl mx-auto px-4 py-2 text-xs font-medium text-rose-700 dark:text-rose-300 uppercase tracking-wide">
               {aiDegradedMessage}
             </div>
           </div>
         )}
 
         {sharedNotePayload && (
-          <div className="bg-emerald-50 dark:bg-emerald-900/20 border-b border-emerald-200 dark:border-emerald-800/40 transition-colors">
-            <div className="max-w-2xl mx-auto px-4 py-2.5 flex items-center justify-between gap-3">
+          <div className="bg-emerald-50/80 dark:bg-emerald-900/25 border-b border-emerald-200/80 dark:border-emerald-800/40 transition-colors">
+            <div className="max-w-3xl mx-auto px-4 py-2.5 flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <p className="text-xs font-semibold text-emerald-700 dark:text-emerald-300">Shared note received</p>
                 <p className="text-xs text-emerald-700/80 dark:text-emerald-300/80 truncate">{sharedNotePreview}</p>
@@ -1436,7 +1440,7 @@ function App() {
           </div>
         )}
 
-        <main className="max-w-2xl mx-auto px-4 py-6 pb-40 space-y-6">
+        <main className="max-w-3xl mx-auto px-4 py-6 pb-40 space-y-6">
           <ErrorBoundary>
             {viewMode === 'today' ? (
               <TodayView
@@ -1458,20 +1462,20 @@ function App() {
             ) : (
               <>
                 {showArchived && (
-                  <div className="flex items-center justify-between bg-zinc-100 dark:bg-zinc-800 rounded-xl px-4 py-3 animate-fade-in">
-                    <div className="flex items-center gap-2 text-zinc-600 dark:text-zinc-300 text-sm font-medium">
+                  <div className="mission-note flex items-center justify-between rounded-xl px-4 py-3 animate-fade-in border">
+                    <div className="flex items-center gap-2 mission-muted text-sm font-medium">
                       <Archive className="w-4 h-4" />
                       Viewing archived notes
                     </div>
-                    <button onClick={handleExitArchived} className="text-xs font-medium text-brand-600 hover:underline">
+                    <button onClick={handleExitArchived} className="text-xs font-medium text-brand-600 hover:underline uppercase tracking-wide">
                       Back to notes
                     </button>
                   </div>
                 )}
 
                 {isAiSearch && (isAiThinking || aiAnswer) && (
-                  <div className="bg-white dark:bg-zinc-800 rounded-2xl p-6 shadow-lg shadow-brand-500/5 border border-brand-100 dark:border-zinc-700 animate-fade-in transition-colors duration-200">
-                    <div className="flex items-center gap-2 mb-3 text-brand-600 font-bold text-xs uppercase tracking-wider">
+                  <div className="mission-note rounded-2xl p-6 shadow-lg shadow-brand-500/5 border animate-fade-in transition-colors duration-200">
+                    <div className="font-display flex items-center gap-2 mb-3 text-brand-600 text-sm tracking-wider">
                       <Sparkles className="w-4 h-4" />
                       Insight
                     </div>
@@ -1487,15 +1491,15 @@ function App() {
                 )}
 
                 {notes.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-20 text-zinc-400 animate-fade-in">
-                    <div className="bg-white dark:bg-zinc-800 p-6 rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] dark:shadow-[0_8px_30px_rgb(0,0,0,0.2)] mb-6">
+                  <div className="flex flex-col items-center justify-center py-20 mission-muted animate-fade-in">
+                    <div className="mission-note p-6 rounded-3xl border mb-6">
                       <Sparkles className="w-12 h-12 text-brand-200 dark:text-brand-400" />
                     </div>
-                    <h3 className="text-lg font-semibold text-zinc-700 dark:text-zinc-200 mb-2">Your mind is clear</h3>
-                    <p className="text-sm text-zinc-400 text-center max-w-xs leading-relaxed">
+                    <h3 className="font-display text-3xl leading-none text-zinc-700 dark:text-zinc-200 mb-2">Your mind is clear</h3>
+                    <p className="text-sm mission-muted text-center max-w-xs leading-relaxed">
                       Capture ideas, tasks, and notes instantly.
                       <br />
-                      Use <span className="text-violet-500 font-bold">Magic Batch</span> to split brain dumps.
+                      Use <span className="text-cyan-500 font-semibold">Magic Batch</span> to split brain dumps.
                     </p>
                   </div>
                 ) : (
@@ -1527,14 +1531,14 @@ function App() {
 
                     {hasMoreVisibleNotes && (
                       <div ref={loadMoreRef} className="py-3 text-center">
-                        <span className="text-[11px] font-medium text-zinc-400">Loading more notes...</span>
+                        <span className="text-[11px] font-medium mission-muted uppercase tracking-wide">Loading more notes...</span>
                       </div>
                     )}
 
                     {filteredNotes.length === 0 && (
                       <div className="text-center py-12">
-                        <p className="text-zinc-400 text-sm">No notes found matching your criteria.</p>
-                        <button onClick={handleClearFilters} className="mt-2 text-brand-600 text-xs font-medium hover:underline">
+                        <p className="mission-muted text-sm">No notes found matching your criteria.</p>
+                        <button onClick={handleClearFilters} className="mt-2 text-brand-600 text-xs font-medium hover:underline uppercase tracking-wide">
                           Clear filters
                         </button>
                       </div>

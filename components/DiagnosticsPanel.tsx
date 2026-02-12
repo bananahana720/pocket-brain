@@ -32,8 +32,8 @@ const DiagnosticsPanel: React.FC = () => {
   }, []);
 
   return (
-    <aside className="fixed bottom-4 left-4 z-[75] w-72 rounded-xl border border-zinc-300 bg-white/95 p-3 text-[11px] shadow-xl backdrop-blur dark:border-zinc-700 dark:bg-zinc-900/95 dark:text-zinc-200">
-      <p className="mb-2 font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Diagnostics</p>
+    <aside className="mission-note fixed bottom-4 left-4 z-[75] w-72 rounded-xl border border-zinc-300/70 p-3 text-[11px] shadow-xl backdrop-blur dark:border-zinc-700/70 dark:text-zinc-200">
+      <p className="mb-2 font-display text-lg leading-none text-zinc-500 dark:text-zinc-400">Diagnostics</p>
       <div className="space-y-1 text-zinc-700 dark:text-zinc-300">
         <p>AI requests: {clientMetrics.counters.ai_requests}</p>
         <p>AI failures: {clientMetrics.counters.ai_failures}</p>

@@ -93,12 +93,12 @@ const TodayView: React.FC<TodayViewProps> = ({
 
   if (allEmpty) {
     return (
-      <div className="flex flex-col items-center justify-center py-20 text-zinc-400 animate-fade-in">
-        <div className="bg-white dark:bg-zinc-800 p-6 rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] dark:shadow-[0_8px_30px_rgb(0,0,0,0.2)] mb-6">
+      <div className="flex flex-col items-center justify-center py-20 mission-muted animate-fade-in">
+        <div className="mission-note p-6 rounded-3xl border mb-6">
           <Sparkles className="w-12 h-12 text-emerald-300 dark:text-emerald-500" />
         </div>
-        <h3 className="text-lg font-semibold text-zinc-700 dark:text-zinc-200 mb-2">All clear for today!</h3>
-        <p className="text-sm text-zinc-400 text-center max-w-xs leading-relaxed">
+        <h3 className="font-display text-3xl leading-none text-zinc-700 dark:text-zinc-200 mb-2">All clear for today!</h3>
+        <p className="text-sm mission-muted text-center max-w-xs leading-relaxed">
           No overdue tasks, nothing due today, and no new captures yet. Enjoy your day.
         </p>
       </div>
@@ -112,7 +112,7 @@ const TodayView: React.FC<TodayViewProps> = ({
         <section>
           <div className="flex items-center gap-2 mb-3">
             <AlertTriangle className="w-4 h-4 text-rose-500" />
-            <h2 className="text-sm font-bold text-rose-600 dark:text-rose-400 uppercase tracking-wider">
+            <h2 className="font-display text-2xl leading-none text-rose-600 dark:text-rose-400">
               Overdue
             </h2>
             <span className="text-[10px] font-semibold text-rose-400 dark:text-rose-500 bg-rose-50 dark:bg-rose-900/30 px-2 py-0.5 rounded-full">
@@ -130,7 +130,7 @@ const TodayView: React.FC<TodayViewProps> = ({
         <section>
           <div className="flex items-center gap-2 mb-3">
             <Clock className="w-4 h-4 text-amber-500" />
-            <h2 className="text-sm font-bold text-amber-600 dark:text-amber-400 uppercase tracking-wider">
+            <h2 className="font-display text-2xl leading-none text-amber-600 dark:text-amber-400">
               Due Today
             </h2>
             <span className="text-[10px] font-semibold text-amber-400 dark:text-amber-500 bg-amber-50 dark:bg-amber-900/30 px-2 py-0.5 rounded-full">
@@ -148,7 +148,7 @@ const TodayView: React.FC<TodayViewProps> = ({
         <section>
           <div className="flex items-center gap-2 mb-3">
             <Plus className="w-4 h-4 text-blue-500" />
-            <h2 className="text-sm font-bold text-blue-600 dark:text-blue-400 uppercase tracking-wider">
+            <h2 className="font-display text-2xl leading-none text-blue-600 dark:text-blue-400">
               Captured Today
             </h2>
             <span className="text-[10px] font-semibold text-blue-400 dark:text-blue-500 bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 rounded-full">
@@ -166,8 +166,8 @@ const TodayView: React.FC<TodayViewProps> = ({
         <section>
           <div className="flex items-center justify-between gap-2 mb-3">
             <div className="flex items-center gap-2">
-              <Sparkles className="w-4 h-4 text-violet-500" />
-              <h2 className="text-sm font-bold text-violet-600 dark:text-violet-400 uppercase tracking-wider">
+              <Sparkles className="w-4 h-4 text-cyan-500" />
+              <h2 className="font-display text-2xl leading-none text-cyan-600 dark:text-cyan-400">
                 AI Daily Brief
               </h2>
             </div>
@@ -181,7 +181,7 @@ const TodayView: React.FC<TodayViewProps> = ({
                 });
               }}
               disabled={!aiBrief || isLoadingBrief}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold rounded-full border border-violet-200 dark:border-violet-800 text-violet-700 dark:text-violet-300 hover:bg-violet-50 dark:hover:bg-violet-900/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              className="mission-tag-chip inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold rounded-md border border-cyan-200 dark:border-cyan-800 text-cyan-700 dark:text-cyan-300 hover:bg-cyan-50 dark:hover:bg-cyan-900/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               title="Share brief"
               aria-label="Share brief"
             >
@@ -189,12 +189,12 @@ const TodayView: React.FC<TodayViewProps> = ({
               Share
             </button>
           </div>
-          <div className="bg-white dark:bg-zinc-800 rounded-2xl p-5 border border-violet-100 dark:border-zinc-700 shadow-sm">
+          <div className="mission-note rounded-2xl p-5 border border-cyan-100 dark:border-zinc-700 shadow-sm">
             {isLoadingBrief ? (
               <div className="space-y-2">
-                <div className="h-4 bg-violet-50 dark:bg-violet-900/30 rounded w-3/4 animate-pulse"></div>
-                <div className="h-4 bg-violet-50 dark:bg-violet-900/30 rounded w-1/2 animate-pulse delay-75"></div>
-                <div className="h-4 bg-violet-50 dark:bg-violet-900/30 rounded w-2/3 animate-pulse delay-150"></div>
+                <div className="h-4 bg-cyan-50 dark:bg-cyan-900/30 rounded w-3/4 animate-pulse"></div>
+                <div className="h-4 bg-cyan-50 dark:bg-cyan-900/30 rounded w-1/2 animate-pulse delay-75"></div>
+                <div className="h-4 bg-cyan-50 dark:bg-cyan-900/30 rounded w-2/3 animate-pulse delay-150"></div>
               </div>
             ) : (
               <p className="text-sm text-zinc-700 dark:text-zinc-300 leading-relaxed">{aiBrief}</p>

@@ -469,29 +469,29 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
   return (
     <div className="fixed bottom-0 left-0 right-0 z-50">
       {/* Gradient Fade Top */}
-      <div className="h-12 bg-gradient-to-t from-white/100 dark:from-zinc-900/100 to-transparent pointer-events-none" />
+      <div className="h-12 bg-gradient-to-t from-zinc-950/30 via-zinc-900/10 to-transparent pointer-events-none" />
       
       {/* Main Input Bar */}
-      <div className={`bg-white/80 dark:bg-zinc-900/80 backdrop-blur-xl border-t border-zinc-200/50 dark:border-zinc-700/50 pb-safe px-4 pt-3 transition-all duration-500 ${isListening ? 'shadow-[0_-4px_20px_rgba(244,63,94,0.15)]' : isTranscribing ? 'shadow-[0_-4px_20px_rgba(37,99,235,0.15)]' : ''}`}>
+      <div className={`mission-dock-panel border-t border-zinc-200/60 dark:border-zinc-700/70 pb-safe px-4 pt-3 transition-all duration-500 ${isListening ? 'shadow-[0_-4px_20px_rgba(244,63,94,0.15)]' : isTranscribing ? 'shadow-[0_-4px_20px_rgba(37,99,235,0.15)]' : ''}`}>
         {/* Quick Actions */}
-        <div className={`max-w-2xl mx-auto overflow-hidden transition-all duration-300 ${isFocused && !presetType && !isBatchMode ? 'max-h-0 opacity-0 mb-0' : 'max-h-12 opacity-100 mb-2'}`}>
+        <div className={`max-w-3xl mx-auto overflow-hidden transition-all duration-300 ${isFocused && !presetType && !isBatchMode ? 'max-h-0 opacity-0 mb-0' : 'max-h-12 opacity-100 mb-2'}`}>
           <div className="flex gap-2">
             <button
               onClick={() => handleQuickAction('task')}
-              className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-all ${
+              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
                 presetType === NoteType.TASK
                   ? 'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800'
-                  : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+                  : 'mission-tag-chip text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200/60 dark:hover:bg-zinc-700/40'
               }`}
             >
               <CheckSquare className="w-3.5 h-3.5" /> Task
             </button>
             <button
               onClick={() => handleQuickAction('idea')}
-              className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-all ${
+              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
                 presetType === NoteType.IDEA
                   ? 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-800'
-                  : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+                  : 'mission-tag-chip text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200/60 dark:hover:bg-zinc-700/40'
               }`}
             >
               <Lightbulb className="w-3.5 h-3.5" /> Idea
@@ -500,12 +500,12 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
             <button
               onClick={() => handleQuickAction('voice')}
               disabled={isTranscribing}
-              className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-all ${
+              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
                 isListening
                   ? 'bg-rose-100 dark:bg-rose-900/40 text-rose-700 dark:text-rose-400 border border-rose-200 dark:border-rose-800'
                   : isTranscribing
                     ? 'bg-brand-100 dark:bg-brand-900/40 text-brand-700 dark:text-brand-300 border border-brand-200 dark:border-brand-700'
-                  : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+                  : 'mission-tag-chip text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200/60 dark:hover:bg-zinc-700/40'
               }`}
             >
               <Mic className="w-3.5 h-3.5" /> Dictate
@@ -513,10 +513,10 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
             )}
             <button
               onClick={() => handleQuickAction('batch')}
-              className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-all ${
+              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
                 isBatchMode
-                  ? 'bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-400 border border-violet-200 dark:border-violet-800'
-                  : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+                  ? 'bg-cyan-100 dark:bg-cyan-900/40 text-cyan-700 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-800'
+                  : 'mission-tag-chip text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200/60 dark:hover:bg-zinc-700/40'
               }`}
             >
               <Wand2 className="w-3.5 h-3.5" /> Batch
@@ -524,15 +524,15 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
           </div>
         </div>
 
-        <div className="max-w-2xl mx-auto flex items-end gap-3 mb-2">
+        <div className="max-w-3xl mx-auto flex items-end gap-3 mb-2">
           
           {/* Text Area Container */}
-          <div className={`relative flex-1 border rounded-[20px] transition-all shadow-sm overflow-hidden ${
+          <div className={`mission-note relative flex-1 border rounded-[16px] transition-all shadow-sm overflow-hidden ${
              isListening
-             ? 'bg-white dark:bg-zinc-800 border-rose-200 ring-2 ring-rose-500/20'
+             ? 'border-rose-200 ring-2 ring-rose-500/20'
              : isTranscribing
-               ? 'bg-white dark:bg-zinc-800 border-brand-200 ring-2 ring-brand-500/20'
-             : 'bg-zinc-100/50 dark:bg-zinc-800/50 border-zinc-200 dark:border-zinc-700 focus-within:bg-white dark:focus-within:bg-zinc-800 focus-within:ring-2 focus-within:ring-brand-500/20 focus-within:border-brand-500/50 hover:shadow-md'
+               ? 'border-brand-200 ring-2 ring-brand-500/20'
+             : 'border-zinc-200/70 dark:border-zinc-700/80 focus-within:ring-2 focus-within:ring-brand-500/20 focus-within:border-brand-500/50 hover:shadow-md'
           }`}>
               {isListening && (
                   <div className="absolute right-2 top-2 flex items-center gap-2 pointer-events-none">
@@ -551,7 +551,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
                 onFocus={() => setIsFocused(true)}
                 onBlur={() => setIsFocused(false)}
                 placeholder={getPlaceholder()}
-                className={`w-full bg-transparent border-0 rounded-[20px] pl-4 pr-10 py-3 text-zinc-800 dark:text-zinc-100 placeholder-zinc-400 focus:ring-0 resize-none text-[15px] leading-relaxed ${isBatchMode ? 'min-h-[120px] max-h-60' : 'max-h-40 min-h-[48px]'}`}
+                className={`w-full bg-transparent border-0 rounded-[16px] pl-4 pr-10 py-3 text-zinc-800 dark:text-zinc-100 placeholder-zinc-400 focus:ring-0 resize-none text-[15px] leading-relaxed ${isBatchMode ? 'min-h-[120px] max-h-60' : 'max-h-40 min-h-[48px]'}`}
                 rows={1}
               />
               
@@ -594,7 +594,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
                         title={isBatchMode ? "Clean + split draft for review" : "Clean draft for review"}
                         className={`h-12 w-12 rounded-full flex items-center justify-center transition-all duration-300 border shadow-sm disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100 ${
                           isBatchMode
-                            ? 'bg-violet-50 dark:bg-violet-900/30 border-violet-200 dark:border-violet-800 text-violet-600'
+                            ? 'bg-cyan-50 dark:bg-cyan-900/30 border-cyan-200 dark:border-cyan-800 text-cyan-600'
                             : 'bg-amber-50 dark:bg-amber-900/30 border-amber-200 dark:border-amber-800 text-amber-600'
                         } hover:scale-105`}
                     >
@@ -607,7 +607,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
                           onClick={handleBatchSave}
                           disabled={isListening || isTranscribing || isCleaning || !!cleanupPreview}
                           title="AI Batch Split"
-                          className="h-12 w-12 rounded-full flex items-center justify-center transition-all duration-300 bg-violet-100 border border-violet-200 text-violet-600 hover:bg-violet-200 hover:scale-105 shadow-sm disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100"
+                          className="h-12 w-12 rounded-full flex items-center justify-center transition-all duration-300 bg-cyan-100 border border-cyan-200 text-cyan-600 hover:bg-cyan-200 hover:scale-105 shadow-sm disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100"
                       >
                           <Wand2 className="w-5 h-5" />
                       </button>
@@ -620,7 +620,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
                         title={isBatchMode ? "Batch Split (⌘+Enter)" : "Save (⌘+Enter)"}
                         className={`h-12 w-12 rounded-full flex items-center justify-center transition-all duration-300 hover:scale-105 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100 shadow-md ${
                           isBatchMode
-                            ? 'bg-violet-600 border border-violet-500 text-white hover:bg-violet-700 shadow-violet-500/30'
+                            ? 'bg-cyan-600 border border-cyan-500 text-white hover:bg-cyan-700 shadow-cyan-500/30'
                             : 'bg-brand-600 border border-brand-500 text-white hover:bg-brand-700 shadow-brand-500/30'
                         }`}
                     >
@@ -631,7 +631,7 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
                 // Greyed out save when empty
                 <button
                     disabled
-                    className="h-12 w-12 rounded-full flex items-center justify-center transition-all duration-300 bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-300 dark:text-zinc-600 shadow-none cursor-not-allowed"
+                    className="h-12 w-12 rounded-md flex items-center justify-center transition-all duration-300 mission-tag-chip border text-zinc-300 dark:text-zinc-600 shadow-none cursor-not-allowed"
                 >
                     <Send className="w-5 h-5 ml-0.5" />
                 </button>
@@ -649,11 +649,11 @@ const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(({ onSave, onBatch
             }
           }}
         >
-          <div className="w-full max-w-5xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-2xl shadow-2xl animate-fade-in">
+          <div className="mission-modal-panel w-full max-w-5xl border border-zinc-200/80 dark:border-zinc-700/70 rounded-2xl shadow-2xl animate-fade-in">
             <div className="px-5 pt-5 pb-3 border-b border-zinc-200 dark:border-zinc-700">
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <h3 className="text-sm font-bold text-zinc-800 dark:text-zinc-100">Review Cleaned Draft</h3>
+                  <h3 className="font-display text-2xl leading-none text-zinc-800 dark:text-zinc-100">Review Cleaned Draft</h3>
                   <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
                     {cleanupPreview.changedCount === 0
                       ? 'No text changes detected. You can still apply the cleaned draft.'
