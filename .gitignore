@@ -28,3 +28,8 @@ test-results/
 *.njsproj
 *.sln
 *.sw?
+
+# Env secrets
+.env
+.env.*
+!.env.example
