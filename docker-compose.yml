@@ -48,7 +48,6 @@ services:
       KEY_ENCRYPTION_SECRET: ${KEY_ENCRYPTION_SECRET:-replace-with-32-byte-secret}
       CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
       CLERK_PUBLISHABLE_KEY: ${CLERK_PUBLISHABLE_KEY:-}
-      ALLOW_INSECURE_DEV_AUTH: "false"
     ports:
       - "8788:8788"
 
