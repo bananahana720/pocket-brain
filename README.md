@@ -296,6 +296,35 @@ Notes:
 - If `VPS_SSH_HOST` is set as a raw IP/hostname, scripts default to `ubuntu@<host>`.
 - If `VPS_SSH_IDENTITY` is unset and `~/.ssh/id_ed25519` exists, scripts use it automatically.
 
+### GitHub Actions CI/CD
+
+Workflow path:
+- `.github/workflows/ci-cd-vps.yml`
+
+Triggers:
+- Pull requests: runs CI build/test only
+- Push to `main`: runs CI then deploys to VPS
+- Manual run (`workflow_dispatch`): supports deploy overrides (`with_worker`, `skip_pull`, readiness retries/delay)
+
+Required repository secrets:
+- `VPS_SSH_HOST` (for example `ubuntu@15.204.218.124`)
+- `VPS_PROJECT_DIR` (for example `/opt/pocket-brain`)
+- `VPS_SSH_PRIVATE_KEY` (private key content for SSH auth)
+- Optional: `VPS_SSH_PORT` (defaults to `22`)
+
+Optional repository variables (Actions -> Variables):
+- `VPS_SSH_RETRY_ATTEMPTS` (default `3`)
+- `VPS_READY_RETRIES` (default `30`)
+- `VPS_READY_DELAY_SECONDS` (default `2`)
+- `VPS_POSTGRES_READY_RETRIES` (default `20`)
+- `VPS_POSTGRES_READY_DELAY_SECONDS` (default `2`)
+
+Deployment safeguards included in workflow:
+- CI gate before deploy
+- per-environment concurrency guard (`vps-production-deploy`)
+- remote precheck + sync + deploy + verify sequence
+- host key pinning via `ssh-keyscan`
+
 ---
 
 ## Project Structure
