@@ -29,6 +29,7 @@ interface ClientMetrics {
     aiMs: number[];
     aiPayloadBytes: number[];
     captureWriteMs: number[];
+    captureVisibleMs: number[];
   };
 }
 
@@ -62,6 +63,7 @@ const metrics: ClientMetrics = {
     aiMs: [],
     aiPayloadBytes: [],
     captureWriteMs: [],
+    captureVisibleMs: [],
   },
 };
 
@@ -92,6 +94,10 @@ export function recordCaptureWriteThroughLatency(ms: number): void {
   pushBounded(metrics.latencies.captureWriteMs, ms);
 }
 
+export function recordCaptureVisibleLatency(ms: number): void {
+  pushBounded(metrics.latencies.captureVisibleMs, ms);
+}
+
 export function recordAiErrorCode(code: string): void {
   metrics.aiErrorCodes[code] = (metrics.aiErrorCodes[code] || 0) + 1;
 }
@@ -110,12 +116,14 @@ export function getClientMetricsSnapshot() {
       aiMs: average(metrics.latencies.aiMs),
       aiPayloadBytes: average(metrics.latencies.aiPayloadBytes),
       captureWriteMs: average(metrics.latencies.captureWriteMs),
+      captureVisibleMs: average(metrics.latencies.captureVisibleMs),
     },
     latencySamples: {
       persistMs: metrics.latencies.persistMs.length,
       aiMs: metrics.latencies.aiMs.length,
       aiPayloadBytes: metrics.latencies.aiPayloadBytes.length,
       captureWriteMs: metrics.latencies.captureWriteMs.length,
+      captureVisibleMs: metrics.latencies.captureVisibleMs.length,
     },
   };
 }

@@ -10,13 +10,13 @@ test.describe('Notes CRUD', () => {
     await expect(page.getByText('Your mind is clear')).not.toBeVisible();
   });
 
-  test('shows saving status until durable capture commit', async ({ page }) => {
+  test('capture appears immediately while write-through completes in background', async ({ page }) => {
     await gotoWithNotes(page);
     await configureCaptureSaveHooks(page, { delayMs: 650 });
 
     await createNoteViaUI(page, 'Write-through reliability note');
 
-    await expect(page.getByTestId('capture-save-status')).toContainText('Saving');
+    await expect(page.getByTestId('capture-save-status')).toHaveCount(0);
     await expect(page.getByText('Note captured')).toBeVisible();
     await expect(page.getByText('Write-through reliability note')).toBeVisible();
   });

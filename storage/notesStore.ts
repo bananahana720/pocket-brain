@@ -194,16 +194,17 @@ export async function saveCapture(note: Note, analysisJob?: PersistedAnalysisJob
   const db = await openDb();
   try {
     await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction([OPS_STORE, ANALYSIS_QUEUE_STORE], 'readwrite');
+      const stores = analysisJob ? [OPS_STORE, ANALYSIS_QUEUE_STORE] : [OPS_STORE];
+      const tx = db.transaction(stores, 'readwrite');
       const opsStore = tx.objectStore(OPS_STORE);
-      const queueStore = tx.objectStore(ANALYSIS_QUEUE_STORE);
+      const queueStore = analysisJob ? tx.objectStore(ANALYSIS_QUEUE_STORE) : null;
 
       opsStore.add({
         createdAt: Date.now(),
         op: { type: 'upsert', note } satisfies NoteOp,
       } satisfies OpRecord);
 
-      if (analysisJob) {
+      if (analysisJob && queueStore) {
         const loadQueueRequest = queueStore.get(ANALYSIS_QUEUE_KEY);
         loadQueueRequest.onsuccess = () => {
           const record = loadQueueRequest.result as AnalysisQueueRecord | undefined;

@@ -46,6 +46,7 @@ import {
   parseEncryptedBackupPayloadWithKey,
 } from './utils/encryptedExport';
 import {
+  recordCaptureVisibleLatency,
   recordCaptureWriteThroughLatency,
   incrementMetric,
   recordAiErrorCode,
@@ -417,18 +418,27 @@ function App() {
     }
   }, [persistAnalysisQueueStateSafely]);
 
-  const writeShadowSnapshot = useCallback((snapshotNotes: Note[]) => {
-    try {
-      const serialized = JSON.stringify(snapshotNotes);
-      localStorage.setItem(STORAGE_SHADOW_KEY, serialized);
-    } catch (error) {
-      console.error('Failed to write local fallback snapshot', error);
-    }
-  }, []);
+  const writeLocalFallbackSnapshots = useCallback(
+    (snapshotNotes: Note[], options?: { includePrimary?: boolean }) => {
+      const includePrimary = options?.includePrimary ?? true;
+
+      try {
+        const serialized = JSON.stringify(snapshotNotes);
+        localStorage.setItem(STORAGE_SHADOW_KEY, serialized);
+        if (includePrimary) {
+          localStorage.setItem(STORAGE_KEY, serialized);
+        }
+      } catch (error) {
+        console.error('Failed to write local fallback snapshot', error);
+      }
+    },
+    []
+  );
 
   const flushPersistentState = useCallback(() => {
     const latestNotes = notesRef.current;
-    writeShadowSnapshot(latestNotes);
+    // Keep shadow key fresh on unload/visibility changes without clobbering seeded primary fixtures.
+    writeLocalFallbackSnapshots(latestNotes, { includePrimary: false });
 
     if (persistDirtyRef.current) {
       persistDirtyRef.current = false;
@@ -444,7 +454,7 @@ function App() {
     if (analysisQueueDirtyRef.current) {
       persistAnalysisQueueStateSafely();
     }
-  }, [persistAnalysisQueueStateSafely, writeShadowSnapshot]);
+  }, [persistAnalysisQueueStateSafely, writeLocalFallbackSnapshots]);
 
   const runAutoBackupIfDue = useCallback(
     async (snapshotNotes: Note[]) => {
@@ -708,6 +718,50 @@ function App() {
     [enforceAnalysisQueueBudget, persistAnalysisQueueStateSafely, removeJobsForNoteId, runAnalysisQueue]
   );
 
+  const persistCaptureWriteThrough = useCallback(
+    async (noteId: string, expectedSignature: string, startedAt: number) => {
+      const current = notesRef.current.find(note => note.id === noteId);
+      if (!current) {
+        return;
+      }
+
+      // Avoid stale writes when capture content changed before background persistence completed.
+      if (getNotePersistSignature(current) !== expectedSignature) {
+        return;
+      }
+
+      try {
+        if (import.meta.env.DEV && typeof window !== 'undefined') {
+          const delayMs = Number((window as any).__PB_CAPTURE_SAVE_DELAY_MS || 0);
+          if (Number.isFinite(delayMs) && delayMs > 0) {
+            await new Promise(resolve => window.setTimeout(resolve, delayMs));
+          }
+        }
+
+        await saveCapture(current);
+        incrementMetric('capture_write_through_success');
+        recordCaptureWriteThroughLatency(performance.now() - startedAt);
+      } catch (error) {
+        console.error('Capture write-through failed, trying op fallback', error);
+
+        try {
+          const persistStarted = performance.now();
+          await saveOps([{ type: 'upsert', note: current }]);
+          incrementMetric('persist_writes');
+          recordPersistLatency(performance.now() - persistStarted);
+          incrementMetric('capture_write_through_success');
+          recordCaptureWriteThroughLatency(performance.now() - startedAt);
+        } catch (fallbackError) {
+          console.error('Capture fallback persist failed', fallbackError);
+          incrementMetric('capture_write_through_failure');
+          recordCaptureWriteThroughLatency(performance.now() - startedAt);
+          addToast('Storage issue — note may not survive reload. Keep this tab open and retry.', 'error');
+        }
+      }
+    },
+    [addToast]
+  );
+
   const recordBackupCompletion = useCallback(() => {
     localStorage.setItem(BACKUP_RECORDED_KEY, String(Date.now()));
   }, []);
@@ -859,21 +913,18 @@ function App() {
 
       const signature = prePersistedCaptureSignaturesRef.current.get(op.note.id);
       if (!signature) return true;
-      if (signature !== getNotePersistSignature(op.note)) return true;
+      if (signature !== getNotePersistSignature(op.note)) {
+        prePersistedCaptureSignaturesRef.current.delete(op.note.id);
+        return true;
+      }
 
       prePersistedCaptureSignaturesRef.current.delete(op.note.id);
       return false;
     });
 
     previousNotesRef.current = next;
-    writeShadowSnapshot(next);
+    writeLocalFallbackSnapshots(next);
     void runAutoBackupIfDue(next);
-
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    } catch (error) {
-      console.error('Failed to update localStorage fallback snapshot', error);
-    }
 
     if (ops.length === 0) return;
 
@@ -896,7 +947,7 @@ function App() {
         incrementMetric('persist_failures');
         addToast('Storage issue — some changes may not be saved', 'error');
       });
-  }, [notes, addToast, runAutoBackupIfDue, writeShadowSnapshot]);
+  }, [notes, addToast, runAutoBackupIfDue, writeLocalFallbackSnapshots]);
 
   // --- Offline Detection ---
   useEffect(() => {
@@ -1235,6 +1286,7 @@ function App() {
   // --- Note Actions ---
   const handleAddNote = useCallback(
     async (content: string, presetType?: NoteType): Promise<CaptureSaveResult> => {
+      const captureStartedAt = performance.now();
       const id = `${Date.now()}${Math.random().toString().slice(2, 6)}`;
       const now = Date.now();
       const contentSignature = hashContent(content);
@@ -1261,36 +1313,26 @@ function App() {
             attempts: 0,
             enqueuedAt: Date.now(),
           };
-
-      const started = performance.now();
-      try {
-        if (import.meta.env.DEV && typeof window !== 'undefined') {
-          const delayMs = Number((window as any).__PB_CAPTURE_SAVE_DELAY_MS || 0);
-          if (Number.isFinite(delayMs) && delayMs > 0) {
-            await new Promise(resolve => window.setTimeout(resolve, delayMs));
-          }
-        }
-        await saveCapture(newNote, pendingJob);
-        incrementMetric('capture_write_through_success');
-        recordCaptureWriteThroughLatency(performance.now() - started);
-      } catch (error) {
-        console.error('Failed to durably persist captured note', error);
-        incrementMetric('capture_write_through_failure');
-        recordCaptureWriteThroughLatency(performance.now() - started);
-        addToast('Storage issue — note was not saved. Retry.', 'error');
-        return { ok: false };
-      }
-
-      prePersistedCaptureSignaturesRef.current.set(newNote.id, getNotePersistSignature(newNote));
+      const captureSignature = getNotePersistSignature(newNote);
+      prePersistedCaptureSignaturesRef.current.set(newNote.id, captureSignature);
       setNotes(prev => [newNote, ...prev]);
+      if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+        window.requestAnimationFrame(() => {
+          recordCaptureVisibleLatency(performance.now() - captureStartedAt);
+        });
+      } else {
+        recordCaptureVisibleLatency(performance.now() - captureStartedAt);
+      }
       addToast('Note captured', 'success');
 
       if (pendingJob) {
         enqueueAnalysis(pendingJob);
       }
+
+      void persistCaptureWriteThrough(newNote.id, captureSignature, performance.now());
       return { ok: true };
     },
-    [addToast, enqueueAnalysis]
+    [addToast, enqueueAnalysis, persistCaptureWriteThrough]
   );
 
   const handleImportSharedNote = useCallback(() => {
@@ -1715,6 +1757,7 @@ function App() {
     const result: Note[] = [];
     let sawPinned = false;
     let sawUnpinned = false;
+    let sawDatedTask = false;
 
     for (const note of notes) {
       if (!showArchived && note.isArchived) continue;
@@ -1737,10 +1780,13 @@ function App() {
       result.push(note);
       if (note.isPinned) sawPinned = true;
       else sawUnpinned = true;
+      if (filter === NoteType.TASK && typeof note.dueDate === 'number') {
+        sawDatedTask = true;
+      }
     }
 
     const needsPinSort = sawPinned && sawUnpinned;
-    const needsTaskSort = filter === NoteType.TASK;
+    const needsTaskSort = filter === NoteType.TASK && sawDatedTask && result.length > 1;
     if (!needsPinSort && !needsTaskSort) {
       return result;
     }
