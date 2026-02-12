@@ -1,10 +1,16 @@
 import type { GoogleGenAI } from '@google/genai';
 import { AIAnalysisResult, AIAuthState, AIProvider, Note, NoteType } from '../types';
+import { incrementMetric, recordAiPayloadBytes } from '../utils/telemetry';
 
 const OPENROUTER_MODEL = 'google/gemini-2.5-flash';
 const USE_AI_PROXY = !!(import.meta.env?.PROD || import.meta.env?.VITE_USE_AI_PROXY === 'true');
 const PROXY_TIMEOUT_MS = 12000;
 const PROXY_RETRIES = 2;
+const MAX_NOTE_CONTENT_CHARS = 800;
+const MAX_NOTE_TITLE_CHARS = 120;
+const MAX_QUERY_CHARS = 400;
+const MAX_SEARCH_CONTEXT_NOTES = 40;
+const MAX_DAILY_CONTEXT_NOTES = 60;
 
 type GoogleGenAIModule = typeof import('@google/genai');
 let googleGenAIModulePromise: Promise<GoogleGenAIModule> | null = null;
@@ -44,6 +50,90 @@ export interface DraftCleanupResult {
 
 export interface SpeechTranscriptionOptions extends RequestOptions {
   language?: string;
+}
+
+type NoteContext = Pick<
+  Note,
+  'id' | 'content' | 'createdAt' | 'title' | 'tags' | 'type' | 'isCompleted' | 'isArchived' | 'dueDate' | 'priority'
+>;
+
+function clampText(value: string, maxChars: number): string {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars)}...`;
+}
+
+function toNoteContext(note: Note): NoteContext {
+  return {
+    id: note.id,
+    content: clampText(note.content || '', MAX_NOTE_CONTENT_CHARS),
+    createdAt: note.createdAt,
+    ...(note.title ? { title: clampText(note.title, MAX_NOTE_TITLE_CHARS) } : {}),
+    ...(note.tags?.length ? { tags: note.tags.slice(0, 6).map(tag => clampText(tag, 24)) } : {}),
+    ...(note.type ? { type: note.type } : {}),
+    ...(typeof note.isCompleted === 'boolean' ? { isCompleted: note.isCompleted } : {}),
+    ...(typeof note.isArchived === 'boolean' ? { isArchived: note.isArchived } : {}),
+    ...(typeof note.dueDate === 'number' ? { dueDate: note.dueDate } : {}),
+    ...(note.priority ? { priority: note.priority } : {}),
+  };
+}
+
+function scoreNoteForQuery(note: Note, terms: string[]): number {
+  if (terms.length === 0) return 0;
+  const content = `${note.title || ''} ${note.content || ''} ${(note.tags || []).join(' ')}`.toLowerCase();
+  let score = 0;
+  for (const term of terms) {
+    if (!term) continue;
+    if (content.includes(term)) score += 1;
+    if (note.title?.toLowerCase().includes(term)) score += 1;
+    if ((note.tags || []).some(tag => tag.toLowerCase() === term)) score += 2;
+  }
+  return score;
+}
+
+function selectSearchContextNotes(notes: Note[], query: string): NoteContext[] {
+  const normalizedQuery = query.trim().toLowerCase().slice(0, MAX_QUERY_CHARS);
+  const terms = normalizedQuery.split(/\s+/).map(term => term.trim()).filter(Boolean).slice(0, 8);
+
+  return [...notes]
+    .sort((a, b) => {
+      const scoreDiff = scoreNoteForQuery(b, terms) - scoreNoteForQuery(a, terms);
+      if (scoreDiff !== 0) return scoreDiff;
+      return b.createdAt - a.createdAt;
+    })
+    .slice(0, MAX_SEARCH_CONTEXT_NOTES)
+    .map(toNoteContext);
+}
+
+function selectDailyBriefContextNotes(notes: Note[]): NoteContext[] {
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
+
+  const activeNotes = notes.filter(note => !note.isArchived);
+  const overdue = activeNotes
+    .filter(note => note.dueDate && note.dueDate < startOfToday && !note.isCompleted)
+    .sort((a, b) => (a.dueDate || 0) - (b.dueDate || 0))
+    .slice(0, 24);
+  const dueToday = activeNotes
+    .filter(note => note.dueDate && note.dueDate >= startOfToday && note.dueDate < endOfToday && !note.isCompleted)
+    .sort((a, b) => (a.dueDate || 0) - (b.dueDate || 0))
+    .slice(0, 24);
+  const capturedToday = activeNotes
+    .filter(note => note.createdAt >= startOfToday && note.createdAt < endOfToday)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, 24);
+
+  const selected = [...overdue, ...dueToday, ...capturedToday];
+  const seen = new Set<string>();
+  const deduped: Note[] = [];
+  for (const note of selected) {
+    if (seen.has(note.id)) continue;
+    seen.add(note.id);
+    deduped.push(note);
+  }
+
+  return deduped.slice(0, MAX_DAILY_CONTEXT_NOTES).map(toNoteContext);
 }
 
 function getDevGeminiKey(): string {
@@ -206,6 +296,12 @@ async function proxyJson<T>(
 }
 
 async function proxyPost<T>(path: string, body: unknown, options?: RequestOptions): Promise<T> {
+  const requestBody = JSON.stringify(body);
+  if (path.startsWith('/api/v1/ai/')) {
+    incrementMetric('ai_payload_samples');
+    recordAiPayloadBytes(new TextEncoder().encode(requestBody).byteLength);
+  }
+
   return proxyJson<T>(
     path,
     {
@@ -213,7 +309,7 @@ async function proxyPost<T>(path: string, body: unknown, options?: RequestOption
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(body),
+      body: requestBody,
     },
     options
   );
@@ -689,27 +785,20 @@ export const transcribeAudio = async (
 };
 
 export const generateDailyBrief = async (notes: Note[], options?: RequestOptions): Promise<string | null> => {
+  const contextNotes = selectDailyBriefContextNotes(notes);
+  if (contextNotes.length === 0) return null;
+
   const now = new Date();
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
-
-  const activeNotes = notes.filter(n => !n.isArchived);
-
-  const overdueNotes = activeNotes.filter(
-    n => n.dueDate && n.dueDate < startOfToday && !n.isCompleted
-  );
-  const dueTodayNotes = activeNotes.filter(
+  const overdueNotes = contextNotes.filter(n => n.dueDate && n.dueDate < startOfToday && !n.isCompleted);
+  const dueTodayNotes = contextNotes.filter(
     n => n.dueDate && n.dueDate >= startOfToday && n.dueDate < endOfToday && !n.isCompleted
   );
-  const capturedTodayNotes = activeNotes.filter(
-    n => n.createdAt >= startOfToday && n.createdAt < endOfToday
-  );
-
-  const relevantNotes = [...overdueNotes, ...dueTodayNotes, ...capturedTodayNotes];
-  if (relevantNotes.length === 0) return null;
+  const capturedTodayNotes = contextNotes.filter(n => n.createdAt >= startOfToday && n.createdAt < endOfToday);
 
   if (hasProxy()) {
-    const payload = await proxyPost<{ result: string | null }>('/api/v1/ai/daily-brief', { notes }, options);
+    const payload = await proxyPost<{ result: string | null }>('/api/v1/ai/daily-brief', { notes: contextNotes }, options);
     return payload.result;
   }
 
@@ -718,7 +807,7 @@ export const generateDailyBrief = async (notes: Note[], options?: RequestOptions
     return 'I need an API key to generate your daily brief.';
   }
 
-  const formatNote = (n: Note) => {
+  const formatNote = (n: NoteContext) => {
     const parts: string[] = [];
     parts.push(`Title: ${n.title || 'Untitled'}`);
     parts.push(`Type: ${n.type || 'NOTE'}`);
@@ -762,23 +851,32 @@ export const generateDailyBrief = async (notes: Note[], options?: RequestOptions
 };
 
 export const askMyNotes = async (query: string, notes: Note[], options?: RequestOptions): Promise<string> => {
+  const normalizedQuery = query.trim().slice(0, MAX_QUERY_CHARS);
+  const contextNotes = selectSearchContextNotes(notes, normalizedQuery);
+
   if (hasProxy()) {
-    const payload = await proxyPost<{ result: string }>('/api/v1/ai/search', { query, notes }, options);
+    const payload = await proxyPost<{ result: string }>(
+      '/api/v1/ai/search',
+      { query: normalizedQuery, notes: contextNotes },
+      options
+    );
     return payload.result;
   }
 
   const provider = getProvider();
   if (!provider) return 'I need an API key to help you search.';
-
-  const relevantNotes = notes.slice(0, 50);
-
-  const context = relevantNotes.map(n =>
-    `[ID: ${n.id}] [${n.type}] [${n.isCompleted ? 'DONE' : 'OPEN'}] (${new Date(n.createdAt).toLocaleDateString()}) ${n.content}`
-  ).join('\n---\n');
+  const context = contextNotes
+    .map(
+      n =>
+        `[ID: ${n.id}] [${n.type || 'NOTE'}] [${n.isCompleted ? 'DONE' : 'OPEN'}] (${new Date(
+          n.createdAt
+        ).toLocaleDateString()}) ${n.content}`
+    )
+    .join('\n---\n');
 
   const prompt = `You are a helpful personal assistant.
 The user is asking a question about their notes.
-Here is the user's question: "${query}"
+Here is the user's question: "${normalizedQuery}"
 
 Here are the user's notes:
 ${context}

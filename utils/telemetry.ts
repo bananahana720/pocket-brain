@@ -1,7 +1,13 @@
 export type ClientMetricName =
   | 'persist_writes'
   | 'persist_failures'
+  | 'load_failures'
+  | 'analysis_queue_persist_failures'
+  | 'analysis_queue_recovered'
+  | 'backup_writes'
+  | 'backup_failures'
   | 'ai_requests'
+  | 'ai_payload_samples'
   | 'ai_failures'
   | 'stale_analysis_drops';
 
@@ -11,6 +17,7 @@ interface ClientMetrics {
   latencies: {
     persistMs: number[];
     aiMs: number[];
+    aiPayloadBytes: number[];
   };
 }
 
@@ -18,7 +25,13 @@ const metrics: ClientMetrics = {
   counters: {
     persist_writes: 0,
     persist_failures: 0,
+    load_failures: 0,
+    analysis_queue_persist_failures: 0,
+    analysis_queue_recovered: 0,
+    backup_writes: 0,
+    backup_failures: 0,
     ai_requests: 0,
+    ai_payload_samples: 0,
     ai_failures: 0,
     stale_analysis_drops: 0,
   },
@@ -26,6 +39,7 @@ const metrics: ClientMetrics = {
   latencies: {
     persistMs: [],
     aiMs: [],
+    aiPayloadBytes: [],
   },
 };
 
@@ -48,6 +62,10 @@ export function recordAiLatency(ms: number): void {
   pushBounded(metrics.latencies.aiMs, ms);
 }
 
+export function recordAiPayloadBytes(bytes: number): void {
+  pushBounded(metrics.latencies.aiPayloadBytes, bytes);
+}
+
 export function recordAiErrorCode(code: string): void {
   metrics.aiErrorCodes[code] = (metrics.aiErrorCodes[code] || 0) + 1;
 }
@@ -64,10 +82,12 @@ export function getClientMetricsSnapshot() {
     latencyAverages: {
       persistMs: average(metrics.latencies.persistMs),
       aiMs: average(metrics.latencies.aiMs),
+      aiPayloadBytes: average(metrics.latencies.aiPayloadBytes),
     },
     latencySamples: {
       persistMs: metrics.latencies.persistMs.length,
       aiMs: metrics.latencies.aiMs.length,
+      aiPayloadBytes: metrics.latencies.aiPayloadBytes.length,
     },
   };
 }

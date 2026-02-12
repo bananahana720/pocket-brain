@@ -42,10 +42,13 @@ interface SessionRecord {
 }
 
 interface Metrics {
+  requests: number;
   authFailures: number;
   providerFailures: number;
   retries: number;
   timeouts: number;
+  rateLimited: number;
+  circuitOpens: number;
 }
 
 const SESSION_COOKIE_NAME = 'pb_ai_session';
@@ -53,11 +56,43 @@ const SESSION_TTL_SECONDS = 24 * 60 * 60;
 const RETRY_ATTEMPTS = 2;
 const REQUEST_TIMEOUT_MS = 12000;
 const MAX_TRANSCRIPTION_AUDIO_BASE64_CHARS = 6 * 1024 * 1024;
+const MAX_NOTE_CONTENT_CHARS = 800;
+const MAX_NOTE_TITLE_CHARS = 120;
+const MAX_QUERY_CHARS = 400;
+const MAX_SEARCH_CONTEXT_NOTES = 40;
+const MAX_DAILY_CONTEXT_NOTES = 60;
+const MAX_CONTENT_CHARS = 6000;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 45;
+const RATE_LIMIT_BLOCK_MS = 60_000;
+const CIRCUIT_FAILURE_THRESHOLD = 5;
+const CIRCUIT_OPEN_MS = 30_000;
+
+type RateLimitEntry = {
+  windowStart: number;
+  count: number;
+  blockedUntil: number;
+};
+
+type CircuitState = {
+  consecutiveFailures: number;
+  openUntil: number;
+};
+
 const metrics: Metrics = {
+  requests: 0,
   authFailures: 0,
   providerFailures: 0,
   retries: 0,
   timeouts: 0,
+  rateLimited: 0,
+  circuitOpens: 0,
+};
+
+const rateLimits = new Map<string, RateLimitEntry>();
+const providerCircuit: Record<AIProvider, CircuitState> = {
+  gemini: { consecutiveFailures: 0, openUntil: 0 },
+  openrouter: { consecutiveFailures: 0, openUntil: 0 },
 };
 
 class ApiError extends Error {
@@ -150,6 +185,77 @@ function clearCookie(request: Request): string {
 function getSessionId(request: Request): string | null {
   const cookies = parseCookies(request);
   return cookies[SESSION_COOKIE_NAME] || null;
+}
+
+function getClientIp(request: Request): string {
+  const forwarded = request.headers.get('cf-connecting-ip') || request.headers.get('x-forwarded-for') || '';
+  if (!forwarded) return 'unknown';
+  return forwarded.split(',')[0].trim() || 'unknown';
+}
+
+function enforceRateLimit(request: Request, sessionId?: string): void {
+  const now = Date.now();
+  const key = `${sessionId || 'anon'}:${getClientIp(request)}`;
+
+  if (rateLimits.size > 5000) {
+    for (const [entryKey, entry] of rateLimits.entries()) {
+      if (entry.blockedUntil < now - RATE_LIMIT_WINDOW_MS && now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+        rateLimits.delete(entryKey);
+      }
+    }
+  }
+
+  let entry = rateLimits.get(key);
+  if (!entry || now - entry.windowStart >= RATE_LIMIT_WINDOW_MS) {
+    entry = {
+      windowStart: now,
+      count: 0,
+      blockedUntil: 0,
+    };
+  }
+
+  if (entry.blockedUntil > now) {
+    metrics.rateLimited += 1;
+    rateLimits.set(key, entry);
+    throw new ApiError(429, 'RATE_LIMITED', 'Too many AI requests. Please retry in a minute.', true);
+  }
+
+  entry.count += 1;
+  if (entry.count > RATE_LIMIT_MAX_REQUESTS) {
+    entry.blockedUntil = now + RATE_LIMIT_BLOCK_MS;
+    metrics.rateLimited += 1;
+    rateLimits.set(key, entry);
+    throw new ApiError(429, 'RATE_LIMITED', 'Too many AI requests. Please retry in a minute.', true);
+  }
+
+  rateLimits.set(key, entry);
+}
+
+function isRetryableProviderError(error: unknown): boolean {
+  return error instanceof ApiError && error.retryable && (error.status === 429 || error.status >= 500);
+}
+
+function ensureCircuitClosed(provider: AIProvider): void {
+  const state = providerCircuit[provider];
+  if (state.openUntil > Date.now()) {
+    throw new ApiError(503, 'PROVIDER_UNAVAILABLE', 'Provider is temporarily unavailable. Please retry shortly.', true);
+  }
+}
+
+function recordProviderSuccess(provider: AIProvider): void {
+  providerCircuit[provider].consecutiveFailures = 0;
+}
+
+function recordProviderFailure(provider: AIProvider, error: unknown): void {
+  if (!isRetryableProviderError(error)) return;
+
+  const state = providerCircuit[provider];
+  state.consecutiveFailures += 1;
+  if (state.consecutiveFailures >= CIRCUIT_FAILURE_THRESHOLD) {
+    state.consecutiveFailures = 0;
+    state.openUntil = Date.now() + CIRCUIT_OPEN_MS;
+    metrics.circuitOpens += 1;
+  }
 }
 
 function base64Encode(bytes: Uint8Array): string {
@@ -279,6 +385,69 @@ function parseTranscriptionRequest(body: any): { audioBase64: string; mimeType: 
   }
 
   return language ? { audioBase64, mimeType, language } : { audioBase64, mimeType };
+}
+
+function clampText(value: string, maxChars: number): string {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars)}...`;
+}
+
+function parseContent(value: unknown, fieldName = 'content'): string {
+  const content = typeof value === 'string' ? value.trim() : '';
+  if (!content) {
+    throw new ApiError(400, 'BAD_REQUEST', `${fieldName} is required`);
+  }
+  return content.length > MAX_CONTENT_CHARS ? content.slice(0, MAX_CONTENT_CHARS) : content;
+}
+
+function parseQuery(value: unknown): string {
+  const query = typeof value === 'string' ? value.trim() : '';
+  if (!query) {
+    throw new ApiError(400, 'BAD_REQUEST', 'query is required');
+  }
+  return query.length > MAX_QUERY_CHARS ? query.slice(0, MAX_QUERY_CHARS) : query;
+}
+
+function parseNotesContext(value: unknown, limit: number): Note[] {
+  if (!Array.isArray(value)) return [];
+
+  const normalized: Note[] = [];
+  for (const rawNote of value) {
+    if (!rawNote || typeof rawNote !== 'object') continue;
+    const note = rawNote as Record<string, unknown>;
+    const content = typeof note.content === 'string' ? clampText(note.content, MAX_NOTE_CONTENT_CHARS) : '';
+    if (!content) continue;
+
+    const createdAt = typeof note.createdAt === 'number' && Number.isFinite(note.createdAt) ? note.createdAt : Date.now();
+    const candidateType = note.type === 'TASK' || note.type === 'IDEA' || note.type === 'NOTE' ? note.type : undefined;
+    const dueDate = typeof note.dueDate === 'number' && Number.isFinite(note.dueDate) ? note.dueDate : undefined;
+    const priority = note.priority === 'urgent' || note.priority === 'normal' || note.priority === 'low' ? note.priority : undefined;
+
+    normalized.push({
+      id: typeof note.id === 'string' ? note.id : crypto.randomUUID(),
+      content,
+      createdAt,
+      ...(typeof note.title === 'string' ? { title: clampText(note.title, MAX_NOTE_TITLE_CHARS) } : {}),
+      ...(Array.isArray(note.tags)
+        ? {
+            tags: note.tags
+              .map(tag => (typeof tag === 'string' ? clampText(tag, 24) : ''))
+              .filter(Boolean)
+              .slice(0, 6),
+          }
+        : {}),
+      ...(candidateType ? { type: candidateType } : {}),
+      ...(typeof note.isCompleted === 'boolean' ? { isCompleted: note.isCompleted } : {}),
+      ...(typeof note.isArchived === 'boolean' ? { isArchived: note.isArchived } : {}),
+      ...(typeof dueDate === 'number' ? { dueDate } : {}),
+      ...(priority ? { priority } : {}),
+    });
+
+    if (normalized.length >= limit) break;
+  }
+
+  return normalized;
 }
 
 async function parseJson(request: Request): Promise<any> {
@@ -459,8 +628,16 @@ async function callOpenRouter(apiKey: string, prompt: string, model = 'google/ge
 }
 
 async function callProvider(provider: AIProvider, apiKey: string, prompt: string, model?: string): Promise<string> {
-  if (provider === 'gemini') return callGemini(apiKey, prompt);
-  return callOpenRouter(apiKey, prompt, model);
+  ensureCircuitClosed(provider);
+
+  try {
+    const result = provider === 'gemini' ? await callGemini(apiKey, prompt) : await callOpenRouter(apiKey, prompt, model);
+    recordProviderSuccess(provider);
+    return result;
+  } catch (error) {
+    recordProviderFailure(provider, error);
+    throw error;
+  }
 }
 
 function safeParseJson<T>(value: string): T {
@@ -575,8 +752,7 @@ Input Text: "${content}"`;
 }
 
 function buildSearchPrompt(query: string, notes: Note[]): string {
-  const relevantNotes = notes.slice(0, 50);
-  const context = relevantNotes
+  const context = notes
     .map(
       note =>
         `[ID: ${note.id}] [${note.type || 'NOTE'}] [${note.isCompleted ? 'DONE' : 'OPEN'}] (${new Date(
@@ -658,6 +834,7 @@ export default {
     try {
       const url = new URL(request.url);
       const { pathname } = url;
+      metrics.requests += 1;
 
       if (request.method === 'OPTIONS') {
         return new Response(null, { status: 204 });
@@ -688,6 +865,7 @@ export default {
       }
 
       if (pathname === '/api/v1/auth/connect' && request.method === 'POST') {
+        enforceRateLimit(request);
         const body = await parseJson(request);
         const provider = parseProvider(body);
         const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
@@ -744,14 +922,12 @@ export default {
       }
 
       if (pathname.startsWith('/api/v1/ai/') && request.method === 'POST') {
+        enforceRateLimit(request, getSessionId(request) || undefined);
         const session = await requireSession(request, env);
         const body = await parseJson(request);
 
         if (pathname === '/api/v1/ai/analyze') {
-          const content = typeof body.content === 'string' ? body.content.trim() : '';
-          if (!content) {
-            throw new ApiError(400, 'BAD_REQUEST', 'content is required');
-          }
+          const content = parseContent(body.content);
 
           const prompt = buildAnalyzePrompt(content);
           const text = await withRetries(() => callProvider(session.provider, session.apiKey, prompt, env.DEFAULT_MODEL));
@@ -771,10 +947,7 @@ export default {
         }
 
         if (pathname === '/api/v1/ai/batch') {
-          const content = typeof body.content === 'string' ? body.content.trim() : '';
-          if (!content) {
-            throw new ApiError(400, 'BAD_REQUEST', 'content is required');
-          }
+          const content = parseContent(body.content);
 
           const prompt = buildBatchPrompt(content);
           const text = await withRetries(() => callProvider(session.provider, session.apiKey, prompt, env.DEFAULT_MODEL));
@@ -792,10 +965,7 @@ export default {
         }
 
         if (pathname === '/api/v1/ai/cleanup') {
-          const content = typeof body.content === 'string' ? body.content.trim() : '';
-          if (!content) {
-            throw new ApiError(400, 'BAD_REQUEST', 'content is required');
-          }
+          const content = parseContent(body.content);
 
           const mode = parseCleanupMode(body.mode ?? 'single');
           const prompt = buildCleanupPrompt(content, mode);
@@ -821,11 +991,8 @@ export default {
         }
 
         if (pathname === '/api/v1/ai/search') {
-          const query = typeof body.query === 'string' ? body.query.trim() : '';
-          const notes = Array.isArray(body.notes) ? (body.notes as Note[]) : [];
-          if (!query) {
-            throw new ApiError(400, 'BAD_REQUEST', 'query is required');
-          }
+          const query = parseQuery(body.query);
+          const notes = parseNotesContext(body.notes, MAX_SEARCH_CONTEXT_NOTES);
 
           const prompt = buildSearchPrompt(query, notes);
           const result = await withRetries(() => callProvider(session.provider, session.apiKey, prompt, env.DEFAULT_MODEL));
@@ -833,7 +1000,7 @@ export default {
         }
 
         if (pathname === '/api/v1/ai/daily-brief') {
-          const notes = Array.isArray(body.notes) ? (body.notes as Note[]) : [];
+          const notes = parseNotesContext(body.notes, MAX_DAILY_CONTEXT_NOTES);
           const prompt = buildDailyBriefPrompt(notes);
           if (!prompt) {
             return jsonResponse({ result: null });

@@ -2,10 +2,13 @@ import React, { useEffect, useState } from 'react';
 import { getClientMetricsSnapshot } from '../utils/telemetry';
 
 interface WorkerMetrics {
+  requests: number;
   authFailures: number;
   providerFailures: number;
   retries: number;
   timeouts: number;
+  rateLimited: number;
+  circuitOpens: number;
 }
 
 const DiagnosticsPanel: React.FC = () => {
@@ -37,18 +40,26 @@ const DiagnosticsPanel: React.FC = () => {
       <div className="space-y-1 text-zinc-700 dark:text-zinc-300">
         <p>AI requests: {clientMetrics.counters.ai_requests}</p>
         <p>AI failures: {clientMetrics.counters.ai_failures}</p>
+        <p>AI payload avg: {clientMetrics.latencyAverages.aiPayloadBytes} bytes</p>
         <p>Stale drops: {clientMetrics.counters.stale_analysis_drops}</p>
         <p>Persist writes: {clientMetrics.counters.persist_writes}</p>
         <p>Persist failures: {clientMetrics.counters.persist_failures}</p>
+        <p>Load failures: {clientMetrics.counters.load_failures}</p>
+        <p>Queue recovered: {clientMetrics.counters.analysis_queue_recovered}</p>
+        <p>Backups: {clientMetrics.counters.backup_writes}</p>
+        <p>Backup failures: {clientMetrics.counters.backup_failures}</p>
         <p>Avg persist: {clientMetrics.latencyAverages.persistMs}ms</p>
         <p>Avg AI: {clientMetrics.latencyAverages.aiMs}ms</p>
       </div>
       {workerMetrics && (
         <div className="mt-2 border-t border-zinc-200 pt-2 text-zinc-700 dark:border-zinc-700 dark:text-zinc-300">
+          <p>Worker requests: {workerMetrics.requests}</p>
           <p>Worker auth failures: {workerMetrics.authFailures}</p>
           <p>Worker provider failures: {workerMetrics.providerFailures}</p>
           <p>Worker retries: {workerMetrics.retries}</p>
           <p>Worker timeouts: {workerMetrics.timeouts}</p>
+          <p>Worker rate-limited: {workerMetrics.rateLimited}</p>
+          <p>Worker circuit opens: {workerMetrics.circuitOpens}</p>
         </div>
       )}
     </aside>

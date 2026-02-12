@@ -27,12 +27,17 @@ import { hashContent } from './utils/hash';
 import { useDebouncedValue } from './hooks/useDebouncedValue';
 import { decodeSharedNotePayload, SharedNotePayload } from './utils/sharedNoteLink';
 import {
+  AnalysisQueueState,
   NoteOp,
   compactSnapshot,
+  loadAnalysisQueueState,
   migrateFromLocalStorage,
+  PersistedAnalysisJob,
   resetNotesStore,
+  saveAnalysisQueueState,
   saveOps,
 } from './storage/notesStore';
+import { createEncryptedBackupPayload, parseEncryptedBackupPayload } from './utils/encryptedExport';
 import {
   incrementMetric,
   recordAiErrorCode,
@@ -41,8 +46,14 @@ import {
 } from './utils/telemetry';
 
 const STORAGE_KEY = 'pocketbrain_notes';
+const STORAGE_SHADOW_KEY = 'pocketbrain_notes_shadow';
 const BACKUP_RECORDED_KEY = 'pocketbrain_last_backup_at';
 const BACKUP_REMINDER_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+const AUTO_BACKUP_PAYLOAD_KEY = 'pocketbrain_auto_backup_payload';
+const AUTO_BACKUP_SECRET_KEY = 'pocketbrain_auto_backup_secret';
+const AUTO_BACKUP_LAST_AT_KEY = 'pocketbrain_auto_backup_last_at';
+const AUTO_BACKUP_INTERVAL_MS = 30 * 60 * 1000;
+const AI_EXPIRY_WARN_MS = 15 * 60 * 1000;
 const OP_COMPACT_THRESHOLD = 200;
 
 const INITIAL_VISIBLE_NOTES = 60;
@@ -51,13 +62,7 @@ const LARGE_DATASET_THRESHOLD = 500;
 const VIRTUAL_ROW_HEIGHT = 210;
 const VIRTUAL_OVERSCAN = 12;
 
-interface AnalysisJob {
-  noteId: string;
-  content: string;
-  version: number;
-  contentHash: string;
-  attempts: number;
-}
+type AnalysisJob = PersistedAnalysisJob;
 
 function buildNoteSearchText(note: Note): string {
   return `${note.content} ${note.title || ''} ${(note.tags || []).join(' ')}`.toLowerCase();
@@ -196,6 +201,50 @@ function toAiMessage(error: unknown): {
   };
 }
 
+function getOrCreateAutoBackupSecret(): string {
+  const existing = localStorage.getItem(AUTO_BACKUP_SECRET_KEY);
+  if (existing) return existing;
+
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  let raw = '';
+  for (const byte of bytes) {
+    raw += String.fromCharCode(byte);
+  }
+  const generated = btoa(raw);
+  localStorage.setItem(AUTO_BACKUP_SECRET_KEY, generated);
+  return generated;
+}
+
+function normalizePersistedAnalysisQueue(
+  state: AnalysisQueueState,
+  notes: Note[]
+): { state: AnalysisQueueState; dropped: number } {
+  const notesById = new Map(notes.map(note => [note.id, note]));
+  let dropped = 0;
+
+  const sanitize = (jobs: AnalysisJob[]): AnalysisJob[] =>
+    jobs.filter(job => {
+      const note = notesById.get(job.noteId);
+      const isCurrent =
+        !!note &&
+        (note.analysisVersion || 0) === job.version &&
+        (note.contentHash || '') === job.contentHash &&
+        note.analysisState !== 'complete';
+
+      if (!isCurrent) dropped += 1;
+      return isCurrent;
+    });
+
+  return {
+    state: {
+      pending: sanitize(state.pending),
+      deferred: sanitize(state.deferred),
+      transient: sanitize(state.transient),
+    },
+    dropped,
+  };
+}
+
 function App() {
   const [notes, setNotes] = useState<Note[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -236,12 +285,15 @@ function App() {
   const hasLoadedRef = useRef(false);
   const previousNotesRef = useRef<Note[]>([]);
   const persistChainRef = useRef<Promise<void>>(Promise.resolve());
+  const analysisQueuePersistChainRef = useRef<Promise<void>>(Promise.resolve());
   const analysisControllersRef = useRef<Map<string, AbortController>>(new Map());
   const pendingAnalysisRef = useRef<AnalysisJob[]>([]);
   const deferredAnalysisRef = useRef<AnalysisJob[]>([]);
   const transientReplayQueueRef = useRef<AnalysisJob[]>([]);
   const processingAnalysisRef = useRef(false);
   const backupReminderShownRef = useRef(false);
+  const autoBackupInFlightRef = useRef(false);
+  const aiExpiryWarnedForRef = useRef<number | null>(null);
   const loadMoreRef = useRef<HTMLDivElement>(null);
   const notesListRef = useRef<HTMLDivElement>(null);
   const virtualRangeRafRef = useRef<number | null>(null);
@@ -262,6 +314,91 @@ function App() {
     setToasts(prev => prev.filter(t => t.id !== id));
   }, []);
 
+  const snapshotAnalysisQueueState = useCallback(
+    (): AnalysisQueueState => ({
+      pending: pendingAnalysisRef.current.map(job => ({ ...job })),
+      deferred: deferredAnalysisRef.current.map(job => ({ ...job })),
+      transient: transientReplayQueueRef.current.map(job => ({ ...job })),
+    }),
+    []
+  );
+
+  const persistAnalysisQueueStateSafely = useCallback(() => {
+    analysisQueuePersistChainRef.current = analysisQueuePersistChainRef.current
+      .then(() => saveAnalysisQueueState(snapshotAnalysisQueueState()))
+      .catch(error => {
+        console.error('Failed to persist analysis queue state', error);
+        incrementMetric('analysis_queue_persist_failures');
+      });
+  }, [snapshotAnalysisQueueState]);
+
+  const writeShadowSnapshot = useCallback((snapshotNotes: Note[]) => {
+    try {
+      const serialized = JSON.stringify(snapshotNotes);
+      localStorage.setItem(STORAGE_SHADOW_KEY, serialized);
+    } catch (error) {
+      console.error('Failed to write local fallback snapshot', error);
+    }
+  }, []);
+
+  const flushPersistentState = useCallback(() => {
+    const latestNotes = notesRef.current;
+    writeShadowSnapshot(latestNotes);
+
+    persistChainRef.current = persistChainRef.current
+      .then(() => compactSnapshot(latestNotes))
+      .catch(error => {
+        console.error('Failed to flush notes snapshot', error);
+        incrementMetric('persist_failures');
+      });
+
+    persistAnalysisQueueStateSafely();
+  }, [persistAnalysisQueueStateSafely, writeShadowSnapshot]);
+
+  const runAutoBackupIfDue = useCallback(
+    async (snapshotNotes: Note[]) => {
+      if (snapshotNotes.length === 0) return;
+      if (autoBackupInFlightRef.current) return;
+
+      const rawLast = localStorage.getItem(AUTO_BACKUP_LAST_AT_KEY);
+      const last = rawLast ? Number(rawLast) : 0;
+      if (last && Date.now() - last < AUTO_BACKUP_INTERVAL_MS) return;
+
+      autoBackupInFlightRef.current = true;
+      try {
+        const secret = getOrCreateAutoBackupSecret();
+        const payload = await createEncryptedBackupPayload(snapshotNotes, secret);
+        const restored = await parseEncryptedBackupPayload(payload, secret);
+        if (!Array.isArray(restored) || restored.length !== snapshotNotes.length) {
+          throw new Error('Auto-backup restore check failed');
+        }
+
+        localStorage.setItem(AUTO_BACKUP_PAYLOAD_KEY, payload);
+        localStorage.setItem(AUTO_BACKUP_LAST_AT_KEY, String(Date.now()));
+        incrementMetric('backup_writes');
+      } catch (error) {
+        console.error('Automatic encrypted backup failed', error);
+        incrementMetric('backup_failures');
+      } finally {
+        autoBackupInFlightRef.current = false;
+      }
+    },
+    []
+  );
+
+  const tryRestoreAutoBackup = useCallback(async (): Promise<Note[] | null> => {
+    const payload = localStorage.getItem(AUTO_BACKUP_PAYLOAD_KEY);
+    const secret = localStorage.getItem(AUTO_BACKUP_SECRET_KEY);
+    if (!payload || !secret) return null;
+
+    try {
+      const restored = await parseEncryptedBackupPayload(payload, secret);
+      return Array.isArray(restored) ? restored : null;
+    } catch {
+      return null;
+    }
+  }, []);
+
   const refreshAiAuth = useCallback(async () => {
     try {
       const status = await getAIAuthStatus();
@@ -277,21 +414,26 @@ function App() {
     }
   }, []);
 
-  const cancelAnalysisForNote = useCallback((noteId: string) => {
-    const controller = analysisControllersRef.current.get(noteId);
-    if (controller) {
-      controller.abort();
-      analysisControllersRef.current.delete(noteId);
-    }
-    pendingAnalysisRef.current = pendingAnalysisRef.current.filter(job => job.noteId !== noteId);
-    deferredAnalysisRef.current = deferredAnalysisRef.current.filter(job => job.noteId !== noteId);
-    transientReplayQueueRef.current = transientReplayQueueRef.current.filter(job => job.noteId !== noteId);
-  }, []);
+  const cancelAnalysisForNote = useCallback(
+    (noteId: string) => {
+      const controller = analysisControllersRef.current.get(noteId);
+      if (controller) {
+        controller.abort();
+        analysisControllersRef.current.delete(noteId);
+      }
+      pendingAnalysisRef.current = pendingAnalysisRef.current.filter(job => job.noteId !== noteId);
+      deferredAnalysisRef.current = deferredAnalysisRef.current.filter(job => job.noteId !== noteId);
+      transientReplayQueueRef.current = transientReplayQueueRef.current.filter(job => job.noteId !== noteId);
+      persistAnalysisQueueStateSafely();
+    },
+    [persistAnalysisQueueStateSafely]
+  );
 
   const runAnalysisQueue = useCallback(() => {
     if (processingAnalysisRef.current) return;
     const job = pendingAnalysisRef.current.shift();
     if (!job) return;
+    persistAnalysisQueueStateSafely();
 
     processingAnalysisRef.current = true;
 
@@ -357,31 +499,36 @@ function App() {
 
         if (mapped.deferUntilConnected) {
           deferredAnalysisRef.current.push(retriedJob);
+          persistAnalysisQueueStateSafely();
           return;
         }
 
         if (mapped.retryable && job.attempts < 2) {
           window.setTimeout(() => {
             pendingAnalysisRef.current.push(retriedJob);
+            persistAnalysisQueueStateSafely();
             runAnalysisQueue();
           }, 350 * Math.pow(2, job.attempts));
         } else if (mapped.retryable) {
           transientReplayQueueRef.current.push(retriedJob);
+          persistAnalysisQueueStateSafely();
         }
       })
       .finally(() => {
         analysisControllersRef.current.delete(job.noteId);
         processingAnalysisRef.current = false;
+        persistAnalysisQueueStateSafely();
         runAnalysisQueue();
       });
-  }, []);
+  }, [persistAnalysisQueueStateSafely]);
 
   const enqueueAnalysis = useCallback(
     (job: AnalysisJob) => {
       pendingAnalysisRef.current.push(job);
+      persistAnalysisQueueStateSafely();
       runAnalysisQueue();
     },
-    [runAnalysisQueue]
+    [persistAnalysisQueueStateSafely, runAnalysisQueue]
   );
 
   const recordBackupCompletion = useCallback(() => {
@@ -398,8 +545,40 @@ function App() {
         if (!loaded.length) {
           const localFallback = localStorage.getItem(STORAGE_KEY);
           if (localFallback) {
-            loaded = JSON.parse(localFallback) as Note[];
+            try {
+              loaded = JSON.parse(localFallback) as Note[];
+            } catch {
+              loaded = [];
+            }
           }
+        }
+
+        if (!loaded.length) {
+          const restored = await tryRestoreAutoBackup();
+          if (restored?.length) {
+            loaded = restored;
+            addToast('Recovered notes from encrypted auto-backup', 'info');
+          }
+        }
+
+        const persistedQueue = await loadAnalysisQueueState();
+        const normalizedQueue = normalizePersistedAnalysisQueue(persistedQueue, loaded);
+        if (normalizedQueue.dropped > 0) {
+          incrementMetric('stale_analysis_drops', normalizedQueue.dropped);
+        }
+        const recoveredQueueItems =
+          normalizedQueue.state.pending.length +
+          normalizedQueue.state.deferred.length +
+          normalizedQueue.state.transient.length;
+        if (recoveredQueueItems > 0) {
+          incrementMetric('analysis_queue_recovered', recoveredQueueItems);
+        }
+
+        pendingAnalysisRef.current = normalizedQueue.state.pending;
+        deferredAnalysisRef.current = normalizedQueue.state.deferred;
+        transientReplayQueueRef.current = normalizedQueue.state.transient;
+        if (normalizedQueue.dropped > 0) {
+          persistAnalysisQueueStateSafely();
         }
 
         if (cancelled) return;
@@ -407,10 +586,36 @@ function App() {
         previousNotesRef.current = loaded;
       } catch (error) {
         console.error('Failed to load notes from IndexedDB', error);
-        addToast('Unable to load saved notes', 'error');
+        incrementMetric('load_failures');
+
+        let restored: Note[] = [];
+        const shadowFallback = localStorage.getItem(STORAGE_SHADOW_KEY);
+        if (shadowFallback) {
+          try {
+            restored = JSON.parse(shadowFallback) as Note[];
+          } catch {
+            restored = [];
+          }
+        }
+
+        if (!restored.length) {
+          const fromAutoBackup = await tryRestoreAutoBackup();
+          if (fromAutoBackup?.length) {
+            restored = fromAutoBackup;
+          }
+        }
+
+        if (!cancelled && restored.length) {
+          setNotes(restored);
+          previousNotesRef.current = restored;
+          addToast('Recovered notes from local backup after storage error', 'info');
+        } else {
+          addToast('Unable to load saved notes', 'error');
+        }
       } finally {
         if (!cancelled) {
           hasLoadedRef.current = true;
+          runAnalysisQueue();
         }
       }
     };
@@ -420,7 +625,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [addToast]);
+  }, [addToast, persistAnalysisQueueStateSafely, runAnalysisQueue, tryRestoreAutoBackup]);
 
   useEffect(() => {
     if (!hasLoadedRef.current) return;
@@ -430,7 +635,15 @@ function App() {
     const ops = buildOps(prev, next);
 
     previousNotesRef.current = next;
+    writeShadowSnapshot(next);
+    void runAutoBackupIfDue(next);
     if (ops.length === 0) return;
+
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    } catch (error) {
+      console.error('Failed to update localStorage fallback snapshot', error);
+    }
 
     persistChainRef.current = persistChainRef.current
       .then(async () => {
@@ -448,7 +661,7 @@ function App() {
         incrementMetric('persist_failures');
         addToast('Storage issue — some changes may not be saved', 'error');
       });
-  }, [notes, addToast]);
+  }, [notes, addToast, runAutoBackupIfDue, writeShadowSnapshot]);
 
   // --- Offline Detection ---
   useEffect(() => {
@@ -461,6 +674,27 @@ function App() {
       window.removeEventListener('offline', handleOffline);
     };
   }, []);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushPersistentState();
+      }
+    };
+
+    const handlePageHide = () => flushPersistentState();
+    const handleBeforeUnload = () => flushPersistentState();
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [flushPersistentState]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -507,28 +741,53 @@ function App() {
   }, [refreshAiAuth]);
 
   useEffect(() => {
+    if (!isProxyEnabled() || !aiAuth.connected || !aiAuth.expiresAt) {
+      aiExpiryWarnedForRef.current = null;
+      return;
+    }
+
+    const msRemaining = aiAuth.expiresAt - Date.now();
+    if (msRemaining <= 0) {
+      setAiDegradedMessage('Capture-only mode — AI session expired. Reconnect your key in Settings.');
+      return;
+    }
+
+    if (msRemaining > AI_EXPIRY_WARN_MS) return;
+    if (aiExpiryWarnedForRef.current === aiAuth.expiresAt) return;
+
+    aiExpiryWarnedForRef.current = aiAuth.expiresAt;
+    addToast('AI session expires soon — reconnect now to avoid interruptions.', 'info', {
+      label: 'Open',
+      onClick: () => setIsDrawerOpen(true),
+    });
+  }, [aiAuth, addToast]);
+
+  useEffect(() => {
     if (!aiAuth.connected || deferredAnalysisRef.current.length === 0) return;
     pendingAnalysisRef.current.push(...deferredAnalysisRef.current.splice(0, deferredAnalysisRef.current.length));
+    persistAnalysisQueueStateSafely();
     runAnalysisQueue();
-  }, [aiAuth.connected, runAnalysisQueue]);
+  }, [aiAuth.connected, persistAnalysisQueueStateSafely, runAnalysisQueue]);
 
   useEffect(() => {
     if (isOffline) return;
     if (transientReplayQueueRef.current.length === 0) return;
     pendingAnalysisRef.current.push(...transientReplayQueueRef.current.splice(0, transientReplayQueueRef.current.length));
+    persistAnalysisQueueStateSafely();
     runAnalysisQueue();
-  }, [isOffline, runAnalysisQueue]);
+  }, [isOffline, persistAnalysisQueueStateSafely, runAnalysisQueue]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
       if (isOffline) return;
       if (transientReplayQueueRef.current.length === 0) return;
       pendingAnalysisRef.current.push(...transientReplayQueueRef.current.splice(0, transientReplayQueueRef.current.length));
+      persistAnalysisQueueStateSafely();
       runAnalysisQueue();
     }, 60_000);
 
     return () => window.clearInterval(interval);
-  }, [isOffline, runAnalysisQueue]);
+  }, [isOffline, persistAnalysisQueueStateSafely, runAnalysisQueue]);
 
   useEffect(() => {
     if (backupReminderShownRef.current) return;
@@ -1027,12 +1286,25 @@ function App() {
   }, [notes, addToast]);
 
   const handleClearData = useCallback(() => {
+    for (const controller of analysisControllersRef.current.values()) {
+      controller.abort();
+    }
+    analysisControllersRef.current.clear();
+    pendingAnalysisRef.current = [];
+    deferredAnalysisRef.current = [];
+    transientReplayQueueRef.current = [];
+    persistAnalysisQueueStateSafely();
+
     setNotes([]);
     localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(STORAGE_SHADOW_KEY);
+    localStorage.removeItem(AUTO_BACKUP_PAYLOAD_KEY);
+    localStorage.removeItem(AUTO_BACKUP_LAST_AT_KEY);
+    localStorage.removeItem(AUTO_BACKUP_SECRET_KEY);
     previousNotesRef.current = [];
     resetNotesStore().catch(error => console.error('Failed to clear IndexedDB store', error));
     addToast('All data cleared', 'info');
-  }, [addToast]);
+  }, [addToast, persistAnalysisQueueStateSafely]);
 
   const handleImportNotes = useCallback((newNotes: Note[]) => {
     setNotes(prev => {
@@ -1246,9 +1518,10 @@ function App() {
       setAiErrorMessage(null);
       setAiDegradedMessage(null);
       pendingAnalysisRef.current.push(...deferredAnalysisRef.current.splice(0, deferredAnalysisRef.current.length));
+      persistAnalysisQueueStateSafely();
       runAnalysisQueue();
     },
-    [runAnalysisQueue]
+    [persistAnalysisQueueStateSafely, runAnalysisQueue]
   );
 
   const handleDisconnectAI = useCallback(async () => {
