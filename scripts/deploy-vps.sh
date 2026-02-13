@@ -183,8 +183,11 @@ fi
 
 echo "==> Applying database migrations"
 if ! docker compose exec -T api npm run db:migrate; then
-  collect_runtime_diagnostics
-  exit 1
+  echo "==> drizzle migrate failed; applying SQL baseline fallback"
+  if ! docker compose exec -T postgres psql -U postgres -d pocketbrain < server/drizzle/0000_initial.sql; then
+    collect_runtime_diagnostics
+    exit 1
+  fi
 fi
 
 API_READY_FILE="/tmp/pocketbrain-api-ready.json"
