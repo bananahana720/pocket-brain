@@ -6,9 +6,9 @@ import * as schema from './schema.js';
 
 const pool = new Pool({
   connectionString: env.DATABASE_URL,
-  max: 20,
-  idleTimeoutMillis: 30_000,
-  connectionTimeoutMillis: 5_000,
+  max: env.PG_POOL_MAX,
+  idleTimeoutMillis: env.PG_POOL_IDLE_TIMEOUT_MS,
+  connectionTimeoutMillis: env.PG_POOL_CONNECTION_TIMEOUT_MS,
 });
 
 export const db = drizzle(pool, { schema });

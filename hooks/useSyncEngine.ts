@@ -29,7 +29,15 @@ import {
 } from '../storage/notesStore';
 import { incrementMetric } from '../utils/telemetry';
 
-export type SyncStatus = 'disabled' | 'syncing' | 'synced' | 'offline' | 'conflict' | 'blocked' | 'degraded';
+export type SyncStatus =
+  | 'disabled'
+  | 'syncing'
+  | 'synced'
+  | 'offline'
+  | 'conflict'
+  | 'blocked'
+  | 'degraded'
+  | 'polling';
 
 const SYNC_FIELD_KEYS: Array<keyof Note> = [
   'content',
@@ -56,6 +64,10 @@ const CONFLICT_LOOP_THRESHOLD = 2;
 const SYNC_QUEUE_WARNING_THROTTLE_MS = 60_000;
 const SYNC_RETRY_BASE_MS = 1_000;
 const SYNC_RETRY_MAX_MS = 30_000;
+const SYNC_STREAM_FAILURE_THRESHOLD = 3;
+const SYNC_STREAM_CONTINUOUS_FAILURE_MS = 90_000;
+const SYNC_REGULAR_INTERVAL_MS = 30_000;
+const SYNC_POLLING_INTERVAL_MS = 15_000;
 
 function isArrayEqual(a: unknown[], b: unknown[]): boolean {
   if (a.length !== b.length) return false;
@@ -224,6 +236,7 @@ export function useSyncEngine(args: {
   const [conflicts, setConflicts] = useState<SyncConflict[]>([]);
   const [devices, setDevices] = useState<DeviceSession[]>([]);
   const [currentDeviceId, setCurrentDeviceId] = useState<string | null>(null);
+  const [isStreamFallbackActive, setIsStreamFallbackActive] = useState(false);
   const [syncBackpressure, setSyncBackpressure] = useState<SyncBackpressure>({
     blocked: false,
     pendingOps: 0,
@@ -251,6 +264,9 @@ export function useSyncEngine(args: {
   const retryTimerRef = useRef<number | null>(null);
   const pullLatestRef = useRef<() => Promise<void>>(async () => {});
   const flushPushQueueRef = useRef<() => Promise<void>>(async () => {});
+  const streamFailureCountRef = useRef(0);
+  const streamFailureSinceRef = useRef<number | null>(null);
+  const streamFallbackActiveRef = useRef(false);
 
   useEffect(() => {
     notesRef.current = notes;
@@ -298,6 +314,52 @@ export function useSyncEngine(args: {
     }
     setSyncStatus(next);
   }, []);
+
+  const resetStreamFailureTracking = useCallback(() => {
+    streamFailureCountRef.current = 0;
+    streamFailureSinceRef.current = null;
+  }, []);
+
+  const setStreamFallbackMode = useCallback((active: boolean) => {
+    if (streamFallbackActiveRef.current === active) {
+      return;
+    }
+
+    streamFallbackActiveRef.current = active;
+    setIsStreamFallbackActive(active);
+    incrementMetric(active ? 'sync_sse_fallback_activations' : 'sync_sse_fallback_recoveries');
+  }, []);
+
+  const activateStreamFallback = useCallback(() => {
+    setStreamFallbackMode(true);
+    setSyncStatusSafe('polling');
+  }, [setStreamFallbackMode, setSyncStatusSafe]);
+
+  const recoverStreamFallback = useCallback(() => {
+    resetStreamFailureTracking();
+    if (!streamFallbackActiveRef.current) return;
+    setStreamFallbackMode(false);
+    setSyncStatusSafe(navigator.onLine ? 'syncing' : 'offline');
+  }, [resetStreamFailureTracking, setStreamFallbackMode, setSyncStatusSafe]);
+
+  const recordStreamFailure = useCallback((): boolean => {
+    const now = Date.now();
+    streamFailureCountRef.current += 1;
+    if (streamFailureSinceRef.current === null) {
+      streamFailureSinceRef.current = now;
+    }
+
+    const firstFailureTs = streamFailureSinceRef.current;
+    const continuousFailureMs = firstFailureTs === null ? 0 : now - firstFailureTs;
+    if (
+      streamFailureCountRef.current >= SYNC_STREAM_FAILURE_THRESHOLD ||
+      continuousFailureMs >= SYNC_STREAM_CONTINUOUS_FAILURE_MS
+    ) {
+      activateStreamFallback();
+      return true;
+    }
+    return false;
+  }, [activateStreamFallback]);
 
   const resetRetryBackoff = useCallback(() => {
     retryAttemptRef.current = 0;
@@ -354,7 +416,7 @@ export function useSyncEngine(args: {
     if (nextBackpressure.blocked && navigator.onLine && conflictsRef.current.length === 0) {
       setSyncStatus('blocked');
     } else if (!nextBackpressure.blocked && wasBlocked && conflictsRef.current.length === 0) {
-      setSyncStatusSafe(navigator.onLine ? 'syncing' : 'offline');
+      setSyncStatusSafe(navigator.onLine ? (streamFallbackActiveRef.current ? 'polling' : 'syncing') : 'offline');
     }
   }, [onQueueWarning, refreshBackpressureFromQueue, setSyncStatusSafe]);
 
@@ -384,13 +446,13 @@ export function useSyncEngine(args: {
     if (queueRef.current.length === 0) {
       refreshBackpressureFromQueue(queueRef.current);
       if (conflictsRef.current.length === 0) {
-        setSyncStatusSafe('synced');
+        setSyncStatusSafe(streamFallbackActiveRef.current ? 'polling' : 'synced');
       }
       return;
     }
 
     processingRef.current = true;
-    setSyncStatusSafe('syncing');
+    setSyncStatusSafe(streamFallbackActiveRef.current ? 'polling' : 'syncing');
 
     try {
       while (queueRef.current.length > 0) {
@@ -487,7 +549,7 @@ export function useSyncEngine(args: {
 
         if (queueRef.current.length === 0) {
           const hasConflicts = manualConflicts.length > 0 || conflictsRef.current.length > 0;
-          setSyncStatusSafe(hasConflicts ? 'conflict' : 'synced');
+          setSyncStatusSafe(hasConflicts ? 'conflict' : streamFallbackActiveRef.current ? 'polling' : 'synced');
         }
       }
     } finally {
@@ -498,6 +560,7 @@ export function useSyncEngine(args: {
     enabled,
     refreshBackpressureFromQueue,
     resetRetryBackoff,
+    resetStreamFailureTracking,
     scheduleRetry,
     setNotes,
     setSyncStatusSafe,
@@ -510,7 +573,7 @@ export function useSyncEngine(args: {
       return;
     }
 
-    setSyncStatusSafe('syncing');
+    setSyncStatusSafe(streamFallbackActiveRef.current ? 'polling' : 'syncing');
 
     try {
       const result = await pullSyncChanges(cursorRef.current);
@@ -528,7 +591,7 @@ export function useSyncEngine(args: {
         incrementMetric('sync_cursor_reset_recoveries');
         onResetRecovery?.('Recovered sync state after a stale cursor reset.');
         if (conflictsRef.current.length === 0) {
-          setSyncStatusSafe('synced');
+          setSyncStatusSafe(streamFallbackActiveRef.current ? 'polling' : 'synced');
         }
         return;
       }
@@ -540,11 +603,14 @@ export function useSyncEngine(args: {
       cursorRef.current = Math.max(cursorRef.current, result.nextCursor);
       await setSyncCursor(cursorRef.current);
       if (conflictsRef.current.length === 0) {
-        setSyncStatusSafe('synced');
+        setSyncStatusSafe(streamFallbackActiveRef.current ? 'polling' : 'synced');
       }
     } catch {
       if (!navigator.onLine) {
         setSyncStatusSafe('offline');
+      } else if (streamFallbackActiveRef.current) {
+        setSyncStatusSafe('polling');
+        scheduleRetry();
       } else {
         setSyncStatusSafe('degraded');
         scheduleRetry();
@@ -558,6 +624,9 @@ export function useSyncEngine(args: {
       queueRef.current = [];
       cursorRef.current = 0;
       conflictLoopRef.current.clear();
+      streamFallbackActiveRef.current = false;
+      setIsStreamFallbackActive(false);
+      resetStreamFailureTracking();
       resetRetryBackoff();
       setConflicts([]);
       setDevices([]);
@@ -581,6 +650,9 @@ export function useSyncEngine(args: {
     initializedUserRef.current = userId;
 
     const init = async () => {
+      streamFallbackActiveRef.current = false;
+      setIsStreamFallbackActive(false);
+      resetStreamFailureTracking();
       setSyncStatusSafe('syncing');
 
       const persisted = await loadSyncState();
@@ -611,7 +683,7 @@ export function useSyncEngine(args: {
       await pullLatest();
       await flushPushQueue();
       if (!cancelled && conflictsRef.current.length === 0) {
-        setSyncStatusSafe('synced');
+        setSyncStatusSafe(streamFallbackActiveRef.current ? 'polling' : 'synced');
       }
     };
 
@@ -717,30 +789,38 @@ export function useSyncEngine(args: {
       },
       () => {
         if (navigator.onLine) {
-          setSyncStatusSafe('degraded');
+          if (recordStreamFailure()) {
+            setSyncStatusSafe('polling');
+          } else {
+            setSyncStatusSafe('degraded');
+          }
           scheduleRetry();
         }
+      },
+      () => {
+        recoverStreamFallback();
       }
     );
 
     return () => disconnect();
-  }, [enabled, pullLatest, scheduleRetry, setSyncStatusSafe]);
+  }, [enabled, pullLatest, recordStreamFailure, recoverStreamFallback, scheduleRetry, setSyncStatusSafe]);
 
   useEffect(() => {
     if (!enabled) return;
 
+    const intervalMs = isStreamFallbackActive ? SYNC_POLLING_INTERVAL_MS : SYNC_REGULAR_INTERVAL_MS;
     const interval = window.setInterval(() => {
       void pullLatest();
       void flushPushQueue();
-    }, 30_000);
+    }, intervalMs);
 
     return () => window.clearInterval(interval);
-  }, [enabled, flushPushQueue, pullLatest]);
+  }, [enabled, flushPushQueue, isStreamFallbackActive, pullLatest]);
 
   useEffect(() => {
     const onOnline = () => {
       if (!enabled) return;
-      setSyncStatusSafe('syncing');
+      setSyncStatusSafe(streamFallbackActiveRef.current ? 'polling' : 'syncing');
       void pullLatest();
       void flushPushQueue();
     };
@@ -842,6 +922,13 @@ export function useSyncEngine(args: {
     await revokeDevice(deviceId);
     await refreshDevices();
   }, [refreshDevices]);
+
+  useEffect(() => {
+    if (!enabled || !navigator.onLine) return;
+    if (streamFallbackActiveRef.current && conflictsRef.current.length === 0 && !backpressureRef.current.blocked) {
+      setSyncStatusSafe('polling');
+    }
+  }, [enabled, isStreamFallbackActive, setSyncStatusSafe]);
 
   useEffect(() => {
     if (conflicts.length > 0) {

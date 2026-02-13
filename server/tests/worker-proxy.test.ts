@@ -26,9 +26,9 @@ function createEnv(overrides: Partial<Record<string, string>> = {}) {
       },
     },
     KEY_ENCRYPTION_SECRET: '0123456789abcdef0123456789abcdef',
-    VPS_API_ORIGIN: 'http://vps.example',
-    VPS_PROXY_TIMEOUT_MS: '10000',
-    VPS_PROXY_RETRIES: '2',
+    VPS_API_ORIGIN: 'https://vps.example',
+    VPS_PROXY_TIMEOUT_MS: '7000',
+    VPS_PROXY_RETRIES: '1',
     ...overrides,
   } as any;
 }
@@ -72,6 +72,8 @@ describe('worker /api/v2 proxy resilience', () => {
     const payload = await response.json();
     expect(payload.error.code).toBe('SERVICE_UNAVAILABLE');
     expect(payload.error.retryable).toBe(true);
+    expect(payload.error.cause).toBe('upstream_5xx');
+    expect(response.headers.get('retry-after')).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -89,7 +91,71 @@ describe('worker /api/v2 proxy resilience', () => {
     const payload = await response.json();
     expect(payload.error.code).toBe('SERVICE_UNAVAILABLE');
     expect(payload.error.retryable).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(payload.error.cause).toBe('timeout');
+    expect(response.headers.get('retry-after')).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails fast with origin_unconfigured cause when VPS_API_ORIGIN is missing', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+    const response = await worker.fetch(
+      new Request('https://worker.example/api/v2/sync/pull?cursor=0'),
+      createEnv({
+        VPS_API_ORIGIN: '',
+      })
+    );
+
+    expect(response.status).toBe(503);
+    const payload = await response.json();
+    expect(payload.error.code).toBe('SERVICE_UNAVAILABLE');
+    expect(payload.error.cause).toBe('origin_unconfigured');
+    expect(payload.error.retryable).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('requires a 32-character encryption secret when NODE_ENV is unset', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+    const response = await worker.fetch(
+      new Request('https://worker.example/api/v1/auth/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'gemini',
+          apiKey: 'test-key',
+        }),
+      }),
+      createEnv({
+        KEY_ENCRYPTION_SECRET: '0123456789abcdef',
+        NODE_ENV: '',
+      })
+    );
+
+    expect(response.status).toBe(500);
+    const payload = await response.json();
+    expect(payload.error.code).toBe('INTERNAL_ERROR');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('exposes per-cause upstream/provider counters in diagnostics metrics', async () => {
+    const response = await worker.fetch(
+      new Request('http://127.0.0.1/api/v1/metrics'),
+      createEnv()
+    );
+
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload.failureCauses?.upstream).toMatchObject({
+      origin_unconfigured: expect.any(Number),
+      timeout: expect.any(Number),
+      network_error: expect.any(Number),
+      upstream_5xx: expect.any(Number),
+      circuit_open: expect.any(Number),
+    });
+    expect(payload.failureCauses?.provider).toMatchObject({
+      provider_timeout: expect.any(Number),
+      provider_5xx: expect.any(Number),
+      provider_circuit_open: expect.any(Number),
+    });
   });
 
   it('opens a short VPS proxy circuit after repeated failures and then fails fast', async () => {
@@ -119,6 +185,7 @@ describe('worker /api/v2 proxy resilience', () => {
     expect(fastFail.status).toBe(503);
     expect(payload.error.code).toBe('SERVICE_UNAVAILABLE');
     expect(payload.error.retryable).toBe(true);
+    expect(payload.error.cause).toBe('circuit_open');
     expect(fetchMock.mock.calls.length).toBe(callsBeforeOpenReject);
   });
 });

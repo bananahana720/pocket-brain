@@ -42,6 +42,11 @@ const statusConfig: Record<SyncStatus, { label: string; className: string; icon:
     className: 'text-orange-700 border-orange-200 bg-orange-50 dark:text-orange-300 dark:border-orange-800/70 dark:bg-orange-900/30',
     icon: <ShieldAlert className="w-3.5 h-3.5" />,
   },
+  polling: {
+    label: 'Polling',
+    className: 'text-cyan-700 border-cyan-200 bg-cyan-50 dark:text-cyan-300 dark:border-cyan-800/70 dark:bg-cyan-900/30',
+    icon: <RefreshCw className="w-3.5 h-3.5" />,
+  },
 };
 
 const SyncStatusBadge: React.FC<SyncStatusBadgeProps> = ({ status }) => {

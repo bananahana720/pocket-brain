@@ -51,7 +51,7 @@ interface DrawerProps {
   userEmail: string | null;
   onSignIn: () => void;
   onSignOut: () => Promise<void>;
-  syncStatus: 'disabled' | 'syncing' | 'synced' | 'offline' | 'conflict' | 'degraded';
+  syncStatus: 'disabled' | 'syncing' | 'synced' | 'offline' | 'conflict' | 'blocked' | 'degraded' | 'polling';
   devices: DeviceSession[];
   currentDeviceId: string | null;
   onRefreshDevices: () => Promise<void>;
@@ -215,6 +215,28 @@ const Drawer: React.FC<DrawerProps> = ({
       topTags: sorted.slice(0, 5),
     };
   }, [isOpen, notes]);
+
+  const syncStatusLabel = useMemo(() => {
+    switch (syncStatus) {
+      case 'polling':
+        return 'degraded (polling every 15s)';
+      case 'degraded':
+        return 'degraded';
+      case 'blocked':
+        return 'blocked';
+      case 'syncing':
+        return 'syncing';
+      case 'synced':
+        return 'synced';
+      case 'offline':
+        return 'offline';
+      case 'conflict':
+        return 'conflict';
+      case 'disabled':
+      default:
+        return 'local only';
+    }
+  }, [syncStatus]);
 
   if (!isOpen) return null;
 
@@ -402,7 +424,7 @@ const Drawer: React.FC<DrawerProps> = ({
         <div className="mission-note mb-6 rounded-xl border border-zinc-200/70 p-4 dark:border-zinc-700/70">
           <div className="mb-3 flex items-center justify-between gap-2">
             <h3 className="font-display text-lg leading-none text-zinc-600 dark:text-zinc-300">Account + Sync</h3>
-            <span className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">{syncStatus}</span>
+            <span className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">{syncStatusLabel}</span>
           </div>
 
           {!isAuthLoaded ? (

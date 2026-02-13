@@ -78,7 +78,8 @@ export async function revokeDevice(deviceId: string): Promise<void> {
 
 export function openSyncEventStream(
   onCursor: (cursor: number) => void,
-  onError: () => void
+  onError: () => void,
+  onOpen?: () => void
 ): () => void {
   const BASE_RECONNECT_MS = 1_000;
   const MAX_RECONNECT_MS = 30_000;
@@ -130,6 +131,7 @@ export function openSyncEventStream(
     source = new EventSource('/api/v2/events', { withCredentials: true });
     source.onopen = () => {
       reconnectAttempts = 0;
+      onOpen?.();
     };
     source.addEventListener('sync', event => {
       try {

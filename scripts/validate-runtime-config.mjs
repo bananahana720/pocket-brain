@@ -98,6 +98,30 @@ function isPlaceholderSecret(value) {
   );
 }
 
+function isLoopbackHost(hostname) {
+  const normalized = String(hostname || '').trim().toLowerCase();
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '[::1]' || normalized === '::1';
+}
+
+function validateHttpsOrigin(value) {
+  if (!value) {
+    return { ok: false, reason: 'missing' };
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return { ok: false, reason: 'invalid' };
+  }
+
+  if (parsed.protocol !== 'https:' && !isLoopbackHost(parsed.hostname)) {
+    return { ok: false, reason: 'insecure' };
+  }
+
+  return { ok: true, reason: 'ok' };
+}
+
 function validateServerConfig(errors) {
   const fromFile = parseEnvFile(SERVER_ENV_PATH);
   const config = {
@@ -120,8 +144,11 @@ function validateServerConfig(errors) {
 
   const keySecret = String(config.KEY_ENCRYPTION_SECRET || '').trim();
   const hasKeySecret = !!keySecret;
-  if ((isProduction || hasKeySecret) && (isPlaceholderSecret(keySecret) || keySecret.length < 16)) {
-    errors.push('server: KEY_ENCRYPTION_SECRET must be set to a non-placeholder value with at least 16 chars');
+  const keySecretMinLen = isProduction ? 32 : 16;
+  if ((isProduction || hasKeySecret) && (isPlaceholderSecret(keySecret) || keySecret.length < keySecretMinLen)) {
+    errors.push(
+      `server: KEY_ENCRYPTION_SECRET must be set to a non-placeholder value with at least ${keySecretMinLen} chars`
+    );
   }
 
   const streamSecret = String(config.STREAM_TICKET_SECRET || keySecret).trim();
@@ -156,9 +183,26 @@ function validateWorkerConfig(errors) {
     errors.push('worker: CLERK_JWKS_URL, CLERK_ISSUER, and CLERK_AUDIENCE must be set together');
   }
 
-  const keySecret = String(process.env.KEY_ENCRYPTION_SECRET || '').trim();
-  if (keySecret && (isPlaceholderSecret(keySecret) || keySecret.length < 16)) {
-    errors.push('worker: KEY_ENCRYPTION_SECRET in environment must be non-placeholder and at least 16 chars when provided');
+  const keySecret = String(config.KEY_ENCRYPTION_SECRET || process.env.KEY_ENCRYPTION_SECRET || '').trim();
+  const keySecretMinLen = isProduction ? 32 : 16;
+  if ((isProduction || keySecret) && (isPlaceholderSecret(keySecret) || keySecret.length < keySecretMinLen)) {
+    errors.push(
+      `worker: KEY_ENCRYPTION_SECRET must be non-placeholder and at least ${keySecretMinLen} chars in ${
+        isProduction ? 'production' : 'runtime env'
+      }`
+    );
+  }
+
+  const vpsOrigin = String(config.VPS_API_ORIGIN || '').trim();
+  if (isProduction && !vpsOrigin) {
+    errors.push('worker: VPS_API_ORIGIN must be set in production');
+  }
+
+  if (vpsOrigin) {
+    const originValidation = validateHttpsOrigin(vpsOrigin);
+    if (!originValidation.ok) {
+      errors.push('worker: VPS_API_ORIGIN must be a valid absolute URL and use https:// outside loopback hosts');
+    }
   }
 }
 

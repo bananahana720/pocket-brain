@@ -181,8 +181,8 @@ if ! ensure_database_exists; then
   exit 1
 fi
 
-echo "==> Applying database schema"
-if ! docker compose exec -T postgres psql -U postgres -d pocketbrain < server/drizzle/0000_initial.sql; then
+echo "==> Applying database migrations"
+if ! docker compose exec -T api npm run db:migrate; then
   collect_runtime_diagnostics
   exit 1
 fi

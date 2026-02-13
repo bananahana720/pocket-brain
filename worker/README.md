@@ -5,6 +5,7 @@ This Worker secures AI provider keys by storing encrypted keys server-side and i
 ## Required secrets
 
 - `KEY_ENCRYPTION_SECRET`: High-entropy secret used to encrypt provider API keys at rest.
+  - Production minimum: 32 characters.
 - `KEY_ENCRYPTION_SECRET_PREV` (optional during rotation): previous secret kept temporarily so existing sessions can be decrypted and re-encrypted in-place.
 
 ## Required auth vars
@@ -19,11 +20,17 @@ Set `ALLOW_INSECURE_DEV_AUTH=false` in production. Keep insecure auth enabled on
 
 ## Optional proxy vars
 
-- `VPS_API_ORIGIN` (required for `/api/v2/*` passthrough, for example `http://127.0.0.1:8788` locally)
-- `VPS_PROXY_TIMEOUT_MS` (default `10000`): timeout for Worker `/api/v2/*` upstream calls.
-- `VPS_PROXY_RETRIES` (default `2`): retry attempts for transient `/api/v2/*` failures (except `/api/v2/events` stream handshake).
+- `VPS_API_ORIGIN` (required in production for `/api/v2/*` passthrough)
+  - Use `https://` for non-loopback hosts.
+  - Local loopback example: `http://127.0.0.1:8788`.
+- `VPS_PROXY_TIMEOUT_MS` (default `7000`): timeout for Worker `/api/v2/*` upstream calls.
+- `VPS_PROXY_RETRIES` (default `1`): retry attempts for transient `/api/v2/*` failures (except `/api/v2/events` stream handshake).
 - Worker also applies a short in-memory circuit-breaker for repeated `/api/v2/*` upstream failures to fail fast during outages.
+  - opens after 3 consecutive failures
+  - open window 20 seconds
   - while open, `/api/v2/*` failures include `Retry-After` to guide client backoff.
+  - additive `error.cause` values for `/api/v2/*`: `origin_unconfigured`, `timeout`, `network_error`, `upstream_5xx`, `circuit_open`
+  - additive `error.cause` values for `/api/v1/ai/*` provider outages: `provider_timeout`, `provider_5xx`, `provider_circuit_open`
 
 ## Required KV namespace
 
@@ -62,6 +69,7 @@ For local JWT verification, set `ALLOW_INSECURE_DEV_AUTH=false` and provide all 
 
 Diagnostics endpoint (`GET /api/v1/metrics`) now includes:
 - proxy circuit metrics (`vpsProxyCircuitOpens`, `vpsProxyCircuitRejects`)
+- failure-cause counters for upstream and provider outages (`failureCauses.upstream`, `failureCauses.provider`)
 - current circuit state (`open`, `openUntil`, `remainingMs`) for local troubleshooting.
 
 In a second terminal (app):
@@ -83,3 +91,14 @@ npm run worker:deploy
 ```
 
 Then route `/api/*` traffic to this Worker in Cloudflare so the frontend can call same-origin API endpoints.
+
+## Monthly Secret Rotation Drill
+
+1. Add overlap secret:
+   `npx wrangler secret put KEY_ENCRYPTION_SECRET_PREV --config worker/wrangler.toml`
+2. Set new active secret:
+   `npm run worker:secret:set`
+3. Deploy:
+   `npm run worker:deploy`
+4. After session TTL window passes, remove overlap:
+   `npx wrangler secret delete KEY_ENCRYPTION_SECRET_PREV --config worker/wrangler.toml`

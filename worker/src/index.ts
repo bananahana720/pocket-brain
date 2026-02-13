@@ -36,6 +36,7 @@ interface Env {
   CONTROL_PLANE_DO: DurableObjectNamespace;
   KEY_ENCRYPTION_SECRET: string;
   KEY_ENCRYPTION_SECRET_PREV?: string;
+  NODE_ENV?: string;
   DEFAULT_MODEL?: string;
   VPS_API_ORIGIN?: string;
   CLERK_JWKS_URL?: string;
@@ -48,6 +49,9 @@ interface Env {
 
 type AIProvider = 'gemini' | 'openrouter';
 type CleanupMode = 'single' | 'batch';
+type UpstreamFailureCause = 'origin_unconfigured' | 'timeout' | 'network_error' | 'upstream_5xx' | 'circuit_open';
+type ProviderFailureCause = 'provider_timeout' | 'provider_5xx' | 'provider_circuit_open';
+type FailureCause = UpstreamFailureCause | ProviderFailureCause;
 
 type Note = {
   id: string;
@@ -110,10 +114,10 @@ const RATE_LIMIT_MAX_REQUESTS = 45;
 const RATE_LIMIT_BLOCK_MS = 60_000;
 const CIRCUIT_FAILURE_THRESHOLD = 5;
 const CIRCUIT_OPEN_MS = 30_000;
-const DEFAULT_VPS_PROXY_TIMEOUT_MS = 10_000;
-const DEFAULT_VPS_PROXY_RETRIES = 2;
-const VPS_PROXY_CIRCUIT_FAILURE_THRESHOLD = 5;
-const VPS_PROXY_CIRCUIT_OPEN_MS = 15_000;
+const DEFAULT_VPS_PROXY_TIMEOUT_MS = 7_000;
+const DEFAULT_VPS_PROXY_RETRIES = 1;
+const VPS_PROXY_CIRCUIT_FAILURE_THRESHOLD = 3;
+const VPS_PROXY_CIRCUIT_OPEN_MS = 20_000;
 
 type RateLimitEntry = {
   windowStart: number;
@@ -176,6 +180,18 @@ const metrics: Metrics = {
   vpsProxyCircuitOpens: 0,
   vpsProxyCircuitRejects: 0,
 };
+const upstreamFailureCauses: Record<UpstreamFailureCause, number> = {
+  origin_unconfigured: 0,
+  timeout: 0,
+  network_error: 0,
+  upstream_5xx: 0,
+  circuit_open: 0,
+};
+const providerFailureCauses: Record<ProviderFailureCause, number> = {
+  provider_timeout: 0,
+  provider_5xx: 0,
+  provider_circuit_open: 0,
+};
 
 const rateLimits = new Map<string, RateLimitEntry>();
 const providerCircuit: Record<AIProvider, CircuitState> = {
@@ -194,14 +210,96 @@ class ApiError extends Error {
   code: string;
   retryable: boolean;
   headers?: Record<string, string>;
+  failureCause?: FailureCause;
 
-  constructor(status: number, code: string, message: string, retryable = false, headers?: Record<string, string>) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    retryable = false,
+    headers?: Record<string, string>,
+    failureCause?: FailureCause
+  ) {
     super(message);
     this.status = status;
     this.code = code;
     this.retryable = retryable;
     this.headers = headers;
+    this.failureCause = failureCause;
   }
+}
+
+function getEncryptionSecretMinLength(env: Env): number {
+  const nodeEnv = String(env.NODE_ENV || '').trim().toLowerCase();
+  if (nodeEnv === 'development' || nodeEnv === 'test') {
+    return 16;
+  }
+  return 32;
+}
+
+function isUpstreamFailureCause(value: unknown): value is UpstreamFailureCause {
+  return (
+    value === 'origin_unconfigured' ||
+    value === 'timeout' ||
+    value === 'network_error' ||
+    value === 'upstream_5xx' ||
+    value === 'circuit_open'
+  );
+}
+
+function isProviderFailureCause(value: unknown): value is ProviderFailureCause {
+  return value === 'provider_timeout' || value === 'provider_5xx' || value === 'provider_circuit_open';
+}
+
+function recordFailureCause(cause: FailureCause | undefined): void {
+  if (!cause) return;
+  if (isUpstreamFailureCause(cause)) {
+    upstreamFailureCauses[cause] += 1;
+    return;
+  }
+  if (isProviderFailureCause(cause)) {
+    providerFailureCauses[cause] += 1;
+  }
+}
+
+function getVpsProxyUnavailableHeaders(retryAfterSeconds: number): Record<string, string> {
+  return {
+    'Retry-After': String(Math.max(1, Math.floor(retryAfterSeconds))),
+  };
+}
+
+function getValidatedVpsApiOrigin(env: Env): string {
+  const origin = (env.VPS_API_ORIGIN || '').trim();
+  if (!origin) {
+    throw new ApiError(503, 'SERVICE_UNAVAILABLE', 'VPS API origin is not configured', false, undefined, 'origin_unconfigured');
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    throw new ApiError(
+      503,
+      'SERVICE_UNAVAILABLE',
+      'VPS API origin is invalid. Use an absolute URL.',
+      false,
+      undefined,
+      'origin_unconfigured'
+    );
+  }
+
+  if (parsed.protocol !== 'https:' && !isLoopbackHost(parsed.hostname)) {
+    throw new ApiError(
+      503,
+      'SERVICE_UNAVAILABLE',
+      'VPS API origin must use https:// outside loopback hosts.',
+      false,
+      undefined,
+      'origin_unconfigured'
+    );
+  }
+
+  return origin;
 }
 
 function doJson(payload: unknown, status = 200): Response {
@@ -370,13 +468,16 @@ function errorResponse(error: unknown): Response {
     if (error.status >= 500) {
       metrics.providerFailures += 1;
     }
+    recordFailureCause(error.failureCause);
+    const payload = {
+      code: error.code,
+      message: error.message,
+      retryable: error.retryable,
+      ...(error.failureCause ? { cause: error.failureCause } : {}),
+    };
     return jsonResponse(
       {
-        error: {
-          code: error.code,
-          message: error.message,
-          retryable: error.retryable,
-        },
+        error: payload,
       },
       error.status,
       error.headers
@@ -398,19 +499,26 @@ function errorResponse(error: unknown): Response {
 async function proxyToVps(request: Request, env: Env, pathname: string): Promise<Response> {
   if (vpsProxyCircuit.openUntil > Date.now()) {
     metrics.vpsProxyCircuitRejects += 1;
+    metrics.vpsProxyFailures += 1;
     const retryAfterSeconds = Math.max(1, Math.ceil((vpsProxyCircuit.openUntil - Date.now()) / 1000));
     throw new ApiError(
       503,
       'SERVICE_UNAVAILABLE',
       'Sync service is temporarily unavailable. Please retry shortly.',
       true,
-      { 'Retry-After': String(retryAfterSeconds) }
+      getVpsProxyUnavailableHeaders(retryAfterSeconds),
+      'circuit_open'
     );
   }
 
-  const origin = (env.VPS_API_ORIGIN || '').trim();
-  if (!origin) {
-    throw new ApiError(503, 'SERVICE_UNAVAILABLE', 'VPS API origin is not configured', true);
+  let origin = '';
+  try {
+    origin = getValidatedVpsApiOrigin(env);
+  } catch (error) {
+    if (error instanceof ApiError && error.failureCause === 'origin_unconfigured') {
+      metrics.vpsProxyFailures += 1;
+    }
+    throw error;
   }
 
   const timeoutMs = (() => {
@@ -478,7 +586,8 @@ async function proxyToVps(request: Request, env: Env, pathname: string): Promise
           'SERVICE_UNAVAILABLE',
           'Sync service is temporarily unavailable. Please retry shortly.',
           true,
-          { 'Retry-After': String(retryAfterSeconds) }
+          getVpsProxyUnavailableHeaders(retryAfterSeconds),
+          'upstream_5xx'
         );
       }
 
@@ -520,7 +629,8 @@ async function proxyToVps(request: Request, env: Env, pathname: string): Promise
         'SERVICE_UNAVAILABLE',
         'Sync service is temporarily unavailable. Please retry shortly.',
         true,
-        { 'Retry-After': String(retryAfterSeconds) }
+        getVpsProxyUnavailableHeaders(retryAfterSeconds),
+        isTimeout ? 'timeout' : 'network_error'
       );
     } finally {
       cleanup();
@@ -540,7 +650,8 @@ async function proxyToVps(request: Request, env: Env, pathname: string): Promise
     'SERVICE_UNAVAILABLE',
     'Sync service is temporarily unavailable. Please retry shortly.',
     true,
-    { 'Retry-After': String(retryAfterSeconds) }
+    getVpsProxyUnavailableHeaders(retryAfterSeconds),
+    'upstream_5xx'
   );
 }
 
@@ -780,7 +891,8 @@ function requireJsonContentType(request: Request): void {
 
 function ensureEncryptionSecretConfigured(env: Env): void {
   const secret = typeof env.KEY_ENCRYPTION_SECRET === 'string' ? env.KEY_ENCRYPTION_SECRET.trim() : '';
-  if (!secret || secret.length < 16) {
+  const minLength = getEncryptionSecretMinLength(env);
+  if (!secret || secret.length < minLength) {
     throw new ApiError(500, 'INTERNAL_ERROR', 'AI proxy encryption secret is not configured');
   }
 }
@@ -830,7 +942,15 @@ function isRetryableProviderError(error: unknown): boolean {
 function ensureCircuitClosedLocal(provider: AIProvider): void {
   const state = providerCircuit[provider];
   if (state.openUntil > Date.now()) {
-    throw new ApiError(503, 'PROVIDER_UNAVAILABLE', 'Provider is temporarily unavailable. Please retry shortly.', true);
+    const retryAfterSeconds = Math.max(1, Math.ceil((state.openUntil - Date.now()) / 1000));
+    throw new ApiError(
+      503,
+      'PROVIDER_UNAVAILABLE',
+      'Provider is temporarily unavailable. Please retry shortly.',
+      true,
+      { 'Retry-After': String(retryAfterSeconds) },
+      'provider_circuit_open'
+    );
   }
 }
 
@@ -894,7 +1014,15 @@ async function ensureCircuitClosed(provider: AIProvider, env: Env): Promise<void
       { now: Date.now() }
     );
     if (result.open) {
-      throw new ApiError(503, 'PROVIDER_UNAVAILABLE', 'Provider is temporarily unavailable. Please retry shortly.', true);
+      const retryAfterSeconds = Math.max(1, Math.ceil((result.openUntil - Date.now()) / 1000));
+      throw new ApiError(
+        503,
+        'PROVIDER_UNAVAILABLE',
+        'Provider is temporarily unavailable. Please retry shortly.',
+        true,
+        { 'Retry-After': String(retryAfterSeconds) },
+        'provider_circuit_open'
+      );
     }
   } catch (error) {
     if (error instanceof ApiError && error.code === 'PROVIDER_UNAVAILABLE') {
@@ -1184,11 +1312,14 @@ async function callGemini(apiKey: string, prompt: string): Promise<string> {
 
     if (!response.ok) {
       const body = await response.text();
+      const isProviderOutage = response.status >= 500;
       throw new ApiError(
         response.status,
         response.status === 401 ? 'AUTH_REQUIRED' : response.status === 429 ? 'RATE_LIMITED' : 'PROVIDER_UNAVAILABLE',
         `Gemini request failed: ${body.slice(0, 200)}`,
-        isTransientStatus(response.status)
+        isTransientStatus(response.status),
+        isProviderOutage ? { 'Retry-After': '5' } : undefined,
+        isProviderOutage ? 'provider_5xx' : undefined
       );
     }
 
@@ -1202,9 +1333,9 @@ async function callGemini(apiKey: string, prompt: string): Promise<string> {
     if (error instanceof ApiError) throw error;
     if (error instanceof DOMException && error.name === 'TimeoutError') {
       metrics.timeouts += 1;
-      throw new ApiError(504, 'TIMEOUT', 'Provider request timed out', true);
+      throw new ApiError(504, 'TIMEOUT', 'Provider request timed out', true, { 'Retry-After': '5' }, 'provider_timeout');
     }
-    throw new ApiError(503, 'NETWORK', 'Network error while contacting Gemini', true);
+    throw new ApiError(503, 'NETWORK', 'Network error while contacting Gemini', true, { 'Retry-After': '5' }, 'provider_timeout');
   } finally {
     cleanup();
   }
@@ -1251,11 +1382,14 @@ async function callGeminiTranscription(
 
     if (!response.ok) {
       const body = await response.text();
+      const isProviderOutage = response.status >= 500;
       throw new ApiError(
         response.status,
         response.status === 401 ? 'AUTH_REQUIRED' : response.status === 429 ? 'RATE_LIMITED' : 'PROVIDER_UNAVAILABLE',
         `Gemini transcription failed: ${body.slice(0, 200)}`,
-        isTransientStatus(response.status)
+        isTransientStatus(response.status),
+        isProviderOutage ? { 'Retry-After': '5' } : undefined,
+        isProviderOutage ? 'provider_5xx' : undefined
       );
     }
 
@@ -1277,9 +1411,9 @@ async function callGeminiTranscription(
     if (error instanceof ApiError) throw error;
     if (error instanceof DOMException && error.name === 'TimeoutError') {
       metrics.timeouts += 1;
-      throw new ApiError(504, 'TIMEOUT', 'Provider request timed out', true);
+      throw new ApiError(504, 'TIMEOUT', 'Provider request timed out', true, { 'Retry-After': '5' }, 'provider_timeout');
     }
-    throw new ApiError(503, 'NETWORK', 'Network error while contacting Gemini', true);
+    throw new ApiError(503, 'NETWORK', 'Network error while contacting Gemini', true, { 'Retry-After': '5' }, 'provider_timeout');
   } finally {
     cleanup();
   }
@@ -1304,11 +1438,14 @@ async function callOpenRouter(apiKey: string, prompt: string, model = 'google/ge
 
     if (!response.ok) {
       const body = await response.text();
+      const isProviderOutage = response.status >= 500;
       throw new ApiError(
         response.status,
         response.status === 401 ? 'AUTH_REQUIRED' : response.status === 429 ? 'RATE_LIMITED' : 'PROVIDER_UNAVAILABLE',
         `OpenRouter request failed: ${body.slice(0, 200)}`,
-        isTransientStatus(response.status)
+        isTransientStatus(response.status),
+        isProviderOutage ? { 'Retry-After': '5' } : undefined,
+        isProviderOutage ? 'provider_5xx' : undefined
       );
     }
 
@@ -1323,9 +1460,9 @@ async function callOpenRouter(apiKey: string, prompt: string, model = 'google/ge
     if (error instanceof ApiError) throw error;
     if (error instanceof DOMException && error.name === 'TimeoutError') {
       metrics.timeouts += 1;
-      throw new ApiError(504, 'TIMEOUT', 'Provider request timed out', true);
+      throw new ApiError(504, 'TIMEOUT', 'Provider request timed out', true, { 'Retry-After': '5' }, 'provider_timeout');
     }
-    throw new ApiError(503, 'NETWORK', 'Network error while contacting OpenRouter', true);
+    throw new ApiError(503, 'NETWORK', 'Network error while contacting OpenRouter', true, { 'Retry-After': '5' }, 'provider_timeout');
   } finally {
     cleanup();
   }
@@ -1667,6 +1804,10 @@ export default {
         const remainingMs = Math.max(0, vpsProxyCircuit.openUntil - Date.now());
         return jsonResponse({
           metrics,
+          failureCauses: {
+            upstream: { ...upstreamFailureCauses },
+            provider: { ...providerFailureCauses },
+          },
           vpsProxyCircuit: {
             open: remainingMs > 0,
             openUntil: vpsProxyCircuit.openUntil,

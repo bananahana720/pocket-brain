@@ -58,6 +58,22 @@ describe('env config parsing', () => {
     expect(module.env.REQUIRE_REDIS_FOR_READY).toBe(false);
   });
 
+  it('uses 45-day note-change retention and current PG pool defaults', async () => {
+    setEnv({
+      NODE_ENV: 'test',
+      NOTE_CHANGES_RETENTION_MS: undefined,
+      PG_POOL_MAX: undefined,
+      PG_POOL_IDLE_TIMEOUT_MS: undefined,
+      PG_POOL_CONNECTION_TIMEOUT_MS: undefined,
+    });
+
+    const module = await import('../src/config/env.js');
+    expect(module.env.NOTE_CHANGES_RETENTION_MS).toBe(45 * 24 * 60 * 60 * 1000);
+    expect(module.env.PG_POOL_MAX).toBe(20);
+    expect(module.env.PG_POOL_IDLE_TIMEOUT_MS).toBe(30_000);
+    expect(module.env.PG_POOL_CONNECTION_TIMEOUT_MS).toBe(5_000);
+  });
+
   it('fails closed in production when ALLOW_INSECURE_DEV_AUTH is true', async () => {
     setEnv({
       NODE_ENV: 'production',

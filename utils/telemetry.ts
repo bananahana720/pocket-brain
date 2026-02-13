@@ -25,7 +25,9 @@ export type ClientMetricName =
   | 'sync_cursor_reset_recoveries'
   | 'sync_queue_compaction_drops'
   | 'sync_queue_block_events'
-  | 'sync_queue_blocked_mutations';
+  | 'sync_queue_blocked_mutations'
+  | 'sync_sse_fallback_activations'
+  | 'sync_sse_fallback_recoveries';
 
 interface ClientMetrics {
   counters: Record<ClientMetricName, number>;
@@ -68,6 +70,8 @@ const metrics: ClientMetrics = {
     sync_queue_compaction_drops: 0,
     sync_queue_block_events: 0,
     sync_queue_blocked_mutations: 0,
+    sync_sse_fallback_activations: 0,
+    sync_sse_fallback_recoveries: 0,
   },
   aiErrorCodes: {},
   latencies: {

@@ -173,6 +173,22 @@ echo "api_ready_status=\$API_READY_STATUS"
 echo "api_ready_summary="
 cat /tmp/pocketbrain-api-ready.json || true
 
+MIGRATION_TABLE_PRESENT=\$(docker compose exec -T postgres psql -U postgres -d pocketbrain -tAc "SELECT to_regclass('public.__drizzle_migrations') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]' || true)
+echo "migration_table_present=\$MIGRATION_TABLE_PRESENT"
+if [[ "\$MIGRATION_TABLE_PRESENT" == "t" ]]; then
+  MIGRATION_ROW=\$(docker compose exec -T postgres psql -U postgres -d pocketbrain -F \$'\\t' -A -t -c "SELECT id, hash FROM \"__drizzle_migrations\" ORDER BY created_at DESC LIMIT 1;" 2>/dev/null || true)
+  if [[ -n "\$MIGRATION_ROW" ]]; then
+    echo "migration_version=\$(printf '%s' "\$MIGRATION_ROW" | cut -f1)"
+    echo "migration_checksum=\$(printf '%s' "\$MIGRATION_ROW" | cut -f2)"
+  else
+    echo "migration_version=none"
+    echo "migration_checksum=none"
+  fi
+else
+  echo "migration_version=unavailable"
+  echo "migration_checksum=unavailable"
+fi
+
 HEALTH_STATUS=\$(curl -s -o /tmp/pocketbrain-health.json -w "%{http_code}" http://127.0.0.1:8080/health || true)
 echo "health_status=\$HEALTH_STATUS"
 ROOT_STATUS=\$(curl -s -o /tmp/pocketbrain-root-body.txt -w "%{http_code}" http://127.0.0.1:8080/ || true)
