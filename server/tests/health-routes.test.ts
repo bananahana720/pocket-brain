@@ -18,7 +18,22 @@ describe('health routes', () => {
 
   it('returns ready when database is healthy', async () => {
     vi.spyOn(dbClient, 'checkDatabaseReady').mockResolvedValue(true);
-    vi.spyOn(dbClient, 'checkRedisReady').mockResolvedValue({ ok: true, status: 'ready' });
+    vi.spyOn(dbClient, 'checkRedisReady').mockResolvedValue({
+      ok: true,
+      status: 'ready',
+      checksTotal: 1,
+      failuresTotal: 0,
+      consecutiveFailures: 0,
+      lastCheckAt: Date.now(),
+      lastCheckDurationMs: 2,
+      lastSuccessAt: Date.now(),
+      lastFailureAt: null,
+      lastErrorMessage: null,
+      degraded: false,
+      degradedSinceTs: null,
+      degradedForMs: 0,
+      totalDegradedMs: 0,
+    });
 
     const response = await app.inject({
       method: 'GET',
@@ -30,14 +45,33 @@ describe('health routes', () => {
     expect(payload.ok).toBe(true);
     expect(payload.dependencies.database.ok).toBe(true);
     expect(payload.dependencies.redis.ok).toBe(true);
+    expect(payload.dependencies.redis.degraded).toBe(false);
     expect(payload.dependencies.realtime.mode).toBeDefined();
+    expect(payload.dependencies.realtime.degradedReason).toBe('NOT_INITIALIZED');
+    expect(payload.dependencies.streamTicket.replayProtectionMode).toBe('best-effort');
+    expect(payload.dependencies.streamTicket.replayStoreAvailable).toBe(true);
     expect(payload.metrics.sync.pullRequests).toBeTypeOf('number');
     expect(payload.metrics.maintenance.cyclesRun).toBeTypeOf('number');
   });
 
   it('returns 503 when database is unhealthy', async () => {
     vi.spyOn(dbClient, 'checkDatabaseReady').mockResolvedValue(false);
-    vi.spyOn(dbClient, 'checkRedisReady').mockResolvedValue({ ok: false, status: 'end' });
+    vi.spyOn(dbClient, 'checkRedisReady').mockResolvedValue({
+      ok: false,
+      status: 'end',
+      checksTotal: 1,
+      failuresTotal: 1,
+      consecutiveFailures: 1,
+      lastCheckAt: Date.now(),
+      lastCheckDurationMs: 2,
+      lastSuccessAt: null,
+      lastFailureAt: Date.now(),
+      lastErrorMessage: 'redis down',
+      degraded: true,
+      degradedSinceTs: Date.now() - 1_000,
+      degradedForMs: 1_000,
+      totalDegradedMs: 1_000,
+    });
 
     const response = await app.inject({
       method: 'GET',
@@ -48,6 +82,7 @@ describe('health routes', () => {
     const payload = response.json();
     expect(payload.ok).toBe(false);
     expect(payload.dependencies.database.ok).toBe(false);
+    expect(payload.dependencies.redis.degraded).toBe(true);
   });
 
   it('returns prometheus metrics payload for scrape integrations', async () => {
@@ -63,5 +98,9 @@ describe('health routes', () => {
     expect(response.body).toContain('pocketbrain_realtime_fallback_dwell_seconds');
     expect(response.body).toContain('pocketbrain_realtime_fallback_active');
     expect(response.body).toContain('pocketbrain_realtime_fallback_dwell_seconds_total');
+    expect(response.body).toContain('pocketbrain_realtime_subscriber_ready');
+    expect(response.body).toContain('pocketbrain_stream_ticket_replay_store_available');
+    expect(response.body).toContain('pocketbrain_stream_ticket_replay_degraded');
+    expect(response.body).toContain('pocketbrain_redis_ready_failures_total');
   });
 });

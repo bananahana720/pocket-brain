@@ -29,8 +29,10 @@ Set `ALLOW_INSECURE_DEV_AUTH=false` in production. Keep insecure auth enabled on
   - opens after 3 consecutive failures
   - open window 20 seconds
   - while open, `/api/v2/*` failures include `Retry-After` to guide client backoff.
+  - timeout/network/upstream/circuit outage responses consistently include structured `error.cause` plus `Retry-After` when retryable.
   - additive `error.cause` values for `/api/v2/*`: `origin_unconfigured`, `timeout`, `network_error`, `upstream_5xx`, `circuit_open`
   - additive `error.cause` values for `/api/v1/ai/*` provider outages: `provider_timeout`, `provider_5xx`, `provider_circuit_open`
+  - provider outage responses consistently include `Retry-After` for retryable timeout/network/5xx/circuit conditions.
 
 ## Required KV namespace
 
@@ -70,6 +72,7 @@ For local JWT verification, set `ALLOW_INSECURE_DEV_AUTH=false` and provide all 
 Diagnostics endpoint (`GET /api/v1/metrics`) now includes:
 - proxy circuit metrics (`vpsProxyCircuitOpens`, `vpsProxyCircuitRejects`)
 - failure-cause counters for upstream and provider outages (`failureCauses.upstream`, `failureCauses.provider`)
+- additive reliability counters for auth/config/secret-rotation failures (`reliability.authConfig`, `reliability.runtimeConfig`, `reliability.secretRotation`)
 - current circuit state (`open`, `openUntil`, `remainingMs`) for local troubleshooting.
 
 In a second terminal (app):

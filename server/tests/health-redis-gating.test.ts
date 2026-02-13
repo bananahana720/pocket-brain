@@ -18,15 +18,46 @@ async function buildHealthApp(args: {
     checkRedisReady: vi.fn().mockResolvedValue({
       ok: args.redisOk,
       status: args.redisStatus,
+      checksTotal: 1,
+      failuresTotal: args.redisOk ? 0 : 1,
+      consecutiveFailures: args.redisOk ? 0 : 1,
+      lastCheckAt: Date.now(),
+      lastCheckDurationMs: 1,
+      lastSuccessAt: args.redisOk ? Date.now() : null,
+      lastFailureAt: args.redisOk ? null : Date.now(),
+      lastErrorMessage: args.redisOk ? null : 'redis unavailable',
+      degraded: !args.redisOk,
+      degradedSinceTs: args.redisOk ? null : Date.now() - 1_000,
+      degradedForMs: args.redisOk ? 0 : 1_000,
+      totalDegradedMs: args.redisOk ? 0 : 5_000,
+    }),
+    getRedisReadyTelemetry: () => ({
+      checksTotal: 1,
+      failuresTotal: args.redisOk ? 0 : 1,
+      consecutiveFailures: args.redisOk ? 0 : 1,
+      lastCheckAt: Date.now(),
+      lastCheckDurationMs: 1,
+      lastSuccessAt: args.redisOk ? Date.now() : null,
+      lastFailureAt: args.redisOk ? null : Date.now(),
+      lastErrorMessage: args.redisOk ? null : 'redis unavailable',
+      degraded: !args.redisOk,
+      degradedSinceTs: args.redisOk ? null : Date.now() - 1_000,
+      degradedForMs: args.redisOk ? 0 : 1_000,
+      totalDegradedMs: args.redisOk ? 0 : 5_000,
     }),
   }));
 
   vi.doMock('../src/realtime/hub.js', () => ({
     getRealtimeHubStatus: () => ({
+      initializationState: 'initialized',
       distributedFanoutAvailable: args.redisOk,
+      subscriberReady: args.redisOk,
+      publisherReady: args.redisOk,
+      degradedReason: args.redisOk ? null : 'SUBSCRIBER_CONNECT_FAILED',
       degradedSinceTs: args.redisOk ? null : Date.now() - 1_000,
       currentDegradedForMs: args.redisOk ? 0 : 1_000,
       totalDegradedMs: args.redisOk ? 0 : 5_000,
+      degradedTransitions: args.redisOk ? 0 : 1,
     }),
   }));
 
@@ -90,8 +121,11 @@ describe('health route redis readiness gating', () => {
       const payload = response.json();
       expect(payload.ok).toBe(true);
       expect(payload.dependencies.redis.ok).toBe(false);
+      expect(payload.dependencies.redis.degraded).toBe(true);
       expect(payload.dependencies.redis.requiredForReady).toBe(false);
       expect(payload.dependencies.realtime.mode).toBe('local-fallback');
+      expect(payload.dependencies.realtime.degradedReason).toBe('SUBSCRIBER_CONNECT_FAILED');
+      expect(payload.dependencies.streamTicket.replayProtectionMode).toBe('best-effort');
     } finally {
       await app.close();
     }
@@ -116,6 +150,7 @@ describe('health route redis readiness gating', () => {
       expect(payload.ok).toBe(false);
       expect(payload.dependencies.redis.requiredForReady).toBe(true);
       expect(payload.dependencies.realtime.redisRequiredForReady).toBe(true);
+      expect(payload.dependencies.realtime.degradedReason).toBe('SUBSCRIBER_CONNECT_FAILED');
       expect(payload.metrics.sync.pullResetsRequired).toBe(1);
       expect(payload.metrics.maintenance.lastResult.prunedNoteChanges).toBe(2);
     } finally {

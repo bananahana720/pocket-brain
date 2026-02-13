@@ -54,12 +54,16 @@ const DiagnosticsPanel: React.FC = () => {
         <p>Sync cursor reset recoveries: {clientMetrics.counters.sync_cursor_reset_recoveries}</p>
         <p>Sync queue compaction drops: {clientMetrics.counters.sync_queue_compaction_drops}</p>
         <p>Sync queue block events: {clientMetrics.counters.sync_queue_block_events}</p>
+        <p>Sync queue recoveries: {clientMetrics.counters.sync_queue_recovery_events}</p>
         <p>Sync blocked mutations: {clientMetrics.counters.sync_queue_blocked_mutations}</p>
         <p>Avg capture visible: {clientMetrics.latencyAverages.captureVisibleMs}ms</p>
         <p>Avg capture write-through: {clientMetrics.latencyAverages.captureWriteMs}ms</p>
         <p>Stale drops: {clientMetrics.counters.stale_analysis_drops}</p>
         <p>Persist writes: {clientMetrics.counters.persist_writes}</p>
         <p>Persist failures: {clientMetrics.counters.persist_failures}</p>
+        <p>Capture persistence primary failures: {clientMetrics.counters.capture_persistence_primary_failures}</p>
+        <p>Capture persistence fallback failures: {clientMetrics.counters.capture_persistence_fallback_failures}</p>
+        <p>Capture persistence recoveries: {clientMetrics.counters.capture_persistence_recoveries}</p>
         <p>Load failures: {clientMetrics.counters.load_failures}</p>
         <p>Storage persist granted: {clientMetrics.counters.storage_persist_granted}</p>
         <p>Storage persist denied: {clientMetrics.counters.storage_persist_denied}</p>

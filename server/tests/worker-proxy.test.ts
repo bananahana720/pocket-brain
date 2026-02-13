@@ -33,6 +33,15 @@ function createEnv(overrides: Partial<Record<string, string>> = {}) {
   } as any;
 }
 
+async function readDiagnosticsMetrics(envOverrides: Partial<Record<string, string>> = {}) {
+  const response = await worker.fetch(
+    new Request('http://127.0.0.1/api/v1/metrics'),
+    createEnv(envOverrides)
+  );
+  expect(response.status).toBe(200);
+  return response.json();
+}
+
 describe('worker /api/v2 proxy resilience', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -114,6 +123,7 @@ describe('worker /api/v2 proxy resilience', () => {
   });
 
   it('requires a 32-character encryption secret when NODE_ENV is unset', async () => {
+    const before = await readDiagnosticsMetrics();
     const fetchMock = vi.spyOn(globalThis, 'fetch');
     const response = await worker.fetch(
       new Request('https://worker.example/api/v1/auth/connect', {
@@ -134,6 +144,39 @@ describe('worker /api/v2 proxy resilience', () => {
     const payload = await response.json();
     expect(payload.error.code).toBe('INTERNAL_ERROR');
     expect(fetchMock).not.toHaveBeenCalled();
+
+    const after = await readDiagnosticsMetrics();
+    expect(after.reliability.runtimeConfig.invalidEncryptionSecret).toBeGreaterThan(
+      before.reliability.runtimeConfig.invalidEncryptionSecret
+    );
+  });
+
+  it('tracks missing Clerk config failures when bearer auth is attempted', async () => {
+    const before = await readDiagnosticsMetrics();
+    const fakeToken = 'header.payload.signature';
+
+    const response = await worker.fetch(
+      new Request('https://worker.example/api/v1/auth/status', {
+        headers: {
+          Authorization: `Bearer ${fakeToken}`,
+        },
+      }),
+      createEnv({
+        ALLOW_INSECURE_DEV_AUTH: 'false',
+        CLERK_JWKS_URL: '',
+        CLERK_ISSUER: '',
+        CLERK_AUDIENCE: '',
+      })
+    );
+
+    expect(response.status).toBe(500);
+    const payload = await response.json();
+    expect(payload.error.code).toBe('AUTH_CONFIG_INVALID');
+
+    const after = await readDiagnosticsMetrics();
+    expect(after.reliability.authConfig.missingClerkConfig).toBeGreaterThan(
+      before.reliability.authConfig.missingClerkConfig
+    );
   });
 
   it('exposes per-cause upstream/provider counters in diagnostics metrics', async () => {
@@ -155,6 +198,19 @@ describe('worker /api/v2 proxy resilience', () => {
       provider_timeout: expect.any(Number),
       provider_5xx: expect.any(Number),
       provider_circuit_open: expect.any(Number),
+    });
+    expect(payload.reliability?.authConfig).toMatchObject({
+      missingClerkConfig: expect.any(Number),
+      partialClerkConfig: expect.any(Number),
+    });
+    expect(payload.reliability?.runtimeConfig).toMatchObject({
+      invalidEncryptionSecret: expect.any(Number),
+    });
+    expect(payload.reliability?.secretRotation).toMatchObject({
+      fallbackDecrypts: expect.any(Number),
+      decryptFailures: expect.any(Number),
+      reencryptSuccesses: expect.any(Number),
+      reencryptFailures: expect.any(Number),
     });
   });
 

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const BASE_ENV = { ...process.env };
 const redisSetMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../src/db/client.js', () => ({
@@ -15,6 +16,8 @@ describe('stream ticket auth', () => {
   });
 
   afterEach(() => {
+    process.env = { ...BASE_ENV };
+    vi.resetModules();
     vi.useRealTimers();
   });
 
@@ -67,5 +70,47 @@ describe('stream ticket auth', () => {
     await expect(consumeStreamTicket(issued.token)).rejects.toMatchObject({
       code: 'STREAM_TICKET_REPLAYED',
     });
+  });
+
+  it('tracks replay-store fail-open degradation telemetry in best-effort mode', async () => {
+    const { issueStreamTicket, consumeStreamTicket } = await import('../src/auth/streamTicket.js');
+    const { getStreamTicketReplayTelemetry, resetStreamTicketReplayTelemetryForTests } = await import(
+      '../src/auth/streamTicketTelemetry.js'
+    );
+    resetStreamTicketReplayTelemetryForTests();
+
+    redisSetMock.mockRejectedValueOnce(new Error('redis timeout'));
+
+    const firstTicket = issueStreamTicket({
+      subject: 'user_degraded',
+      deviceId: '44444444-4444-4444-8444-444444444444',
+      ttlSeconds: 60,
+    });
+    await expect(consumeStreamTicket(firstTicket.token)).resolves.toMatchObject({
+      sub: 'user_degraded',
+    });
+
+    const degradedTelemetry = getStreamTicketReplayTelemetry();
+    expect(degradedTelemetry.mode).toBe('best-effort');
+    expect(degradedTelemetry.degraded).toBe(true);
+    expect(degradedTelemetry.replayStoreAvailable).toBe(false);
+    expect(degradedTelemetry.degradedReason).toBe('REDIS_SET_FAILED');
+    expect(degradedTelemetry.failOpenBypasses).toBe(1);
+    expect(degradedTelemetry.storageUnavailableErrors).toBe(0);
+
+    const secondTicket = issueStreamTicket({
+      subject: 'user_recovered',
+      deviceId: '55555555-5555-4555-8555-555555555555',
+      ttlSeconds: 60,
+    });
+    await expect(consumeStreamTicket(secondTicket.token)).resolves.toMatchObject({
+      sub: 'user_recovered',
+    });
+
+    const recoveredTelemetry = getStreamTicketReplayTelemetry();
+    expect(recoveredTelemetry.degraded).toBe(false);
+    expect(recoveredTelemetry.replayStoreAvailable).toBe(true);
+    expect(recoveredTelemetry.consumeAttempts).toBe(2);
+    expect(recoveredTelemetry.consumeSuccesses).toBe(2);
   });
 });

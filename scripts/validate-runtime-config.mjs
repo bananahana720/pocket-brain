@@ -42,6 +42,13 @@ function parseBoolean(value) {
   return undefined;
 }
 
+const PRODUCTION_SECRET_PLACEHOLDERS = new Set([
+  'replace-with-32-byte-secret',
+  'replace-with-separate-stream-ticket-secret',
+  '0123456789abcdef0123456789abcdef',
+  'fedcba9876543210fedcba9876543210',
+]);
+
 function parseEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return {};
 
@@ -231,11 +238,19 @@ function isPlaceholderSecret(value) {
   if (!value) return true;
   const normalized = value.trim().toLowerCase();
   if (!normalized) return true;
+  if (PRODUCTION_SECRET_PLACEHOLDERS.has(normalized)) return true;
   return (
     normalized.includes('replace-with') ||
     normalized.includes('your-') ||
     normalized.includes('example')
   );
+}
+
+function parseCorsOrigins(rawValue) {
+  return String(rawValue || '')
+    .split(',')
+    .map(part => part.trim())
+    .filter(Boolean);
 }
 
 function isLoopbackHost(hostname) {
@@ -295,6 +310,22 @@ function validateServerConfig(errors) {
   const hasStreamSecret = !!streamSecret;
   if ((isProduction || hasStreamSecret) && (isPlaceholderSecret(streamSecret) || streamSecret.length < 16)) {
     errors.push('server: STREAM_TICKET_SECRET must be set (or fallback secret must be valid) with at least 16 chars');
+  }
+
+  if (isProduction) {
+    const corsOrigins = parseCorsOrigins(config.CORS_ORIGIN || '*');
+    if (corsOrigins.length === 0 || corsOrigins.includes('*')) {
+      errors.push('server: CORS_ORIGIN must be explicit (no wildcard) in production');
+    }
+
+    const explicitStreamSecret = String(config.STREAM_TICKET_SECRET || '').trim();
+    if (!explicitStreamSecret) {
+      errors.push('server: STREAM_TICKET_SECRET must be explicitly set in production');
+    }
+
+    if (streamSecret && keySecret && streamSecret === keySecret) {
+      errors.push('server: STREAM_TICKET_SECRET must differ from KEY_ENCRYPTION_SECRET in production');
+    }
   }
 }
 

@@ -69,6 +69,17 @@ const SYNC_STREAM_CONTINUOUS_FAILURE_MS = 90_000;
 const SYNC_REGULAR_INTERVAL_MS = 30_000;
 const SYNC_POLLING_INTERVAL_MS = 15_000;
 
+function formatDurationMs(ms: number): string {
+  const clamped = Math.max(0, Math.floor(ms));
+  if (clamped < 1_000) return '<1s';
+  const totalSeconds = Math.round(clamped / 1_000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (seconds === 0) return `${minutes}m`;
+  return `${minutes}m ${seconds}s`;
+}
+
 function isArrayEqual(a: unknown[], b: unknown[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
@@ -227,9 +238,10 @@ export function useSyncEngine(args: {
   notes: Note[];
   setNotes: React.Dispatch<React.SetStateAction<Note[]>>;
   onQueueWarning?: (message: string) => void;
+  onQueueRecovery?: (message: string) => void;
   onResetRecovery?: (message: string) => void;
 }) {
-  const { enabled, userId, notes, setNotes, onQueueWarning, onResetRecovery } = args;
+  const { enabled, userId, notes, setNotes, onQueueWarning, onQueueRecovery, onResetRecovery } = args;
   const syncQueueCap = getSyncQueueHardCap();
 
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(enabled ? 'syncing' : 'disabled');
@@ -267,6 +279,7 @@ export function useSyncEngine(args: {
   const streamFailureCountRef = useRef(0);
   const streamFailureSinceRef = useRef<number | null>(null);
   const streamFallbackActiveRef = useRef(false);
+  const blockedSinceRef = useRef<number | null>(null);
 
   useEffect(() => {
     notesRef.current = notes;
@@ -285,15 +298,35 @@ export function useSyncEngine(args: {
     const normalizedCap = Math.max(1, cap);
     const pendingOps = queue.length;
     const overflowBy = Math.max(0, pendingOps - normalizedCap);
+    const previous = backpressureRef.current;
     const next: SyncBackpressure = {
       blocked: pendingOps >= normalizedCap,
       pendingOps,
       cap: normalizedCap,
       overflowBy,
     };
+
+    if (next.blocked && !previous.blocked) {
+      incrementMetric('sync_queue_block_events');
+      blockedSinceRef.current = Date.now();
+    } else if (!next.blocked && previous.blocked) {
+      incrementMetric('sync_queue_recovery_events');
+      const blockedSince = blockedSinceRef.current;
+      blockedSinceRef.current = null;
+      if (onQueueRecovery) {
+        const durationSuffix =
+          blockedSince === null ? '' : ` after ${formatDurationMs(Math.max(0, Date.now() - blockedSince))}`;
+        onQueueRecovery(`Sync queue recovered${durationSuffix}. Pending ops now ${next.pendingOps}/${next.cap}.`);
+      }
+    } else if (next.blocked && blockedSinceRef.current === null) {
+      blockedSinceRef.current = Date.now();
+    } else if (!next.blocked) {
+      blockedSinceRef.current = null;
+    }
+
     setBackpressureState(next);
     return next;
-  }, [setBackpressureState, syncQueueCap]);
+  }, [onQueueRecovery, setBackpressureState, syncQueueCap]);
 
   const setSyncStatusSafe = useCallback((next: SyncStatus) => {
     if (next === 'disabled') {
@@ -397,10 +430,6 @@ export function useSyncEngine(args: {
         cap: policy.cap,
         compactionDrops: policy.compactionDrops,
       });
-    }
-
-    if (nextBackpressure.blocked && !wasBlocked) {
-      incrementMetric('sync_queue_block_events');
     }
 
     if (nextBackpressure.blocked && onQueueWarning) {
@@ -628,6 +657,7 @@ export function useSyncEngine(args: {
       setIsStreamFallbackActive(false);
       resetStreamFailureTracking();
       resetRetryBackoff();
+      blockedSinceRef.current = null;
       setConflicts([]);
       setDevices([]);
       setCurrentDeviceId(null);

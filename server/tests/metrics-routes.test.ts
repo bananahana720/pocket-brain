@@ -14,14 +14,33 @@ async function buildMetricsApp(): Promise<FastifyInstance> {
       ok: false,
       status: 'end',
     }),
+    getRedisReadyTelemetry: () => ({
+      checksTotal: 4,
+      failuresTotal: 3,
+      consecutiveFailures: 2,
+      lastCheckAt: Date.now(),
+      lastCheckDurationMs: 5,
+      lastSuccessAt: Date.now() - 25_000,
+      lastFailureAt: Date.now() - 1_000,
+      lastErrorMessage: 'connect ETIMEDOUT',
+      degraded: true,
+      degradedSinceTs: Date.now() - 1_000,
+      degradedForMs: 1_000,
+      totalDegradedMs: 8_000,
+    }),
   }));
 
   vi.doMock('../src/realtime/hub.js', () => ({
     getRealtimeHubStatus: () => ({
+      initializationState: 'initialized',
       distributedFanoutAvailable: false,
+      subscriberReady: false,
+      publisherReady: false,
+      degradedReason: 'SUBSCRIBER_CONNECT_FAILED',
       degradedSinceTs: Date.now() - 4_000,
       currentDegradedForMs: 4_000,
       totalDegradedMs: 25_000,
+      degradedTransitions: 2,
     }),
   }));
 
@@ -83,6 +102,13 @@ describe('metrics route', () => {
       expect(response.body).toContain('pocketbrain_realtime_fallback_active 1');
       expect(response.body).toContain('pocketbrain_realtime_fallback_dwell_seconds 4');
       expect(response.body).toContain('pocketbrain_realtime_fallback_dwell_seconds_total 25');
+      expect(response.body).toContain('pocketbrain_realtime_subscriber_ready 0');
+      expect(response.body).toContain('pocketbrain_realtime_publisher_ready 0');
+      expect(response.body).toContain('pocketbrain_realtime_degraded_transitions_total 2');
+      expect(response.body).toContain('pocketbrain_stream_ticket_replay_store_available 1');
+      expect(response.body).toContain('pocketbrain_stream_ticket_replay_mode_strict 0');
+      expect(response.body).toContain('pocketbrain_redis_ready_degraded 1');
+      expect(response.body).toContain('pocketbrain_redis_ready_failures_total 3');
     } finally {
       await app.close();
     }

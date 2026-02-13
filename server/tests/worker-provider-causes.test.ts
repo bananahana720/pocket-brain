@@ -20,9 +20,13 @@ function createGeminiOkResponse(text = 'OK'): Response {
   );
 }
 
-function createEnv(options?: { controlPlaneMode?: ControlPlaneMode; overrides?: Partial<Record<string, string>> }) {
+function createEnv(options?: {
+  controlPlaneMode?: ControlPlaneMode;
+  overrides?: Partial<Record<string, string>>;
+  store?: Map<string, string>;
+}) {
   const mode = options?.controlPlaneMode ?? 'ok';
-  const store = new Map<string, string>();
+  const store = options?.store ?? new Map<string, string>();
 
   const controlPlane = {
     idFromName() {
@@ -212,5 +216,87 @@ describe('worker provider cause classification', () => {
     expect(payload.error.retryable).toBe(true);
     expect(payload.error.cause).toBe('provider_circuit_open');
     expect(Number(secondFailure.headers.get('retry-after') || '0')).toBeGreaterThan(0);
+  });
+
+  it('uses previous secret fallback during overlap and migrates to active secret', async () => {
+    const worker = await loadWorker();
+    const sharedStore = new Map<string, string>();
+    const oldSecret = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const newSecret = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => createGeminiOkResponse('OK'));
+
+    const legacyEnv = createEnv({
+      store: sharedStore,
+      overrides: {
+        KEY_ENCRYPTION_SECRET: oldSecret,
+      },
+    });
+    const cookie = await connectLegacySession(worker, legacyEnv);
+
+    const overlapEnv = createEnv({
+      store: sharedStore,
+      overrides: {
+        KEY_ENCRYPTION_SECRET: newSecret,
+        KEY_ENCRYPTION_SECRET_PREV: oldSecret,
+      },
+    });
+    const overlapResponse = await callAiSearch(worker, overlapEnv, cookie);
+    expect(overlapResponse.status).toBe(200);
+
+    const activeOnlyEnv = createEnv({
+      store: sharedStore,
+      overrides: {
+        KEY_ENCRYPTION_SECRET: newSecret,
+      },
+    });
+    const activeOnlyResponse = await callAiSearch(worker, activeOnlyEnv, cookie);
+    expect(activeOnlyResponse.status).toBe(200);
+
+    const metricsResponse = await worker.fetch(
+      new Request('http://127.0.0.1/api/v1/metrics'),
+      activeOnlyEnv
+    );
+    expect(metricsResponse.status).toBe(200);
+    const metricsPayload = await metricsResponse.json();
+    expect(metricsPayload.reliability.secretRotation.fallbackDecrypts).toBeGreaterThan(0);
+    expect(metricsPayload.reliability.secretRotation.reencryptSuccesses).toBeGreaterThan(0);
+  });
+
+  it('tracks decrypt failures when neither active nor previous rotation secret can decrypt', async () => {
+    const worker = await loadWorker();
+    const sharedStore = new Map<string, string>();
+    const originalSecret = 'cccccccccccccccccccccccccccccccc';
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => createGeminiOkResponse('OK'));
+
+    const legacyEnv = createEnv({
+      store: sharedStore,
+      overrides: {
+        KEY_ENCRYPTION_SECRET: originalSecret,
+      },
+    });
+    const cookie = await connectLegacySession(worker, legacyEnv);
+
+    const invalidRotationEnv = createEnv({
+      store: sharedStore,
+      overrides: {
+        KEY_ENCRYPTION_SECRET: 'dddddddddddddddddddddddddddddddd',
+        KEY_ENCRYPTION_SECRET_PREV: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+      },
+    });
+    const response = await callAiSearch(worker, invalidRotationEnv, cookie);
+    const payload = await response.json();
+
+    expect(response.status).toBe(403);
+    expect(payload.error.code).toBe('AUTH_EXPIRED');
+
+    const metricsResponse = await worker.fetch(
+      new Request('http://127.0.0.1/api/v1/metrics'),
+      invalidRotationEnv
+    );
+    expect(metricsResponse.status).toBe(200);
+    const metricsPayload = await metricsResponse.json();
+    expect(metricsPayload.reliability.secretRotation.decryptFailures).toBeGreaterThan(0);
   });
 });

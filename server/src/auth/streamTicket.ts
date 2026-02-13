@@ -3,6 +3,15 @@ import type { FastifyRequest } from 'fastify';
 import type { CookieSerializeOptions } from '@fastify/cookie';
 import { env } from '../config/env.js';
 import { redis } from '../db/client.js';
+import {
+  markStreamTicketReplayStoreDegraded,
+  markStreamTicketReplayStoreHealthy,
+  recordStreamTicketConsumeAttempt,
+  recordStreamTicketConsumeSuccess,
+  recordStreamTicketFailOpenBypass,
+  recordStreamTicketReplayReject,
+  recordStreamTicketStorageUnavailable,
+} from './streamTicketTelemetry.js';
 
 export const STREAM_TICKET_COOKIE_NAME = 'pb_stream_ticket';
 
@@ -96,14 +105,19 @@ async function markTicketConsumed(jti: string, expSeconds: number): Promise<void
   try {
     const response = await redis.set(key, '1', 'EX', ttlSeconds, 'NX');
     if (response !== 'OK') {
+      markStreamTicketReplayStoreHealthy();
+      recordStreamTicketReplayReject();
       throw new StreamTicketError('STREAM_TICKET_REPLAYED', 'Stream ticket was already used', 401);
     }
+    markStreamTicketReplayStoreHealthy();
   } catch (error) {
     if (error instanceof StreamTicketError) {
       throw error;
     }
 
+    markStreamTicketReplayStoreDegraded(error);
     if (env.NODE_ENV === 'production') {
+      recordStreamTicketStorageUnavailable();
       throw new StreamTicketError(
         'STREAM_TICKET_STORAGE_UNAVAILABLE',
         'Stream auth store unavailable. Please retry.',
@@ -111,6 +125,7 @@ async function markTicketConsumed(jti: string, expSeconds: number): Promise<void
         true
       );
     }
+    recordStreamTicketFailOpenBypass();
   }
 }
 
@@ -140,6 +155,7 @@ export function issueStreamTicket(args: {
 }
 
 export async function consumeStreamTicket(token: string): Promise<StreamTicketClaims> {
+  recordStreamTicketConsumeAttempt();
   const trimmed = token.trim();
   if (!trimmed) {
     throw new StreamTicketError('STREAM_TICKET_REQUIRED', 'Stream ticket is required', 401);
@@ -173,6 +189,7 @@ export async function consumeStreamTicket(token: string): Promise<StreamTicketCl
   }
 
   await markTicketConsumed(claims.jti, claims.exp);
+  recordStreamTicketConsumeSuccess();
   return claims;
 }
 

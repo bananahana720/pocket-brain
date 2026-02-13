@@ -167,6 +167,7 @@ VITE_SYNC_QUEUE_HARD_CAP=500
 ```
 
 When pending sync operations reach the cap, the UI blocks additional note mutations until the queue drains (non-destructive policy). Queue-block events emit telemetry and a throttled in-app warning.
+When the queue drains below cap, the client emits `sync_queue_recovery_events` and shows a recovery toast so users know writes are unblocked.
 
 **Local proxy simulation (recommended for testing secure path):**
 
@@ -216,6 +217,10 @@ Deploy script now:
 - checks readiness on both direct API (`:8788/ready`) and nginx (`:8080/ready`)
 - acquires a deploy lock (`/tmp/pocketbrain-deploy.lock`) to prevent overlapping runs
 - prints compose status + logs on failure
+
+Reliability tracking + rollback thresholds:
+- Program tracker: `docs/RELIABILITY_PROGRAM.md`
+- Alert/ops runbooks: `docs/ops/ALERTING.md`, `docs/ops/QUEUE_BACKPRESSURE.md`, `docs/ops/DEPENDENCY_RUNBOOK.md`
 
 `/ready` is the deployment health endpoint. `/` on nginx may return `404` and is not a deployment-failure signal.
 Server metrics are available at `GET /metrics` for Prometheus scrape integration.

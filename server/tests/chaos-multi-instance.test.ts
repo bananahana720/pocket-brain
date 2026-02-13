@@ -282,11 +282,17 @@ if (!CHAOS_ENABLED) {
 
         const readyA = await requestJson<{
           ok: boolean;
-          dependencies: { realtime: { mode: string; degraded: boolean } };
+          dependencies: {
+            realtime: { mode: string; degraded: boolean; degradedReason: string | null };
+            streamTicket: { replayProtectionMode: string; degraded: boolean };
+          };
         }>(`${instanceA.baseUrl}/ready`);
         const readyB = await requestJson<{
           ok: boolean;
-          dependencies: { realtime: { mode: string; degraded: boolean } };
+          dependencies: {
+            realtime: { mode: string; degraded: boolean; degradedReason: string | null };
+            streamTicket: { replayProtectionMode: string; degraded: boolean };
+          };
         }>(`${instanceB.baseUrl}/ready`);
 
         expect(readyA.status).toBe(200);
@@ -295,6 +301,10 @@ if (!CHAOS_ENABLED) {
         expect(readyB.body?.dependencies.realtime.mode).toBe('local-fallback');
         expect(readyA.body?.dependencies.realtime.degraded).toBe(true);
         expect(readyB.body?.dependencies.realtime.degraded).toBe(true);
+        expect(readyA.body?.dependencies.realtime.degradedReason).toBeTruthy();
+        expect(readyB.body?.dependencies.realtime.degradedReason).toBeTruthy();
+        expect(readyA.body?.dependencies.streamTicket.replayProtectionMode).toBe('best-effort');
+        expect(readyB.body?.dependencies.streamTicket.replayProtectionMode).toBe('best-effort');
 
         const ticketA = await requestJson<{ ok: boolean }>(`${instanceA.baseUrl}/api/v2/events/ticket`, {
           method: 'POST',
@@ -392,13 +402,21 @@ if (!CHAOS_ENABLED) {
         const strictB = await startServer({ requireRedisForReady: true });
         runningServers.push(strictA, strictB);
 
-        const strictReadyA = await requestJson<{ ok: boolean }>(`${strictA.baseUrl}/ready`);
-        const strictReadyB = await requestJson<{ ok: boolean }>(`${strictB.baseUrl}/ready`);
+        const strictReadyA = await requestJson<{
+          ok: boolean;
+          dependencies: { streamTicket: { replayProtectionMode: string } };
+        }>(`${strictA.baseUrl}/ready`);
+        const strictReadyB = await requestJson<{
+          ok: boolean;
+          dependencies: { streamTicket: { replayProtectionMode: string } };
+        }>(`${strictB.baseUrl}/ready`);
 
         expect(strictReadyA.status).toBe(503);
         expect(strictReadyB.status).toBe(503);
         expect(strictReadyA.body?.ok).toBe(false);
         expect(strictReadyB.body?.ok).toBe(false);
+        expect(strictReadyA.body?.dependencies.streamTicket.replayProtectionMode).toBe('best-effort');
+        expect(strictReadyB.body?.dependencies.streamTicket.replayProtectionMode).toBe('best-effort');
       }, 60_000);
     });
   }

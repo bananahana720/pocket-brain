@@ -307,12 +307,21 @@ function App() {
     }, 4500);
   }, []);
 
+  const pushQueueRecoveryToast = useCallback((message: string) => {
+    const id = `${Date.now()}-${Math.random()}`;
+    setToasts(prev => [...prev, { id, message, type: 'success' }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, 4500);
+  }, []);
+
   const syncEngine = useSyncEngine({
     enabled: isAuthLoaded && isSignedIn && isNotesHydrated,
     userId,
     notes,
     setNotes,
     onQueueWarning: pushQueueWarningToast,
+    onQueueRecovery: pushQueueRecoveryToast,
     onResetRecovery: pushSyncRecoveryToast,
   });
 
@@ -807,16 +816,20 @@ function App() {
         recordCaptureWriteThroughLatency(performance.now() - startedAt);
       } catch (error) {
         console.error('Capture write-through failed, trying op fallback', error);
+        incrementMetric('capture_persistence_primary_failures');
 
         try {
           const persistStarted = performance.now();
           await saveOps([{ type: 'upsert', note: current }]);
           incrementMetric('persist_writes');
           recordPersistLatency(performance.now() - persistStarted);
+          incrementMetric('capture_persistence_recoveries');
           incrementMetric('capture_write_through_success');
           recordCaptureWriteThroughLatency(performance.now() - startedAt);
         } catch (fallbackError) {
           console.error('Capture fallback persist failed', fallbackError);
+          incrementMetric('capture_persistence_fallback_failures');
+          incrementMetric('persist_failures');
           incrementMetric('capture_write_through_failure');
           recordCaptureWriteThroughLatency(performance.now() - startedAt);
           addToast('Storage issue — note may not survive reload. Keep this tab open and retry.', 'error');

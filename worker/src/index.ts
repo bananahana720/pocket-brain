@@ -96,11 +96,34 @@ interface Metrics {
   vpsProxyCircuitRejects: number;
 }
 
+interface AuthConfigFailureMetrics {
+  missingClerkConfig: number;
+  partialClerkConfig: number;
+}
+
+interface RuntimeConfigFailureMetrics {
+  invalidEncryptionSecret: number;
+}
+
+interface SecretRotationMetrics {
+  fallbackDecrypts: number;
+  decryptFailures: number;
+  reencryptSuccesses: number;
+  reencryptFailures: number;
+}
+
+interface ReliabilityMetrics {
+  authConfig: AuthConfigFailureMetrics;
+  runtimeConfig: RuntimeConfigFailureMetrics;
+  secretRotation: SecretRotationMetrics;
+}
+
 const SESSION_COOKIE_NAME = 'pb_ai_session';
 const ACCOUNT_KEY_PREFIX = 'account:';
 const SESSION_TTL_SECONDS = 24 * 60 * 60;
 const RETRY_ATTEMPTS = 2;
 const REQUEST_TIMEOUT_MS = 12000;
+const PROVIDER_OUTAGE_RETRY_AFTER_SECONDS = 5;
 const MAX_TRANSCRIPTION_AUDIO_BASE64_CHARS = 6 * 1024 * 1024;
 const MAX_NOTE_CONTENT_CHARS = 800;
 const MAX_NOTE_TITLE_CHARS = 120;
@@ -192,6 +215,21 @@ const providerFailureCauses: Record<ProviderFailureCause, number> = {
   provider_5xx: 0,
   provider_circuit_open: 0,
 };
+const reliabilityMetrics: ReliabilityMetrics = {
+  authConfig: {
+    missingClerkConfig: 0,
+    partialClerkConfig: 0,
+  },
+  runtimeConfig: {
+    invalidEncryptionSecret: 0,
+  },
+  secretRotation: {
+    fallbackDecrypts: 0,
+    decryptFailures: 0,
+    reencryptSuccesses: 0,
+    reencryptFailures: 0,
+  },
+};
 
 const rateLimits = new Map<string, RateLimitEntry>();
 const providerCircuit: Record<AIProvider, CircuitState> = {
@@ -262,10 +300,31 @@ function recordFailureCause(cause: FailureCause | undefined): void {
   }
 }
 
-function getVpsProxyUnavailableHeaders(retryAfterSeconds: number): Record<string, string> {
+function getRetryAfterHeaders(retryAfterSeconds: number): Record<string, string> {
   return {
-    'Retry-After': String(Math.max(1, Math.floor(retryAfterSeconds))),
+    'Retry-After': String(Math.max(1, Math.ceil(retryAfterSeconds))),
   };
+}
+
+function getVpsProxyUnavailableHeaders(retryAfterSeconds: number): Record<string, string> {
+  return getRetryAfterHeaders(retryAfterSeconds);
+}
+
+function getProviderOutageHeaders(): Record<string, string> {
+  return getRetryAfterHeaders(PROVIDER_OUTAGE_RETRY_AFTER_SECONDS);
+}
+
+function classifyProviderOutage(status: number): {
+  failureCause?: ProviderFailureCause;
+  headers?: Record<string, string>;
+} {
+  if (status >= 500) {
+    return {
+      failureCause: 'provider_5xx',
+      headers: getProviderOutageHeaders(),
+    };
+  }
+  return {};
 }
 
 function getValidatedVpsApiOrigin(env: Env): string {
@@ -763,6 +822,7 @@ function getClerkJwtVerificationConfig(env: Env): ClerkJwtVerificationConfig | n
 
   if (definedCount === 0) return null;
   if (definedCount !== 3) {
+    reliabilityMetrics.authConfig.partialClerkConfig += 1;
     throw new ApiError(
       500,
       'AUTH_CONFIG_INVALID',
@@ -840,6 +900,7 @@ async function getAuthenticatedUserId(request: Request, env: Env): Promise<strin
   const clerkConfig = getClerkJwtVerificationConfig(env);
   const insecureFallbackEnabled = allowInsecureDevAuth(request, env);
   if (!clerkConfig && !insecureFallbackEnabled) {
+    reliabilityMetrics.authConfig.missingClerkConfig += 1;
     throw new ApiError(
       500,
       'AUTH_CONFIG_INVALID',
@@ -893,6 +954,7 @@ function ensureEncryptionSecretConfigured(env: Env): void {
   const secret = typeof env.KEY_ENCRYPTION_SECRET === 'string' ? env.KEY_ENCRYPTION_SECRET.trim() : '';
   const minLength = getEncryptionSecretMinLength(env);
   if (!secret || secret.length < minLength) {
+    reliabilityMetrics.runtimeConfig.invalidEncryptionSecret += 1;
     throw new ApiError(500, 'INTERNAL_ERROR', 'AI proxy encryption secret is not configured');
   }
 }
@@ -948,7 +1010,7 @@ function ensureCircuitClosedLocal(provider: AIProvider): void {
       'PROVIDER_UNAVAILABLE',
       'Provider is temporarily unavailable. Please retry shortly.',
       true,
-      { 'Retry-After': String(retryAfterSeconds) },
+      getRetryAfterHeaders(retryAfterSeconds),
       'provider_circuit_open'
     );
   }
@@ -1020,7 +1082,7 @@ async function ensureCircuitClosed(provider: AIProvider, env: Env): Promise<void
         'PROVIDER_UNAVAILABLE',
         'Provider is temporarily unavailable. Please retry shortly.',
         true,
-        { 'Retry-After': String(retryAfterSeconds) },
+        getRetryAfterHeaders(retryAfterSeconds),
         'provider_circuit_open'
       );
     }
@@ -1127,12 +1189,20 @@ async function decryptSessionApiKey(
     const apiKey = await decryptApiKey(payload, env.KEY_ENCRYPTION_SECRET);
     return { apiKey, usedPreviousSecret: false };
   } catch (error) {
-    if (!env.KEY_ENCRYPTION_SECRET_PREV) {
+    const previousSecret = typeof env.KEY_ENCRYPTION_SECRET_PREV === 'string' ? env.KEY_ENCRYPTION_SECRET_PREV.trim() : '';
+    if (!previousSecret) {
+      reliabilityMetrics.secretRotation.decryptFailures += 1;
       throw error;
     }
 
-    const apiKey = await decryptApiKey(payload, env.KEY_ENCRYPTION_SECRET_PREV);
-    return { apiKey, usedPreviousSecret: true };
+    try {
+      const apiKey = await decryptApiKey(payload, previousSecret);
+      reliabilityMetrics.secretRotation.fallbackDecrypts += 1;
+      return { apiKey, usedPreviousSecret: true };
+    } catch (previousError) {
+      reliabilityMetrics.secretRotation.decryptFailures += 1;
+      throw previousError;
+    }
   }
 }
 
@@ -1312,14 +1382,14 @@ async function callGemini(apiKey: string, prompt: string): Promise<string> {
 
     if (!response.ok) {
       const body = await response.text();
-      const isProviderOutage = response.status >= 500;
+      const outage = classifyProviderOutage(response.status);
       throw new ApiError(
         response.status,
         response.status === 401 ? 'AUTH_REQUIRED' : response.status === 429 ? 'RATE_LIMITED' : 'PROVIDER_UNAVAILABLE',
         `Gemini request failed: ${body.slice(0, 200)}`,
         isTransientStatus(response.status),
-        isProviderOutage ? { 'Retry-After': '5' } : undefined,
-        isProviderOutage ? 'provider_5xx' : undefined
+        outage.headers,
+        outage.failureCause
       );
     }
 
@@ -1333,9 +1403,9 @@ async function callGemini(apiKey: string, prompt: string): Promise<string> {
     if (error instanceof ApiError) throw error;
     if (error instanceof DOMException && error.name === 'TimeoutError') {
       metrics.timeouts += 1;
-      throw new ApiError(504, 'TIMEOUT', 'Provider request timed out', true, { 'Retry-After': '5' }, 'provider_timeout');
+      throw new ApiError(504, 'TIMEOUT', 'Provider request timed out', true, getProviderOutageHeaders(), 'provider_timeout');
     }
-    throw new ApiError(503, 'NETWORK', 'Network error while contacting Gemini', true, { 'Retry-After': '5' }, 'provider_timeout');
+    throw new ApiError(503, 'NETWORK', 'Network error while contacting Gemini', true, getProviderOutageHeaders(), 'provider_timeout');
   } finally {
     cleanup();
   }
@@ -1382,14 +1452,14 @@ async function callGeminiTranscription(
 
     if (!response.ok) {
       const body = await response.text();
-      const isProviderOutage = response.status >= 500;
+      const outage = classifyProviderOutage(response.status);
       throw new ApiError(
         response.status,
         response.status === 401 ? 'AUTH_REQUIRED' : response.status === 429 ? 'RATE_LIMITED' : 'PROVIDER_UNAVAILABLE',
         `Gemini transcription failed: ${body.slice(0, 200)}`,
         isTransientStatus(response.status),
-        isProviderOutage ? { 'Retry-After': '5' } : undefined,
-        isProviderOutage ? 'provider_5xx' : undefined
+        outage.headers,
+        outage.failureCause
       );
     }
 
@@ -1411,9 +1481,9 @@ async function callGeminiTranscription(
     if (error instanceof ApiError) throw error;
     if (error instanceof DOMException && error.name === 'TimeoutError') {
       metrics.timeouts += 1;
-      throw new ApiError(504, 'TIMEOUT', 'Provider request timed out', true, { 'Retry-After': '5' }, 'provider_timeout');
+      throw new ApiError(504, 'TIMEOUT', 'Provider request timed out', true, getProviderOutageHeaders(), 'provider_timeout');
     }
-    throw new ApiError(503, 'NETWORK', 'Network error while contacting Gemini', true, { 'Retry-After': '5' }, 'provider_timeout');
+    throw new ApiError(503, 'NETWORK', 'Network error while contacting Gemini', true, getProviderOutageHeaders(), 'provider_timeout');
   } finally {
     cleanup();
   }
@@ -1438,14 +1508,14 @@ async function callOpenRouter(apiKey: string, prompt: string, model = 'google/ge
 
     if (!response.ok) {
       const body = await response.text();
-      const isProviderOutage = response.status >= 500;
+      const outage = classifyProviderOutage(response.status);
       throw new ApiError(
         response.status,
         response.status === 401 ? 'AUTH_REQUIRED' : response.status === 429 ? 'RATE_LIMITED' : 'PROVIDER_UNAVAILABLE',
         `OpenRouter request failed: ${body.slice(0, 200)}`,
         isTransientStatus(response.status),
-        isProviderOutage ? { 'Retry-After': '5' } : undefined,
-        isProviderOutage ? 'provider_5xx' : undefined
+        outage.headers,
+        outage.failureCause
       );
     }
 
@@ -1460,9 +1530,9 @@ async function callOpenRouter(apiKey: string, prompt: string, model = 'google/ge
     if (error instanceof ApiError) throw error;
     if (error instanceof DOMException && error.name === 'TimeoutError') {
       metrics.timeouts += 1;
-      throw new ApiError(504, 'TIMEOUT', 'Provider request timed out', true, { 'Retry-After': '5' }, 'provider_timeout');
+      throw new ApiError(504, 'TIMEOUT', 'Provider request timed out', true, getProviderOutageHeaders(), 'provider_timeout');
     }
-    throw new ApiError(503, 'NETWORK', 'Network error while contacting OpenRouter', true, { 'Retry-After': '5' }, 'provider_timeout');
+    throw new ApiError(503, 'NETWORK', 'Network error while contacting OpenRouter', true, getProviderOutageHeaders(), 'provider_timeout');
   } finally {
     cleanup();
   }
@@ -1564,7 +1634,9 @@ async function requireLegacySession(
           expirationTtl: remainingTtlSeconds,
         }
       );
+      reliabilityMetrics.secretRotation.reencryptSuccesses += 1;
     } catch {
+      reliabilityMetrics.secretRotation.reencryptFailures += 1;
       // Session still works with previous secret; avoid blocking current request.
     }
   }
@@ -1627,7 +1699,9 @@ async function requireAiCredentials(
             },
             env
           );
+          reliabilityMetrics.secretRotation.reencryptSuccesses += 1;
         } catch {
+          reliabilityMetrics.secretRotation.reencryptFailures += 1;
           // Ignore migration failure and continue with previous-secret decryption.
         }
       }
@@ -1807,6 +1881,11 @@ export default {
           failureCauses: {
             upstream: { ...upstreamFailureCauses },
             provider: { ...providerFailureCauses },
+          },
+          reliability: {
+            authConfig: { ...reliabilityMetrics.authConfig },
+            runtimeConfig: { ...reliabilityMetrics.runtimeConfig },
+            secretRotation: { ...reliabilityMetrics.secretRotation },
           },
           vpsProxyCircuit: {
             open: remainingMs > 0,

@@ -2,6 +2,12 @@ import { z } from 'zod';
 
 const TRUE_ENV_VALUES = new Set(['1', 'true', 'yes', 'on']);
 const FALSE_ENV_VALUES = new Set(['0', 'false', 'no', 'off']);
+const PRODUCTION_SECRET_PLACEHOLDERS = new Set([
+  'replace-with-32-byte-secret',
+  'replace-with-separate-stream-ticket-secret',
+  '0123456789abcdef0123456789abcdef',
+  'fedcba9876543210fedcba9876543210',
+]);
 
 export function parseBooleanEnvValue(value: unknown): unknown {
   if (typeof value === 'boolean') return value;
@@ -16,6 +22,19 @@ export function parseBooleanEnvValue(value: unknown): unknown {
 
 const booleanFromEnv = z.preprocess(parseBooleanEnvValue, z.boolean());
 const optionalBooleanFromEnv = z.preprocess(parseBooleanEnvValue, z.boolean().optional());
+
+function parseCorsOrigins(rawValue: string): string[] {
+  return rawValue
+    .split(',')
+    .map(part => part.trim())
+    .filter(Boolean);
+}
+
+function isPlaceholderSecret(secret: string): boolean {
+  const normalized = secret.trim().toLowerCase();
+  if (PRODUCTION_SECRET_PLACEHOLDERS.has(normalized)) return true;
+  return normalized.startsWith('replace-with-');
+}
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -52,7 +71,8 @@ if (!parsed.success) {
 }
 
 const allowInsecureDevAuth = parsed.data.ALLOW_INSECURE_DEV_AUTH ?? parsed.data.NODE_ENV !== 'production';
-const streamTicketSecret = (parsed.data.STREAM_TICKET_SECRET || parsed.data.KEY_ENCRYPTION_SECRET).trim();
+const keyEncryptionSecret = parsed.data.KEY_ENCRYPTION_SECRET.trim();
+const streamTicketSecret = (parsed.data.STREAM_TICKET_SECRET || keyEncryptionSecret).trim();
 const requireRedisForReady = parsed.data.REQUIRE_REDIS_FOR_READY ?? parsed.data.NODE_ENV === 'production';
 
 if (parsed.data.NODE_ENV === 'production' && allowInsecureDevAuth) {
@@ -63,12 +83,36 @@ if (!allowInsecureDevAuth && !parsed.data.CLERK_SECRET_KEY) {
   throw new Error('Invalid environment:\nCLERK_SECRET_KEY is required when ALLOW_INSECURE_DEV_AUTH is false.');
 }
 
+if (keyEncryptionSecret.length < 16) {
+  throw new Error('Invalid environment:\nKEY_ENCRYPTION_SECRET must be at least 16 characters after trimming.');
+}
+
 if (streamTicketSecret.length < 16) {
   throw new Error('Invalid environment:\nSTREAM_TICKET_SECRET must be at least 16 characters.');
 }
 
+if (parsed.data.NODE_ENV === 'production') {
+  const corsOrigins = parseCorsOrigins(parsed.data.CORS_ORIGIN);
+  if (corsOrigins.length === 0 || corsOrigins.includes('*')) {
+    throw new Error('Invalid environment:\nCORS_ORIGIN must be explicit (no wildcard) in production.');
+  }
+
+  if (!parsed.data.STREAM_TICKET_SECRET || !parsed.data.STREAM_TICKET_SECRET.trim()) {
+    throw new Error('Invalid environment:\nSTREAM_TICKET_SECRET must be explicitly set in production.');
+  }
+
+  if (streamTicketSecret === keyEncryptionSecret) {
+    throw new Error('Invalid environment:\nSTREAM_TICKET_SECRET must differ from KEY_ENCRYPTION_SECRET in production.');
+  }
+
+  if (isPlaceholderSecret(keyEncryptionSecret) || isPlaceholderSecret(streamTicketSecret)) {
+    throw new Error('Invalid environment:\nEncryption secrets look like placeholders; set real production secrets.');
+  }
+}
+
 export const env = {
   ...parsed.data,
+  KEY_ENCRYPTION_SECRET: keyEncryptionSecret,
   ALLOW_INSECURE_DEV_AUTH: allowInsecureDevAuth,
   STREAM_TICKET_SECRET: streamTicketSecret,
   REQUIRE_REDIS_FOR_READY: requireRedisForReady,

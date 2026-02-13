@@ -21,6 +21,102 @@ redis.on('error', () => {
   // Optional dependency; callers handle degraded mode.
 });
 
+interface RedisReadyTelemetryState {
+  checksTotal: number;
+  failuresTotal: number;
+  consecutiveFailures: number;
+  lastCheckAt: number | null;
+  lastCheckDurationMs: number | null;
+  lastSuccessAt: number | null;
+  lastFailureAt: number | null;
+  lastErrorMessage: string | null;
+  degradedSinceTs: number | null;
+  totalDegradedMs: number;
+}
+
+export interface RedisReadyTelemetry {
+  checksTotal: number;
+  failuresTotal: number;
+  consecutiveFailures: number;
+  lastCheckAt: number | null;
+  lastCheckDurationMs: number | null;
+  lastSuccessAt: number | null;
+  lastFailureAt: number | null;
+  lastErrorMessage: string | null;
+  degraded: boolean;
+  degradedSinceTs: number | null;
+  degradedForMs: number;
+  totalDegradedMs: number;
+}
+
+export interface RedisReadyState extends RedisReadyTelemetry {
+  ok: boolean;
+  status: string;
+}
+
+const redisReadyTelemetryState: RedisReadyTelemetryState = {
+  checksTotal: 0,
+  failuresTotal: 0,
+  consecutiveFailures: 0,
+  lastCheckAt: null,
+  lastCheckDurationMs: null,
+  lastSuccessAt: null,
+  lastFailureAt: null,
+  lastErrorMessage: null,
+  degradedSinceTs: null,
+  totalDegradedMs: 0,
+};
+
+function resolveErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message.trim();
+  }
+  if (typeof error === 'string' && error.trim()) {
+    return error.trim();
+  }
+  return 'unknown redis readiness error';
+}
+
+function markRedisReadyHealthy(now = Date.now()): void {
+  redisReadyTelemetryState.consecutiveFailures = 0;
+  redisReadyTelemetryState.lastSuccessAt = now;
+  redisReadyTelemetryState.lastErrorMessage = null;
+  if (redisReadyTelemetryState.degradedSinceTs !== null) {
+    redisReadyTelemetryState.totalDegradedMs += Math.max(0, now - redisReadyTelemetryState.degradedSinceTs);
+    redisReadyTelemetryState.degradedSinceTs = null;
+  }
+}
+
+function markRedisReadyDegraded(error: unknown, now = Date.now()): void {
+  redisReadyTelemetryState.failuresTotal += 1;
+  redisReadyTelemetryState.consecutiveFailures += 1;
+  redisReadyTelemetryState.lastFailureAt = now;
+  redisReadyTelemetryState.lastErrorMessage = resolveErrorMessage(error);
+  if (redisReadyTelemetryState.degradedSinceTs === null) {
+    redisReadyTelemetryState.degradedSinceTs = now;
+  }
+}
+
+function getRedisReadyTelemetrySnapshot(now = Date.now()): RedisReadyTelemetry {
+  const degradedForMs =
+    redisReadyTelemetryState.degradedSinceTs === null ? 0 : Math.max(0, now - redisReadyTelemetryState.degradedSinceTs);
+
+  return {
+    checksTotal: redisReadyTelemetryState.checksTotal,
+    failuresTotal: redisReadyTelemetryState.failuresTotal,
+    consecutiveFailures: redisReadyTelemetryState.consecutiveFailures,
+    lastCheckAt: redisReadyTelemetryState.lastCheckAt,
+    lastCheckDurationMs: redisReadyTelemetryState.lastCheckDurationMs,
+    lastSuccessAt: redisReadyTelemetryState.lastSuccessAt,
+    lastFailureAt: redisReadyTelemetryState.lastFailureAt,
+    lastErrorMessage: redisReadyTelemetryState.lastErrorMessage,
+    degraded: redisReadyTelemetryState.degradedSinceTs !== null,
+    degradedSinceTs: redisReadyTelemetryState.degradedSinceTs,
+    degradedForMs,
+    totalDegradedMs: redisReadyTelemetryState.totalDegradedMs + degradedForMs,
+  };
+}
+
 export async function connectInfra(): Promise<void> {
   await pool.query('select 1');
   try {
@@ -43,24 +139,43 @@ export async function checkDatabaseReady(): Promise<boolean> {
   }
 }
 
-export async function checkRedisReady(): Promise<{
-  ok: boolean;
-  status: string;
-}> {
+export async function checkRedisReady(): Promise<RedisReadyState> {
+  const checkStartedAt = Date.now();
+  redisReadyTelemetryState.checksTotal += 1;
+
   try {
     if (redis.status === 'wait') {
       await redis.connect();
     }
 
     const pong = await redis.ping();
+    const now = Date.now();
+    redisReadyTelemetryState.lastCheckAt = now;
+    redisReadyTelemetryState.lastCheckDurationMs = Math.max(0, now - checkStartedAt);
+    if (pong === 'PONG') {
+      markRedisReadyHealthy(now);
+    } else {
+      markRedisReadyDegraded('unexpected redis ping response', now);
+    }
+
     return {
       ok: pong === 'PONG',
       status: redis.status,
+      ...getRedisReadyTelemetrySnapshot(now),
     };
-  } catch {
+  } catch (error) {
+    const now = Date.now();
+    redisReadyTelemetryState.lastCheckAt = now;
+    redisReadyTelemetryState.lastCheckDurationMs = Math.max(0, now - checkStartedAt);
+    markRedisReadyDegraded(error, now);
     return {
       ok: false,
       status: redis.status,
+      ...getRedisReadyTelemetrySnapshot(now),
     };
   }
+}
+
+export function getRedisReadyTelemetry(): RedisReadyTelemetry {
+  return getRedisReadyTelemetrySnapshot();
 }

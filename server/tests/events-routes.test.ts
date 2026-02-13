@@ -225,4 +225,44 @@ describe('event routes', () => {
       await app.close();
     }
   });
+
+  it('keeps stream endpoint available in best-effort mode when replay store is degraded and records telemetry', async () => {
+    const { redis } = await import('../src/db/client.js');
+    const { getStreamTicketReplayTelemetry, resetStreamTicketReplayTelemetryForTests } = await import(
+      '../src/auth/streamTicketTelemetry.js'
+    );
+    resetStreamTicketReplayTelemetryForTests();
+    vi.spyOn(redis, 'set').mockRejectedValueOnce(new Error('redis unavailable'));
+
+    const app = await buildEventsApp();
+    try {
+      const { token } = streamTicket.issueStreamTicket({
+        subject: TEST_SUB,
+        deviceId: TEST_DEVICE_ID,
+        ttlSeconds: 120,
+      });
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v2/events',
+        cookies: {
+          [streamTicket.STREAM_TICKET_COOKIE_NAME]: token,
+        },
+        headers: {
+          'x-sse-test-close': '1',
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.body).toContain('event: ready');
+
+      const telemetry = getStreamTicketReplayTelemetry();
+      expect(telemetry.mode).toBe('best-effort');
+      expect(telemetry.degraded).toBe(true);
+      expect(telemetry.failOpenBypasses).toBe(1);
+      expect(telemetry.storageUnavailableErrors).toBe(0);
+    } finally {
+      await app.close();
+    }
+  });
 });
