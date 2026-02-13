@@ -570,7 +570,9 @@ function App() {
   }, []);
 
   const refreshAiAuth = useCallback(async () => {
-    if (isProxyEnabled() && !isSignedIn) {
+    const proxyEnabled = isProxyEnabled();
+
+    if (proxyEnabled && !isSignedIn) {
       setAiAuth({ connected: false, scope: 'account' });
       setAiDegradedMessage('Capture-only mode — sign in to sync AI key across devices.');
       return;
@@ -579,13 +581,14 @@ function App() {
     try {
       const status = await getAIAuthStatus();
       setAiAuth(status);
-      if (!status.connected && isProxyEnabled()) {
+      if (!status.connected && proxyEnabled) {
         setAiDegradedMessage('Capture-only mode — connect an AI key in Settings.');
       }
-    } catch {
+    } catch (error) {
       setAiAuth({ connected: false });
-      if (isProxyEnabled()) {
-        setAiDegradedMessage('Capture-only mode — AI auth service unavailable.');
+      if (proxyEnabled) {
+        const mapped = toAiMessage(error);
+        setAiDegradedMessage(mapped.degradedMessage);
       }
     }
   }, [isSignedIn]);

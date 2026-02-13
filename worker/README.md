@@ -83,6 +83,9 @@ For production route-based deploys, set:
 - `workers_dev = false`
 - top-level `routes = [{ pattern = ".../api/*", zone_name = "..." }]`
 
+If production routes are managed in Cloudflare Dashboard instead of `worker/wrangler.toml`, set:
+- `WORKER_ROUTE_MODE=dashboard` when running `npm run config:check:worker` (and deployment workflows that run runtime config checks)
+
 ## Deploy
 
 ```bash

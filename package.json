@@ -26,7 +26,8 @@
     "vps:precheck:remote": "bash scripts/deploy-vps-remote.sh --precheck-only",
     "vps:sync:remote": "bash scripts/deploy-vps-remote.sh --sync-only",
     "vps:deploy:remote": "bash scripts/deploy-vps-remote.sh",
-    "vps:verify:remote": "bash scripts/verify-vps-remote.sh"
+    "vps:verify:remote": "bash scripts/verify-vps-remote.sh",
+    "vps:smoke:public": "bash scripts/smoke-public-api.sh"
   },
   "dependencies": {
     "@clerk/clerk-react": "^5.44.0",

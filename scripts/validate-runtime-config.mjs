@@ -5,6 +5,7 @@ import path from 'node:path';
 const ROOT = process.cwd();
 const SERVER_ENV_PATH = path.join(ROOT, 'server', '.env');
 const WRANGLER_PATH = path.join(ROOT, 'worker', 'wrangler.toml');
+const ROOT_ENV_PATH = path.join(ROOT, '.env');
 
 function parseArgs(argv) {
   const result = {
@@ -61,30 +62,169 @@ function parseEnvFile(filePath) {
   return parsed;
 }
 
-function parseWranglerVars(filePath) {
-  if (!fs.existsSync(filePath)) return {};
+function stripTomlInlineComment(value) {
+  let result = '';
+  let inDouble = false;
+  let inSingle = false;
+  let escaped = false;
+
+  for (const char of value) {
+    if (inDouble && !escaped && char === '\\') {
+      result += char;
+      escaped = true;
+      continue;
+    }
+
+    if (!escaped) {
+      if (char === '"' && !inSingle) {
+        inDouble = !inDouble;
+        result += char;
+        continue;
+      }
+
+      if (char === "'" && !inDouble) {
+        inSingle = !inSingle;
+        result += char;
+        continue;
+      }
+    }
+
+    if (char === '#' && !inDouble && !inSingle) {
+      break;
+    }
+
+    result += char;
+    escaped = false;
+  }
+
+  return result.trimEnd();
+}
+
+function getBracketDelta(value) {
+  let delta = 0;
+  let inDouble = false;
+  let inSingle = false;
+  let escaped = false;
+
+  for (const char of value) {
+    if (inDouble && !escaped && char === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (!escaped) {
+      if (char === '"' && !inSingle) {
+        inDouble = !inDouble;
+        continue;
+      }
+
+      if (char === "'" && !inDouble) {
+        inSingle = !inSingle;
+        continue;
+      }
+    }
+
+    if (!inDouble && !inSingle) {
+      if (char === '[') delta += 1;
+      if (char === ']') delta -= 1;
+    }
+
+    escaped = false;
+  }
+
+  return delta;
+}
+
+function hasDeclaredRoutes(routesExpression) {
+  const trimmed = String(routesExpression || '').trim();
+  if (!trimmed.startsWith('[')) {
+    return false;
+  }
+
+  const closingIndex = trimmed.lastIndexOf(']');
+  if (closingIndex < 0) {
+    return false;
+  }
+
+  const inner = trimmed.slice(1, closingIndex).replace(/[\s,]/g, '');
+  return inner.length > 0;
+}
+
+function parseWranglerConfig(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return {
+      vars: {},
+      workersDev: undefined,
+      routesDeclared: false,
+    };
+  }
 
   const raw = fs.readFileSync(filePath, 'utf8');
   const lines = raw.split(/\r?\n/);
-  const parsed = {};
+  const parsedVars = {};
+  let workersDev;
+  let routesExpression = '';
   let inVars = false;
+  let seenSection = false;
+  let routeBracketDepth = 0;
+  let capturingRoutes = false;
 
   for (const line of lines) {
-    const trimmed = line.trim();
+    const cleaned = stripTomlInlineComment(line);
+    const trimmed = cleaned.trim();
+
+    if (!trimmed) continue;
+
+    if (capturingRoutes) {
+      routesExpression += `\n${trimmed}`;
+      routeBracketDepth += getBracketDelta(trimmed);
+      if (routeBracketDepth <= 0) {
+        capturingRoutes = false;
+      }
+      continue;
+    }
+
     if (trimmed.startsWith('[')) {
+      seenSection = true;
       inVars = trimmed === '[vars]';
       continue;
     }
 
-    if (!inVars || !trimmed || trimmed.startsWith('#')) continue;
+    if (!inVars) {
+      if (seenSection) {
+        continue;
+      }
+
+      const workersDevMatch = trimmed.match(/^workers_dev\s*=\s*(.+)$/);
+      if (workersDevMatch) {
+        workersDev = parseBoolean(workersDevMatch[1].trim());
+        continue;
+      }
+
+      const routesMatch = trimmed.match(/^routes\s*=\s*(.+)$/);
+      if (routesMatch) {
+        routesExpression = routesMatch[1].trim();
+        routeBracketDepth = getBracketDelta(routesExpression);
+        if (routeBracketDepth > 0) {
+          capturingRoutes = true;
+        }
+        continue;
+      }
+
+      continue;
+    }
 
     const match = trimmed.match(/^([A-Z0-9_]+)\s*=\s*"([\s\S]*)"$/);
     if (!match) continue;
 
-    parsed[match[1]] = match[2];
+    parsedVars[match[1]] = match[2];
   }
 
-  return parsed;
+  return {
+    vars: parsedVars,
+    workersDev,
+    routesDeclared: hasDeclaredRoutes(routesExpression),
+  };
 }
 
 function isPlaceholderSecret(value) {
@@ -159,9 +299,11 @@ function validateServerConfig(errors) {
 }
 
 function validateWorkerConfig(errors) {
-  const wranglerVars = parseWranglerVars(WRANGLER_PATH);
+  const wranglerConfig = parseWranglerConfig(WRANGLER_PATH);
+  const rootEnv = parseEnvFile(ROOT_ENV_PATH);
   const config = {
-    ...wranglerVars,
+    ...wranglerConfig.vars,
+    ...rootEnv,
     ...process.env,
   };
 
@@ -203,6 +345,16 @@ function validateWorkerConfig(errors) {
     if (!originValidation.ok) {
       errors.push('worker: VPS_API_ORIGIN must be a valid absolute URL and use https:// outside loopback hosts');
     }
+  }
+
+  const workerRouteMode = String(config.WORKER_ROUTE_MODE || '').trim().toLowerCase();
+  if (isProduction && !wranglerConfig.routesDeclared && workerRouteMode !== 'dashboard') {
+    const workersDevState = wranglerConfig.workersDev === undefined ? 'unset' : String(wranglerConfig.workersDev);
+    errors.push(
+      `worker: no routes are declared in worker/wrangler.toml (workers_dev=${workersDevState}). ` +
+        'Declare top-level routes in worker/wrangler.toml or set WORKER_ROUTE_MODE=dashboard to acknowledge ' +
+        'Cloudflare Dashboard-managed routes.'
+    );
   }
 }
 

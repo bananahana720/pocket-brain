@@ -97,13 +97,16 @@ Create a `.env.local` file in the project root.
 **Recommended production setup (secure):**
 
 1. Deploy the Cloudflare Worker in `/worker` and route `/api/*` to it.
-2. Set Worker secret: `KEY_ENCRYPTION_SECRET`.
-3. Set Worker Clerk JWT verification vars together:
+2. Pick one Worker route mode for production config checks:
+   - Declare top-level `routes` in `worker/wrangler.toml` (recommended IaC path), or
+   - Keep routes in Cloudflare Dashboard and set `WORKER_ROUTE_MODE=dashboard` when running `npm run config:check:worker` (and any deploy workflow that runs it).
+3. Set Worker secret: `KEY_ENCRYPTION_SECRET`.
+4. Set Worker Clerk JWT verification vars together:
    - `CLERK_JWKS_URL`
    - `CLERK_ISSUER`
    - `CLERK_AUDIENCE`
-4. Set Worker `ALLOW_INSECURE_DEV_AUTH=false` in production.
-5. Configure server auth env:
+5. Set Worker `ALLOW_INSECURE_DEV_AUTH=false` in production.
+6. Configure server auth env:
    - `CLERK_SECRET_KEY`
    - `CLERK_PUBLISHABLE_KEY`
    - `ALLOW_INSECURE_DEV_AUTH=false`
@@ -115,7 +118,7 @@ Create a `.env.local` file in the project root.
    - `SYNC_BATCH_LIMIT=100`
    - `SYNC_PULL_LIMIT=500`
    - `REQUIRE_REDIS_FOR_READY` defaults to `true` in production (`false` in dev/test); set explicitly to override
-6. Create/connect your API key from the in-app drawer (`Menu > AI Security`).
+7. Create/connect your API key from the in-app drawer (`Menu > AI Security`).
 
 If Worker Clerk vars are partial/missing while a bearer token is provided, the Worker responds with `AUTH_CONFIG_INVALID`.
 If you are rolling out from an older server build that still has the compatibility toggle, set `ALLOW_LEGACY_SSE_QUERY_TOKEN=false` permanently before cutover. Current stream-ticket-only builds no longer use that flag.
@@ -216,6 +219,25 @@ Deploy script now:
 
 `/ready` is the deployment health endpoint. `/` on nginx may return `404` and is not a deployment-failure signal.
 Server metrics are available at `GET /metrics` for Prometheus scrape integration.
+
+### Public API Smoke Check
+
+Validate public Worker+routing JSON contracts:
+
+```bash
+npm run vps:smoke:public -- --base-url https://your-domain.example
+```
+
+With auth enabled smoke check for sync pull:
+
+```bash
+npm run vps:smoke:public -- --base-url https://your-domain.example --bearer <token>
+```
+
+This checks:
+- `GET /api/v1/auth/status` (expects `200` JSON)
+- `POST /api/v1/auth/connect` with an intentionally invalid payload (expects `400` JSON)
+- `GET /api/v2/sync/pull?cursor=0` (expects `401` without bearer, `200` with bearer)
 
 Dedicated multi-instance degradation validation:
 
