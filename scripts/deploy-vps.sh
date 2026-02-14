@@ -35,6 +35,26 @@ validate_positive_integer() {
   fi
 }
 
+assert_migration_metadata_present() {
+  local journal_path="server/drizzle/meta/_journal.json"
+  if [[ ! -f "$journal_path" ]]; then
+    echo "Missing Drizzle migration journal: $journal_path" >&2
+    exit 1
+  fi
+
+  if ! node -e '
+const fs = require("node:fs");
+const journalPath = process.argv[1];
+const journal = JSON.parse(fs.readFileSync(journalPath, "utf8"));
+if (!Array.isArray(journal.entries) || journal.entries.length === 0) {
+  throw new Error("journal entries array is empty");
+}
+' "$journal_path"; then
+    echo "Invalid Drizzle migration journal at $journal_path" >&2
+    exit 1
+  fi
+}
+
 collect_runtime_diagnostics() {
   echo "==> docker compose ps"
   docker compose ps || true
@@ -166,6 +186,9 @@ fi
 echo "==> Validating Docker Compose configuration"
 docker compose config -q
 
+echo "==> Validating Drizzle migration metadata"
+assert_migration_metadata_present
+
 echo "==> Rebuilding and restarting containers"
 docker compose up -d --build
 
@@ -183,11 +206,9 @@ fi
 
 echo "==> Applying database migrations"
 if ! docker compose exec -T api npm run db:migrate; then
-  echo "==> drizzle migrate failed; applying SQL baseline fallback"
-  if ! docker compose exec -T postgres psql -U postgres -d pocketbrain < server/drizzle/0000_initial.sql; then
-    collect_runtime_diagnostics
-    exit 1
-  fi
+  echo "==> drizzle migrate failed; aborting deploy" >&2
+  collect_runtime_diagnostics
+  exit 1
 fi
 
 API_READY_FILE="/tmp/pocketbrain-api-ready.json"

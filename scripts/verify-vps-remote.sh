@@ -173,10 +173,16 @@ echo "api_ready_status=\$API_READY_STATUS"
 echo "api_ready_summary="
 cat /tmp/pocketbrain-api-ready.json || true
 
-MIGRATION_TABLE_PRESENT=\$(docker compose exec -T postgres psql -U postgres -d pocketbrain -tAc "SELECT to_regclass('public.__drizzle_migrations') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]' || true)
+MIGRATION_TABLE_FQN=\$(docker compose exec -T postgres psql -U postgres -d pocketbrain -tAc "SELECT CASE WHEN to_regclass('drizzle.__drizzle_migrations') IS NOT NULL THEN 'drizzle.__drizzle_migrations' WHEN to_regclass('public.__drizzle_migrations') IS NOT NULL THEN 'public.__drizzle_migrations' ELSE '' END;" 2>/dev/null | tr -d '[:space:]' || true)
+MIGRATION_TABLE_PRESENT="f"
+if [[ -n "\$MIGRATION_TABLE_FQN" ]]; then
+  MIGRATION_TABLE_PRESENT="t"
+fi
 echo "migration_table_present=\$MIGRATION_TABLE_PRESENT"
+echo "migration_table_name=\${MIGRATION_TABLE_FQN:-unavailable}"
+MIGRATION_ROW=""
 if [[ "\$MIGRATION_TABLE_PRESENT" == "t" ]]; then
-  MIGRATION_ROW=\$(docker compose exec -T postgres psql -U postgres -d pocketbrain -F \$'\\t' -A -t -c "SELECT id, hash FROM \"__drizzle_migrations\" ORDER BY created_at DESC LIMIT 1;" 2>/dev/null || true)
+  MIGRATION_ROW=\$(docker compose exec -T postgres psql -U postgres -d pocketbrain -F \$'\\t' -A -t -c "SELECT id, hash FROM \${MIGRATION_TABLE_FQN} ORDER BY created_at DESC LIMIT 1;" 2>/dev/null || true)
   if [[ -n "\$MIGRATION_ROW" ]]; then
     echo "migration_version=\$(printf '%s' "\$MIGRATION_ROW" | cut -f1)"
     echo "migration_checksum=\$(printf '%s' "\$MIGRATION_ROW" | cut -f2)"
@@ -188,6 +194,14 @@ else
   echo "migration_version=unavailable"
   echo "migration_checksum=unavailable"
 fi
+if [[ "\$MIGRATION_TABLE_PRESENT" == "t" && -n "\$MIGRATION_ROW" ]]; then
+  MIGRATION_HEALTH="ok"
+elif [[ "\$MIGRATION_TABLE_PRESENT" == "t" ]]; then
+  MIGRATION_HEALTH="missing-row"
+else
+  MIGRATION_HEALTH="missing-table"
+fi
+echo "migration_health=\$MIGRATION_HEALTH"
 
 HEALTH_STATUS=\$(curl -s -o /tmp/pocketbrain-health.json -w "%{http_code}" http://127.0.0.1:8080/health || true)
 echo "health_status=\$HEALTH_STATUS"
@@ -203,7 +217,7 @@ if [[ "\$READY_STATUS" != "200" || "\$API_READY_STATUS" != "200" ]]; then
   docker compose logs --tail=120 nginx || true
 fi
 
-[[ "\$READY_STATUS" == "200" && "\$API_READY_STATUS" == "200" ]]
+[[ "\$READY_STATUS" == "200" && "\$API_READY_STATUS" == "200" && "\$MIGRATION_HEALTH" == "ok" ]]
 EOF
 )"
 
