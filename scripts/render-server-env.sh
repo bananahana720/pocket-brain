@@ -111,12 +111,31 @@ if is_placeholder "$STREAM_TICKET_SECRET" || [[ ${#STREAM_TICKET_SECRET} -lt 16 
   STREAM_TICKET_SECRET="$KEY_ENCRYPTION_SECRET"
 fi
 
+POSTGRES_DB="$(read_env_value POSTGRES_DB)"
+if [[ -z "$POSTGRES_DB" ]]; then
+  POSTGRES_DB="pocketbrain"
+fi
+
+POSTGRES_USER="$(read_env_value POSTGRES_USER)"
+if [[ -z "$POSTGRES_USER" ]]; then
+  POSTGRES_USER="postgres"
+fi
+
+POSTGRES_PASSWORD="$(read_env_value POSTGRES_PASSWORD)"
+
 DATABASE_URL="$(read_env_value DATABASE_URL)"
 if [[ -z "$DATABASE_URL" ]]; then
   if [[ "$MODE" == "production" ]]; then
-    DATABASE_URL="postgresql://postgres:postgres@postgres:5432/pocketbrain"
+    if [[ -z "$POSTGRES_PASSWORD" || "$POSTGRES_PASSWORD" == "postgres" ]]; then
+      echo "DATABASE_URL is missing and POSTGRES_PASSWORD is not set to a non-default value in $SOURCE_ENV for production mode." >&2
+      exit 1
+    fi
+    DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
   else
-    DATABASE_URL="postgresql://postgres:postgres@localhost:5432/pocketbrain"
+    if [[ -z "$POSTGRES_PASSWORD" ]]; then
+      POSTGRES_PASSWORD="postgres"
+    fi
+    DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB}"
   fi
 fi
 

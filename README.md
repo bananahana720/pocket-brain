@@ -319,6 +319,8 @@ Notes:
 - Use `--allow-stash` only when you intentionally want to stash remote drift.
 - `vps:deploy:remote` now prechecks remote docker/npm/.env prerequisites before deploy.
 - Deploy automatically renders `server/.env` from root `.env` before runtime config validation.
+- For production deploys, set either `DATABASE_URL` explicitly in root `.env` or set
+  `POSTGRES_PASSWORD` (plus optional `POSTGRES_USER`/`POSTGRES_DB`) to a non-default value.
 - If remote deploy fails, scripts automatically print remote compose status and recent service logs.
 - If `VPS_SSH_HOST` is set as a raw IP/hostname, scripts default to `ubuntu@<host>`.
 - If `VPS_SSH_IDENTITY` is unset and `~/.ssh/id_ed25519` exists, scripts use it automatically.
