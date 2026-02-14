@@ -33,7 +33,7 @@ Canonical tracker: `docs/RELIABILITY_PROGRAM.md`
 3. If only Worker->VPS path fails: fix network/routing/TLS path and confirm circuit closes after successful upstream responses.
 4. Confirm stream-ticket flow (`/api/v2/events/ticket` then `/api/v2/events`) after recovery.
 5. Re-run config gate before redeploy:
-   `NODE_ENV=production KEY_ENCRYPTION_SECRET=a1b2c3d4e5f60718293a4b5c6d7e8f90 STREAM_TICKET_SECRET=b1c2d3e4f5061728394a5b6c7d8e9f01 ALLOW_INSECURE_DEV_AUTH=false REQUIRE_REDIS_FOR_READY=true CORS_ORIGIN=https://app.pocketbrain.example CLERK_SECRET_KEY=sk_test_example CLERK_PUBLISHABLE_KEY=pk_test_example WORKER_ROUTE_MODE=dashboard VPS_API_ORIGIN=https://example.com npm run config:check`
+   `NODE_ENV=production KEY_ENCRYPTION_SECRET=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa STREAM_TICKET_SECRET=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ALLOW_INSECURE_DEV_AUTH=false REQUIRE_REDIS_FOR_READY=true CORS_ORIGIN=https://app.pocketbrain.example CLERK_SECRET_KEY=sk_test_example CLERK_PUBLISHABLE_KEY=pk_test_example WORKER_ROUTE_MODE=dashboard VPS_API_ORIGIN=https://example.com npm run config:check`
 
 ## Secret Rotation Drill (Monthly)
 

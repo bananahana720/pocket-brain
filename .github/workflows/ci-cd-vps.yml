@@ -55,8 +55,8 @@ jobs:
       - name: Validate runtime config guards (production baseline)
         env:
           NODE_ENV: production
-          KEY_ENCRYPTION_SECRET: a1b2c3d4e5f60718293a4b5c6d7e8f90
-          STREAM_TICKET_SECRET: b1c2d3e4f5061728394a5b6c7d8e9f01
+          KEY_ENCRYPTION_SECRET: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          STREAM_TICKET_SECRET: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
           ALLOW_INSECURE_DEV_AUTH: "false"
           REQUIRE_REDIS_FOR_READY: "true"
           CORS_ORIGIN: https://app.pocketbrain.example
