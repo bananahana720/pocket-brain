@@ -1,0 +1,4 @@
+interface:
+  display_name: "PB Runtime Config Gate"
+  short_description: "Validate server and worker runtime config before deploy."
+  default_prompt: "Validate PocketBrain runtime config for server and worker, explain failures, and provide exact remediation commands."

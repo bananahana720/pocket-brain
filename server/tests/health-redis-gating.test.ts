@@ -20,6 +20,7 @@ async function buildHealthApp(args: {
       status: args.redisStatus,
       checksTotal: 1,
       failuresTotal: args.redisOk ? 0 : 1,
+      timeoutsTotal: args.redisOk ? 0 : 1,
       consecutiveFailures: args.redisOk ? 0 : 1,
       lastCheckAt: Date.now(),
       lastCheckDurationMs: 1,
@@ -30,10 +31,12 @@ async function buildHealthApp(args: {
       degradedSinceTs: args.redisOk ? null : Date.now() - 1_000,
       degradedForMs: args.redisOk ? 0 : 1_000,
       totalDegradedMs: args.redisOk ? 0 : 5_000,
+      degradedTransitions: args.redisOk ? 0 : 1,
     }),
     getRedisReadyTelemetry: () => ({
       checksTotal: 1,
       failuresTotal: args.redisOk ? 0 : 1,
+      timeoutsTotal: args.redisOk ? 0 : 1,
       consecutiveFailures: args.redisOk ? 0 : 1,
       lastCheckAt: Date.now(),
       lastCheckDurationMs: 1,
@@ -44,6 +47,7 @@ async function buildHealthApp(args: {
       degradedSinceTs: args.redisOk ? null : Date.now() - 1_000,
       degradedForMs: args.redisOk ? 0 : 1_000,
       totalDegradedMs: args.redisOk ? 0 : 5_000,
+      degradedTransitions: args.redisOk ? 0 : 1,
     }),
   }));
 
@@ -80,6 +84,9 @@ async function buildHealthApp(args: {
     getSyncHealthMetrics: () => ({
       pullRequests: 5,
       pullResetsRequired: 1,
+      pushOpsTotal: 4,
+      pushOpsIdempotentReplays: 1,
+      pushOpsWriteFailures: 0,
       lastResetAt: Date.now(),
       lastResetCursor: 50,
       lastResetOldestAvailableCursor: 100,
@@ -120,6 +127,8 @@ describe('health route redis readiness gating', () => {
       expect(response.statusCode).toBe(200);
       const payload = response.json();
       expect(payload.ok).toBe(true);
+      expect(payload.readyMode).toBe('degraded');
+      expect(payload.readyCause).toBeNull();
       expect(payload.dependencies.redis.ok).toBe(false);
       expect(payload.dependencies.redis.degraded).toBe(true);
       expect(payload.dependencies.redis.requiredForReady).toBe(false);
@@ -148,6 +157,8 @@ describe('health route redis readiness gating', () => {
       expect(response.statusCode).toBe(503);
       const payload = response.json();
       expect(payload.ok).toBe(false);
+      expect(payload.readyMode).toBe('degraded');
+      expect(payload.readyCause).toBe('redis');
       expect(payload.dependencies.redis.requiredForReady).toBe(true);
       expect(payload.dependencies.realtime.redisRequiredForReady).toBe(true);
       expect(payload.dependencies.realtime.degradedReason).toBe('SUBSCRIBER_CONNECT_FAILED');

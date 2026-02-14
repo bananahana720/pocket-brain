@@ -23,6 +23,7 @@ describe('health routes', () => {
       status: 'ready',
       checksTotal: 1,
       failuresTotal: 0,
+      timeoutsTotal: 0,
       consecutiveFailures: 0,
       lastCheckAt: Date.now(),
       lastCheckDurationMs: 2,
@@ -33,6 +34,7 @@ describe('health routes', () => {
       degradedSinceTs: null,
       degradedForMs: 0,
       totalDegradedMs: 0,
+      degradedTransitions: 0,
     });
 
     const response = await app.inject({
@@ -43,9 +45,13 @@ describe('health routes', () => {
     expect(response.statusCode).toBe(200);
     const payload = response.json();
     expect(payload.ok).toBe(true);
+    expect(payload.readyMode).toBe('strict');
+    expect(payload.readyCause).toBeNull();
     expect(payload.dependencies.database.ok).toBe(true);
     expect(payload.dependencies.redis.ok).toBe(true);
     expect(payload.dependencies.redis.degraded).toBe(false);
+    expect(payload.dependencies.redis.requiredFailureThreshold).toBeTypeOf('number');
+    expect(payload.dependencies.redis.requiredDegradedGraceMs).toBeTypeOf('number');
     expect(payload.dependencies.realtime.mode).toBeDefined();
     expect(payload.dependencies.realtime.degradedReason).toBe('NOT_INITIALIZED');
     expect(payload.dependencies.streamTicket.replayProtectionMode).toBe('best-effort');
@@ -61,6 +67,7 @@ describe('health routes', () => {
       status: 'end',
       checksTotal: 1,
       failuresTotal: 1,
+      timeoutsTotal: 1,
       consecutiveFailures: 1,
       lastCheckAt: Date.now(),
       lastCheckDurationMs: 2,
@@ -71,6 +78,7 @@ describe('health routes', () => {
       degradedSinceTs: Date.now() - 1_000,
       degradedForMs: 1_000,
       totalDegradedMs: 1_000,
+      degradedTransitions: 1,
     });
 
     const response = await app.inject({
@@ -81,6 +89,7 @@ describe('health routes', () => {
     expect(response.statusCode).toBe(503);
     const payload = response.json();
     expect(payload.ok).toBe(false);
+    expect(payload.readyCause).toBe('database');
     expect(payload.dependencies.database.ok).toBe(false);
     expect(payload.dependencies.redis.degraded).toBe(true);
   });
@@ -102,5 +111,7 @@ describe('health routes', () => {
     expect(response.body).toContain('pocketbrain_stream_ticket_replay_store_available');
     expect(response.body).toContain('pocketbrain_stream_ticket_replay_degraded');
     expect(response.body).toContain('pocketbrain_redis_ready_failures_total');
+    expect(response.body).toContain('pocketbrain_redis_ready_timeout_total');
+    expect(response.body).toContain('pocketbrain_sync_push_ops_total');
   });
 });

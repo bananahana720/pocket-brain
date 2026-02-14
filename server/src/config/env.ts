@@ -61,6 +61,9 @@ const envSchema = z.object({
   SYNC_BATCH_LIMIT: z.coerce.number().int().min(1).max(500).default(100),
   SYNC_PULL_LIMIT: z.coerce.number().int().min(1).max(2000).default(500),
   REQUIRE_REDIS_FOR_READY: optionalBooleanFromEnv,
+  REDIS_READY_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(750),
+  REDIS_READY_REQUIRED_CONSECUTIVE_FAILURES: z.coerce.number().int().min(1).max(20).default(1),
+  REDIS_READY_REQUIRED_DEGRADED_GRACE_MS: z.coerce.number().int().min(0).max(10 * 60 * 1000).default(0),
 });
 
 const parsed = envSchema.safeParse(process.env);

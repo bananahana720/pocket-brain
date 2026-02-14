@@ -78,11 +78,18 @@ export interface SyncConflict {
   changedFields: string[];
 }
 
+export type SyncBackpressureMode = 'normal' | 'backlog' | 'blocked';
+
 export interface SyncBackpressure {
+  mode: SyncBackpressureMode;
   blocked: boolean;
   pendingOps: number;
   cap: number;
   overflowBy: number;
+  softCap: number;
+  overflowCap: number;
+  overflowOps: number;
+  persistenceFailure: boolean;
 }
 
 export interface SyncPushRequest {

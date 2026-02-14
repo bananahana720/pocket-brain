@@ -10,8 +10,8 @@ function json(route: Route, payload: unknown, status = 200, headers?: Record<str
   });
 }
 
-test.describe('sync queue backpressure', () => {
-  test('enters backlog mode and keeps writes enabled before hard cap is reached', async ({ page }) => {
+test.describe('sync queue overflow hard block', () => {
+  test('hard-blocks only after overflow cap is exhausted', async ({ page }) => {
     let markBootstrapLoaded = () => {};
     const bootstrapLoaded = new Promise<void>(resolve => {
       markBootstrapLoaded = resolve;
@@ -19,9 +19,9 @@ test.describe('sync queue backpressure', () => {
     let bootstrapResolved = false;
 
     await page.addInitScript(() => {
-      window.localStorage.setItem('pb_dev_auth_user_id', 'e2e-block-user');
+      window.localStorage.setItem('pb_dev_auth_user_id', 'e2e-overflow-hard-block-user');
       (window as any).__PB_SYNC_QUEUE_HARD_CAP = 1;
-      (window as any).__PB_SYNC_QUEUE_OVERFLOW_CAP = 4;
+      (window as any).__PB_SYNC_QUEUE_OVERFLOW_CAP = 1;
     });
 
     await page.route('**/api/v2/**', async route => {
@@ -115,12 +115,27 @@ test.describe('sync queue backpressure', () => {
     await bootstrapLoaded;
     await expect(page.getByText('Your mind is clear')).toBeVisible();
 
-    await createNoteViaUI(page, 'First pending note');
-    await expect(page.getByText('First pending note')).toBeVisible({ timeout: 10_000 });
+    await createNoteViaUI(page, 'Overflow note 1');
+    await expect(page.getByText('Overflow note 1')).toBeVisible({ timeout: 10_000 });
 
-    await createNoteViaUI(page, 'Second pending note in backlog');
+    await createNoteViaUI(page, 'Overflow note 2');
+    await expect(page.getByText('Overflow note 2')).toBeVisible({ timeout: 10_000 });
 
-    await expect(page.getByText('Second pending note in backlog')).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByTitle('Sync status: Blocked')).not.toBeVisible();
+    let blockedAt: number | null = null;
+    for (let i = 3; i <= 8; i += 1) {
+      const label = `Overflow note ${i}`;
+      await createNoteViaUI(page, label);
+
+      try {
+        await page.getByText(/Sync queue reached hard cap/i).first().waitFor({ state: 'visible', timeout: 1500 });
+        blockedAt = i;
+        await expect(page.locator('main').getByText(label)).not.toBeVisible();
+        break;
+      } catch {
+        await expect(page.getByText(label)).toBeVisible({ timeout: 10_000 });
+      }
+    }
+
+    expect(blockedAt).not.toBeNull();
   });
 });

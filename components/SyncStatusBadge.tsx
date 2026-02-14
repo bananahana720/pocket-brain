@@ -1,9 +1,11 @@
 import React from 'react';
 import { AlertTriangle, CheckCircle2, CloudOff, Lock, RefreshCw, ShieldAlert } from 'lucide-react';
 import { SyncStatus } from '../hooks/useSyncEngine';
+import { SyncBackpressureMode } from '../types';
 
 interface SyncStatusBadgeProps {
   status: SyncStatus;
+  backpressureMode?: SyncBackpressureMode;
 }
 
 const statusConfig: Record<SyncStatus, { label: string; className: string; icon: React.ReactNode }> = {
@@ -49,8 +51,19 @@ const statusConfig: Record<SyncStatus, { label: string; className: string; icon:
   },
 };
 
-const SyncStatusBadge: React.FC<SyncStatusBadgeProps> = ({ status }) => {
-  const config = statusConfig[status];
+const backlogConfig = {
+  label: 'Backlog',
+  className: 'text-indigo-700 border-indigo-200 bg-indigo-50 dark:text-indigo-300 dark:border-indigo-800/70 dark:bg-indigo-900/30',
+  icon: <AlertTriangle className="w-3.5 h-3.5" />,
+};
+
+const SyncStatusBadge: React.FC<SyncStatusBadgeProps> = ({ status, backpressureMode }) => {
+  const showBacklog =
+    backpressureMode === 'backlog' &&
+    status !== 'blocked' &&
+    status !== 'offline' &&
+    status !== 'conflict';
+  const config = showBacklog ? backlogConfig : statusConfig[status];
 
   return (
     <div

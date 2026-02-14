@@ -9,12 +9,57 @@ import {
 } from '../types';
 import { apiFetch } from './apiClient';
 
-function mapError(status: number, payload: any): Error {
+export type SyncServiceError = Error & {
+  code?: string;
+  retryable?: boolean;
+  status?: number;
+  cause?: string;
+  retryAfterMs?: number | null;
+  retryAfterSeconds?: number | null;
+};
+
+function parseRetryAfterMs(value: string | null): number | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const seconds = Number(trimmed);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.max(0, Math.floor(seconds * 1000));
+  }
+
+  const timestamp = Date.parse(trimmed);
+  if (!Number.isFinite(timestamp)) return null;
+  return Math.max(0, timestamp - Date.now());
+}
+
+function parsePayloadRetryAfterMs(payload: any): number | null {
+  const retryAfterMs = payload?.error?.retryAfterMs;
+  if (typeof retryAfterMs === 'number' && Number.isFinite(retryAfterMs) && retryAfterMs >= 0) {
+    return Math.floor(retryAfterMs);
+  }
+
+  const retryAfterSeconds = payload?.error?.retryAfterSeconds;
+  if (typeof retryAfterSeconds === 'number' && Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0) {
+    return Math.floor(retryAfterSeconds * 1000);
+  }
+
+  return null;
+}
+
+function mapError(response: Response, payload: any): SyncServiceError {
+  const status = response.status;
   const message = payload?.error?.message || `Request failed with ${status}`;
-  const error = new Error(message) as Error & { code?: string; retryable?: boolean; status?: number };
+  const error = new Error(message) as SyncServiceError;
   error.code = payload?.error?.code || 'UNKNOWN';
   error.retryable = !!payload?.error?.retryable;
   error.status = status;
+  error.cause = typeof payload?.error?.cause === 'string' ? payload.error.cause : undefined;
+  error.retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after')) ?? parsePayloadRetryAfterMs(payload);
+  error.retryAfterSeconds =
+    typeof error.retryAfterMs === 'number' && Number.isFinite(error.retryAfterMs)
+      ? Math.max(0, Math.ceil(error.retryAfterMs / 1000))
+      : null;
   return error;
 }
 
@@ -27,14 +72,14 @@ async function readJson<T>(response: Response): Promise<T> {
 export async function fetchNotesSnapshot(includeDeleted = true): Promise<{ notes: Note[]; cursor: number }> {
   const response = await apiFetch(`/api/v2/notes?includeDeleted=${includeDeleted ? 'true' : 'false'}`);
   const payload = await readJson<{ notes: Note[]; cursor: number }>(response);
-  if (!response.ok) throw mapError(response.status, payload);
+  if (!response.ok) throw mapError(response, payload);
   return payload;
 }
 
 export async function pullSyncChanges(cursor: number): Promise<SyncPullResponse> {
   const response = await apiFetch(`/api/v2/sync/pull?cursor=${encodeURIComponent(String(cursor))}`);
   const payload = await readJson<SyncPullResponse>(response);
-  if (!response.ok) throw mapError(response.status, payload);
+  if (!response.ok) throw mapError(response, payload);
   return payload;
 }
 
@@ -45,7 +90,7 @@ export async function pushSyncOps(operations: SyncOp[]): Promise<SyncPushRespons
     body: JSON.stringify({ operations }),
   });
   const payload = await readJson<SyncPushResponse>(response);
-  if (!response.ok) throw mapError(response.status, payload);
+  if (!response.ok) throw mapError(response, payload);
   return payload;
 }
 
@@ -57,14 +102,14 @@ export async function bootstrapSync(notes: Note[], sourceFingerprint: string): P
   });
 
   const payload = await readJson<SyncBootstrapState>(response);
-  if (!response.ok) throw mapError(response.status, payload);
+  if (!response.ok) throw mapError(response, payload);
   return payload;
 }
 
 export async function listDevices(): Promise<{ devices: DeviceSession[]; currentDeviceId: string }> {
   const response = await apiFetch('/api/v2/devices');
   const payload = await readJson<{ devices: DeviceSession[]; currentDeviceId: string }>(response);
-  if (!response.ok) throw mapError(response.status, payload);
+  if (!response.ok) throw mapError(response, payload);
   return payload;
 }
 
@@ -73,7 +118,7 @@ export async function revokeDevice(deviceId: string): Promise<void> {
     method: 'POST',
   });
   const payload = await readJson<{ ok: boolean }>(response);
-  if (!response.ok) throw mapError(response.status, payload);
+  if (!response.ok) throw mapError(response, payload);
 }
 
 export function openSyncEventStream(
@@ -87,13 +132,6 @@ export function openSyncEventStream(
   let reconnectTimer: number | null = null;
   let closed = false;
   let reconnectAttempts = 0;
-
-  const parseRetryAfterMs = (value: string | null): number | null => {
-    if (!value) return null;
-    const seconds = Number(value);
-    if (!Number.isFinite(seconds) || seconds < 0) return null;
-    return Math.min(MAX_RECONNECT_MS, Math.max(BASE_RECONNECT_MS, Math.floor(seconds * 1000)));
-  };
 
   const nextReconnectMs = () => {
     const exp = Math.min(MAX_RECONNECT_MS, BASE_RECONNECT_MS * Math.pow(2, reconnectAttempts));
@@ -117,7 +155,12 @@ export function openSyncEventStream(
       });
       if (!ticketResponse.ok) {
         onError();
-        scheduleReconnect(parseRetryAfterMs(ticketResponse.headers.get('retry-after')));
+        const retryAfterMs = parseRetryAfterMs(ticketResponse.headers.get('retry-after'));
+        if (retryAfterMs !== null) {
+          scheduleReconnect(Math.min(MAX_RECONNECT_MS, Math.max(BASE_RECONNECT_MS, retryAfterMs)));
+        } else {
+          scheduleReconnect();
+        }
         return;
       }
     } catch {

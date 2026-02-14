@@ -15,10 +15,11 @@ type SyncNote = {
   deletedAt?: number;
 };
 
-function json(route: Route, payload: unknown, status = 200) {
+function json(route: Route, payload: unknown, status = 200, headers?: Record<string, string>) {
   return route.fulfill({
     status,
     contentType: 'application/json',
+    headers,
     body: JSON.stringify(payload),
   });
 }
@@ -37,6 +38,7 @@ test.describe('sync queue recovery durability', () => {
     await page.addInitScript(() => {
       window.localStorage.setItem('pb_dev_auth_user_id', 'e2e-queue-recovery-user');
       (window as Window & { __PB_SYNC_QUEUE_HARD_CAP?: number }).__PB_SYNC_QUEUE_HARD_CAP = 1;
+      (window as Window & { __PB_SYNC_QUEUE_OVERFLOW_CAP?: number }).__PB_SYNC_QUEUE_OVERFLOW_CAP = 1;
     });
 
     await page.route('**/api/v2/**', async route => {
@@ -77,11 +79,15 @@ test.describe('sync queue recovery durability', () => {
             {
               error: {
                 code: 'SERVICE_UNAVAILABLE',
+                cause: 'circuit_open',
                 message: 'simulated sync outage',
                 retryable: true,
               },
             },
-            503
+            503,
+            {
+              'Retry-After': '1',
+            }
           );
         }
 
@@ -180,11 +186,14 @@ test.describe('sync queue recovery durability', () => {
 
     await createNoteViaUI(page, 'First pending note survives outage');
     await expect(page.getByText('First pending note survives outage')).toBeVisible({ timeout: 10_000 });
+
+    await createNoteViaUI(page, 'Second note reaches hard cap');
+    await expect(page.getByText('Second note reaches hard cap')).toBeVisible({ timeout: 10_000 });
     await expect(page.getByTitle('Sync status: Blocked')).toBeVisible({ timeout: 10_000 });
 
-    await createNoteViaUI(page, 'Second note should be blocked');
-    await expect(page.locator('main').getByText('Second note should be blocked')).not.toBeVisible();
-    await expect(page.getByText('Sync queue is full (1/1).')).toBeVisible();
+    await createNoteViaUI(page, 'Third note should be blocked');
+    await expect(page.locator('main').getByText('Third note should be blocked')).not.toBeVisible();
+    await expect(page.getByText('Sync queue reached hard cap (2/2).').first()).toBeVisible({ timeout: 10_000 });
 
     outageActive = false;
     await page.context().setOffline(true);

@@ -220,6 +220,8 @@ Deploy script now:
 
 Reliability tracking + rollback thresholds:
 - Program tracker: `docs/RELIABILITY_PROGRAM.md`
+- Failure-mode matrix: `docs/RELIABILITY_PROGRAM.md#failure-mode-matrix`
+- Consolidated release gate + rollback triggers: `docs/RELIABILITY_PROGRAM.md#consolidated-release-gate--rollback-triggers`
 - Alert/ops runbooks: `docs/ops/ALERTING.md`, `docs/ops/QUEUE_BACKPRESSURE.md`, `docs/ops/DEPENDENCY_RUNBOOK.md`
 
 `/ready` is the deployment health endpoint. `/` on nginx may return `404` and is not a deployment-failure signal.

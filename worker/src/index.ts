@@ -45,12 +45,21 @@ interface Env {
   ALLOW_INSECURE_DEV_AUTH?: string;
   VPS_PROXY_TIMEOUT_MS?: string;
   VPS_PROXY_RETRIES?: string;
+  VPS_PROXY_CIRCUIT_FAILURE_THRESHOLD?: string;
+  VPS_PROXY_CIRCUIT_OPEN_MS?: string;
+  VPS_PROXY_NO_RETRY_PATHS?: string;
 }
 
 type AIProvider = 'gemini' | 'openrouter';
 type CleanupMode = 'single' | 'batch';
-type UpstreamFailureCause = 'origin_unconfigured' | 'timeout' | 'network_error' | 'upstream_5xx' | 'circuit_open';
-type ProviderFailureCause = 'provider_timeout' | 'provider_5xx' | 'provider_circuit_open';
+type UpstreamFailureCause =
+  | 'origin_unconfigured'
+  | 'timeout'
+  | 'network_error'
+  | 'upstream_5xx'
+  | 'circuit_open'
+  | 'kv_unavailable';
+type ProviderFailureCause = 'provider_timeout' | 'provider_5xx' | 'provider_circuit_open' | 'provider_network_error';
 type FailureCause = UpstreamFailureCause | ProviderFailureCause;
 
 type Note = {
@@ -94,15 +103,20 @@ interface Metrics {
   vpsProxyRetries: number;
   vpsProxyCircuitOpens: number;
   vpsProxyCircuitRejects: number;
+  vpsProxyNoRetryPathHits: number;
+  vpsProxyRetryAfterHonored: number;
+  vpsProxy5xxPassthrough: number;
 }
 
 interface AuthConfigFailureMetrics {
   missingClerkConfig: number;
   partialClerkConfig: number;
+  invalidClerkConfig: number;
 }
 
 interface RuntimeConfigFailureMetrics {
   invalidEncryptionSecret: number;
+  invalidRotationSecret: number;
 }
 
 interface SecretRotationMetrics {
@@ -116,6 +130,7 @@ interface ReliabilityMetrics {
   authConfig: AuthConfigFailureMetrics;
   runtimeConfig: RuntimeConfigFailureMetrics;
   secretRotation: SecretRotationMetrics;
+  kvFailures: number;
 }
 
 const SESSION_COOKIE_NAME = 'pb_ai_session';
@@ -124,6 +139,7 @@ const SESSION_TTL_SECONDS = 24 * 60 * 60;
 const RETRY_ATTEMPTS = 2;
 const REQUEST_TIMEOUT_MS = 12000;
 const PROVIDER_OUTAGE_RETRY_AFTER_SECONDS = 5;
+const KV_UNAVAILABLE_RETRY_AFTER_SECONDS = 5;
 const MAX_TRANSCRIPTION_AUDIO_BASE64_CHARS = 6 * 1024 * 1024;
 const MAX_NOTE_CONTENT_CHARS = 800;
 const MAX_NOTE_TITLE_CHARS = 120;
@@ -139,8 +155,15 @@ const CIRCUIT_FAILURE_THRESHOLD = 5;
 const CIRCUIT_OPEN_MS = 30_000;
 const DEFAULT_VPS_PROXY_TIMEOUT_MS = 7_000;
 const DEFAULT_VPS_PROXY_RETRIES = 1;
-const VPS_PROXY_CIRCUIT_FAILURE_THRESHOLD = 3;
-const VPS_PROXY_CIRCUIT_OPEN_MS = 20_000;
+const DEFAULT_VPS_PROXY_CIRCUIT_FAILURE_THRESHOLD = 3;
+const DEFAULT_VPS_PROXY_CIRCUIT_OPEN_MS = 20_000;
+const DEFAULT_VPS_PROXY_NO_RETRY_PATHS = ['/api/v2/events', '/api/v2/events/ticket'];
+const PRODUCTION_SECRET_PLACEHOLDERS = new Set([
+  'replace-with-32-byte-secret',
+  'replace-with-separate-stream-ticket-secret',
+  '0123456789abcdef0123456789abcdef',
+  'fedcba9876543210fedcba9876543210',
+]);
 
 type RateLimitEntry = {
   windowStart: number;
@@ -202,6 +225,9 @@ const metrics: Metrics = {
   vpsProxyRetries: 0,
   vpsProxyCircuitOpens: 0,
   vpsProxyCircuitRejects: 0,
+  vpsProxyNoRetryPathHits: 0,
+  vpsProxyRetryAfterHonored: 0,
+  vpsProxy5xxPassthrough: 0,
 };
 const upstreamFailureCauses: Record<UpstreamFailureCause, number> = {
   origin_unconfigured: 0,
@@ -209,19 +235,23 @@ const upstreamFailureCauses: Record<UpstreamFailureCause, number> = {
   network_error: 0,
   upstream_5xx: 0,
   circuit_open: 0,
+  kv_unavailable: 0,
 };
 const providerFailureCauses: Record<ProviderFailureCause, number> = {
   provider_timeout: 0,
   provider_5xx: 0,
   provider_circuit_open: 0,
+  provider_network_error: 0,
 };
 const reliabilityMetrics: ReliabilityMetrics = {
   authConfig: {
     missingClerkConfig: 0,
     partialClerkConfig: 0,
+    invalidClerkConfig: 0,
   },
   runtimeConfig: {
     invalidEncryptionSecret: 0,
+    invalidRotationSecret: 0,
   },
   secretRotation: {
     fallbackDecrypts: 0,
@@ -229,6 +259,7 @@ const reliabilityMetrics: ReliabilityMetrics = {
     reencryptSuccesses: 0,
     reencryptFailures: 0,
   },
+  kvFailures: 0,
 };
 
 const rateLimits = new Map<string, RateLimitEntry>();
@@ -275,18 +306,35 @@ function getEncryptionSecretMinLength(env: Env): number {
   return 32;
 }
 
+function isPlaceholderSecret(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return true;
+  if (PRODUCTION_SECRET_PLACEHOLDERS.has(normalized)) return true;
+  return (
+    normalized.includes('replace-with') ||
+    normalized.includes('your-') ||
+    normalized.includes('example')
+  );
+}
+
 function isUpstreamFailureCause(value: unknown): value is UpstreamFailureCause {
   return (
     value === 'origin_unconfigured' ||
     value === 'timeout' ||
     value === 'network_error' ||
     value === 'upstream_5xx' ||
-    value === 'circuit_open'
+    value === 'circuit_open' ||
+    value === 'kv_unavailable'
   );
 }
 
 function isProviderFailureCause(value: unknown): value is ProviderFailureCause {
-  return value === 'provider_timeout' || value === 'provider_5xx' || value === 'provider_circuit_open';
+  return (
+    value === 'provider_timeout' ||
+    value === 'provider_5xx' ||
+    value === 'provider_circuit_open' ||
+    value === 'provider_network_error'
+  );
 }
 
 function recordFailureCause(cause: FailureCause | undefined): void {
@@ -306,22 +354,52 @@ function getRetryAfterHeaders(retryAfterSeconds: number): Record<string, string>
   };
 }
 
+function getRetryAfterSecondsFromHeaderValue(value: string | null): number | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const seconds = Number(trimmed);
+  if (Number.isFinite(seconds) && seconds > 0) {
+    return Math.max(1, Math.ceil(seconds));
+  }
+
+  const asDate = Date.parse(trimmed);
+  if (!Number.isNaN(asDate)) {
+    const deltaMs = asDate - Date.now();
+    return Math.max(1, Math.ceil(deltaMs / 1000));
+  }
+
+  return null;
+}
+
+function getRetryAfterHeadersFromHeaderValue(
+  retryAfterHeader: string | null,
+  fallbackRetryAfterSeconds: number
+): Record<string, string> {
+  const parsedSeconds = getRetryAfterSecondsFromHeaderValue(retryAfterHeader);
+  if (parsedSeconds !== null) {
+    return getRetryAfterHeaders(parsedSeconds);
+  }
+  return getRetryAfterHeaders(fallbackRetryAfterSeconds);
+}
+
 function getVpsProxyUnavailableHeaders(retryAfterSeconds: number): Record<string, string> {
   return getRetryAfterHeaders(retryAfterSeconds);
 }
 
-function getProviderOutageHeaders(): Record<string, string> {
-  return getRetryAfterHeaders(PROVIDER_OUTAGE_RETRY_AFTER_SECONDS);
+function getProviderOutageHeaders(retryAfterHeader?: string | null): Record<string, string> {
+  return getRetryAfterHeadersFromHeaderValue(retryAfterHeader ?? null, PROVIDER_OUTAGE_RETRY_AFTER_SECONDS);
 }
 
-function classifyProviderOutage(status: number): {
+function classifyProviderOutage(status: number, retryAfterHeader?: string | null): {
   failureCause?: ProviderFailureCause;
   headers?: Record<string, string>;
 } {
   if (status >= 500) {
     return {
       failureCause: 'provider_5xx',
-      headers: getProviderOutageHeaders(),
+      headers: getProviderOutageHeaders(retryAfterHeader),
     };
   }
   return {};
@@ -555,6 +633,33 @@ function errorResponse(error: unknown): Response {
   );
 }
 
+function parseBoundedEnvNumber(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = Number(value || '');
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(parsed)));
+}
+
+function parseNoRetryPaths(value: string | undefined): Set<string> {
+  const parsed = String(value || '')
+    .split(',')
+    .map(path => path.trim())
+    .filter(Boolean)
+    .map(path => (path.startsWith('/') ? path : `/${path}`));
+  const values = parsed.length > 0 ? parsed : DEFAULT_VPS_PROXY_NO_RETRY_PATHS;
+  return new Set(values);
+}
+
+function recordVpsProxyFailure(circuitFailureThreshold: number, circuitOpenMs: number): number {
+  metrics.vpsProxyFailures += 1;
+  vpsProxyCircuit.consecutiveFailures += 1;
+  if (vpsProxyCircuit.consecutiveFailures >= circuitFailureThreshold) {
+    vpsProxyCircuit.consecutiveFailures = 0;
+    vpsProxyCircuit.openUntil = Date.now() + circuitOpenMs;
+    metrics.vpsProxyCircuitOpens += 1;
+  }
+  return Math.max(1, Math.ceil(circuitOpenMs / 1000));
+}
+
 async function proxyToVps(request: Request, env: Env, pathname: string): Promise<Response> {
   if (vpsProxyCircuit.openUntil > Date.now()) {
     metrics.vpsProxyCircuitRejects += 1;
@@ -580,17 +685,20 @@ async function proxyToVps(request: Request, env: Env, pathname: string): Promise
     throw error;
   }
 
-  const timeoutMs = (() => {
-    const parsed = Number(env.VPS_PROXY_TIMEOUT_MS || '');
-    if (!Number.isFinite(parsed)) return DEFAULT_VPS_PROXY_TIMEOUT_MS;
-    return Math.min(30_000, Math.max(1_000, Math.floor(parsed)));
-  })();
-  const retries = (() => {
-    const parsed = Number(env.VPS_PROXY_RETRIES || '');
-    if (!Number.isFinite(parsed)) return DEFAULT_VPS_PROXY_RETRIES;
-    return Math.min(5, Math.max(0, Math.floor(parsed)));
-  })();
-  const shouldRetry = pathname !== '/api/v2/events';
+  const timeoutMs = parseBoundedEnvNumber(env.VPS_PROXY_TIMEOUT_MS, DEFAULT_VPS_PROXY_TIMEOUT_MS, 1_000, 30_000);
+  const retries = parseBoundedEnvNumber(env.VPS_PROXY_RETRIES, DEFAULT_VPS_PROXY_RETRIES, 0, 5);
+  const circuitFailureThreshold = parseBoundedEnvNumber(
+    env.VPS_PROXY_CIRCUIT_FAILURE_THRESHOLD,
+    DEFAULT_VPS_PROXY_CIRCUIT_FAILURE_THRESHOLD,
+    1,
+    20
+  );
+  const circuitOpenMs = parseBoundedEnvNumber(env.VPS_PROXY_CIRCUIT_OPEN_MS, DEFAULT_VPS_PROXY_CIRCUIT_OPEN_MS, 1_000, 120_000);
+  const noRetryPaths = parseNoRetryPaths(env.VPS_PROXY_NO_RETRY_PATHS);
+  const shouldRetry = !noRetryPaths.has(pathname);
+  if (!shouldRetry) {
+    metrics.vpsProxyNoRetryPathHits += 1;
+  }
 
   const url = new URL(request.url);
   const target = new URL(`${origin}${pathname}${url.search}`);
@@ -632,20 +740,18 @@ async function proxyToVps(request: Request, env: Env, pathname: string): Promise
           continue;
         }
 
-        metrics.vpsProxyFailures += 1;
-        vpsProxyCircuit.consecutiveFailures += 1;
-        if (vpsProxyCircuit.consecutiveFailures >= VPS_PROXY_CIRCUIT_FAILURE_THRESHOLD) {
-          vpsProxyCircuit.consecutiveFailures = 0;
-          vpsProxyCircuit.openUntil = Date.now() + VPS_PROXY_CIRCUIT_OPEN_MS;
-          metrics.vpsProxyCircuitOpens += 1;
+        const retryAfterSeconds = recordVpsProxyFailure(circuitFailureThreshold, circuitOpenMs);
+        const upstreamRetryAfter = getRetryAfterSecondsFromHeaderValue(response.headers.get('retry-after'));
+        if (upstreamRetryAfter !== null) {
+          metrics.vpsProxyRetryAfterHonored += 1;
         }
-        const retryAfterSeconds = Math.max(1, Math.ceil(VPS_PROXY_CIRCUIT_OPEN_MS / 1000));
+        metrics.vpsProxy5xxPassthrough += 1;
         throw new ApiError(
           503,
           'SERVICE_UNAVAILABLE',
           'Sync service is temporarily unavailable. Please retry shortly.',
           true,
-          getVpsProxyUnavailableHeaders(retryAfterSeconds),
+          upstreamRetryAfter !== null ? getRetryAfterHeaders(upstreamRetryAfter) : getRetryAfterHeaders(retryAfterSeconds),
           'upstream_5xx'
         );
       }
@@ -675,14 +781,7 @@ async function proxyToVps(request: Request, env: Env, pathname: string): Promise
         continue;
       }
 
-      metrics.vpsProxyFailures += 1;
-      vpsProxyCircuit.consecutiveFailures += 1;
-      if (vpsProxyCircuit.consecutiveFailures >= VPS_PROXY_CIRCUIT_FAILURE_THRESHOLD) {
-        vpsProxyCircuit.consecutiveFailures = 0;
-        vpsProxyCircuit.openUntil = Date.now() + VPS_PROXY_CIRCUIT_OPEN_MS;
-        metrics.vpsProxyCircuitOpens += 1;
-      }
-      const retryAfterSeconds = Math.max(1, Math.ceil(VPS_PROXY_CIRCUIT_OPEN_MS / 1000));
+      const retryAfterSeconds = recordVpsProxyFailure(circuitFailureThreshold, circuitOpenMs);
       throw new ApiError(
         503,
         'SERVICE_UNAVAILABLE',
@@ -696,14 +795,7 @@ async function proxyToVps(request: Request, env: Env, pathname: string): Promise
     }
   }
 
-  metrics.vpsProxyFailures += 1;
-  vpsProxyCircuit.consecutiveFailures += 1;
-  if (vpsProxyCircuit.consecutiveFailures >= VPS_PROXY_CIRCUIT_FAILURE_THRESHOLD) {
-    vpsProxyCircuit.consecutiveFailures = 0;
-    vpsProxyCircuit.openUntil = Date.now() + VPS_PROXY_CIRCUIT_OPEN_MS;
-    metrics.vpsProxyCircuitOpens += 1;
-  }
-  const retryAfterSeconds = Math.max(1, Math.ceil(VPS_PROXY_CIRCUIT_OPEN_MS / 1000));
+  const retryAfterSeconds = recordVpsProxyFailure(circuitFailureThreshold, circuitOpenMs);
   throw new ApiError(
     503,
     'SERVICE_UNAVAILABLE',
@@ -814,6 +906,25 @@ function audienceMatches(claim: string | string[] | undefined, expected: string 
   return claim.includes(expected);
 }
 
+function assertSecureAbsoluteUrlSetting(settingName: string, value: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    reliabilityMetrics.authConfig.invalidClerkConfig += 1;
+    throw new ApiError(500, 'AUTH_CONFIG_INVALID', `${settingName} must be a valid absolute URL.`);
+  }
+
+  if (parsed.protocol !== 'https:' && !isLoopbackHost(parsed.hostname)) {
+    reliabilityMetrics.authConfig.invalidClerkConfig += 1;
+    throw new ApiError(
+      500,
+      'AUTH_CONFIG_INVALID',
+      `${settingName} must use https:// outside loopback hosts.`
+    );
+  }
+}
+
 function getClerkJwtVerificationConfig(env: Env): ClerkJwtVerificationConfig | null {
   const jwksUrl = (env.CLERK_JWKS_URL || '').trim();
   const issuer = (env.CLERK_ISSUER || '').trim();
@@ -829,6 +940,9 @@ function getClerkJwtVerificationConfig(env: Env): ClerkJwtVerificationConfig | n
       'CLERK_JWKS_URL, CLERK_ISSUER, and CLERK_AUDIENCE must be set together.'
     );
   }
+
+  assertSecureAbsoluteUrlSetting('CLERK_JWKS_URL', jwksUrl);
+  assertSecureAbsoluteUrlSetting('CLERK_ISSUER', issuer);
 
   return {
     jwksUrl,
@@ -933,7 +1047,7 @@ function getClientIp(request: Request): string {
 }
 
 function isLoopbackHost(hostname: string): boolean {
-  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]';
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1';
 }
 
 function isLocalDiagnosticsRequest(request: Request): boolean {
@@ -956,6 +1070,69 @@ function ensureEncryptionSecretConfigured(env: Env): void {
   if (!secret || secret.length < minLength) {
     reliabilityMetrics.runtimeConfig.invalidEncryptionSecret += 1;
     throw new ApiError(500, 'INTERNAL_ERROR', 'AI proxy encryption secret is not configured');
+  }
+}
+
+function getValidatedPreviousEncryptionSecret(env: Env): string | null {
+  const previousSecret = typeof env.KEY_ENCRYPTION_SECRET_PREV === 'string' ? env.KEY_ENCRYPTION_SECRET_PREV.trim() : '';
+  if (!previousSecret) return null;
+
+  const activeSecret = typeof env.KEY_ENCRYPTION_SECRET === 'string' ? env.KEY_ENCRYPTION_SECRET.trim() : '';
+  const minLength = getEncryptionSecretMinLength(env);
+  if (
+    previousSecret.length < minLength ||
+    isPlaceholderSecret(previousSecret) ||
+    (activeSecret && previousSecret === activeSecret)
+  ) {
+    reliabilityMetrics.runtimeConfig.invalidRotationSecret += 1;
+    return null;
+  }
+
+  return previousSecret;
+}
+
+function kvUnavailableError(): ApiError {
+  return new ApiError(
+    503,
+    'SERVICE_UNAVAILABLE',
+    'Session storage is temporarily unavailable. Please retry shortly.',
+    true,
+    getRetryAfterHeaders(KV_UNAVAILABLE_RETRY_AFTER_SECONDS),
+    'kv_unavailable'
+  );
+}
+
+async function kvGetText(env: Env, key: string): Promise<string | null> {
+  try {
+    return await env.AI_SESSIONS.get(key, 'text');
+  } catch {
+    reliabilityMetrics.kvFailures += 1;
+    throw kvUnavailableError();
+  }
+}
+
+async function kvPutText(
+  env: Env,
+  key: string,
+  value: string,
+  options?: {
+    expirationTtl?: number;
+  }
+): Promise<void> {
+  try {
+    await env.AI_SESSIONS.put(key, value, options);
+  } catch {
+    reliabilityMetrics.kvFailures += 1;
+    throw kvUnavailableError();
+  }
+}
+
+async function kvDelete(env: Env, key: string): Promise<void> {
+  try {
+    await env.AI_SESSIONS.delete(key);
+  } catch {
+    reliabilityMetrics.kvFailures += 1;
+    throw kvUnavailableError();
   }
 }
 
@@ -1189,7 +1366,7 @@ async function decryptSessionApiKey(
     const apiKey = await decryptApiKey(payload, env.KEY_ENCRYPTION_SECRET);
     return { apiKey, usedPreviousSecret: false };
   } catch (error) {
-    const previousSecret = typeof env.KEY_ENCRYPTION_SECRET_PREV === 'string' ? env.KEY_ENCRYPTION_SECRET_PREV.trim() : '';
+    const previousSecret = getValidatedPreviousEncryptionSecret(env);
     if (!previousSecret) {
       reliabilityMetrics.secretRotation.decryptFailures += 1;
       throw error;
@@ -1382,7 +1559,7 @@ async function callGemini(apiKey: string, prompt: string): Promise<string> {
 
     if (!response.ok) {
       const body = await response.text();
-      const outage = classifyProviderOutage(response.status);
+      const outage = classifyProviderOutage(response.status, response.headers.get('retry-after'));
       throw new ApiError(
         response.status,
         response.status === 401 ? 'AUTH_REQUIRED' : response.status === 429 ? 'RATE_LIMITED' : 'PROVIDER_UNAVAILABLE',
@@ -1405,7 +1582,14 @@ async function callGemini(apiKey: string, prompt: string): Promise<string> {
       metrics.timeouts += 1;
       throw new ApiError(504, 'TIMEOUT', 'Provider request timed out', true, getProviderOutageHeaders(), 'provider_timeout');
     }
-    throw new ApiError(503, 'NETWORK', 'Network error while contacting Gemini', true, getProviderOutageHeaders(), 'provider_timeout');
+    throw new ApiError(
+      503,
+      'NETWORK',
+      'Network error while contacting Gemini',
+      true,
+      getProviderOutageHeaders(),
+      'provider_network_error'
+    );
   } finally {
     cleanup();
   }
@@ -1452,7 +1636,7 @@ async function callGeminiTranscription(
 
     if (!response.ok) {
       const body = await response.text();
-      const outage = classifyProviderOutage(response.status);
+      const outage = classifyProviderOutage(response.status, response.headers.get('retry-after'));
       throw new ApiError(
         response.status,
         response.status === 401 ? 'AUTH_REQUIRED' : response.status === 429 ? 'RATE_LIMITED' : 'PROVIDER_UNAVAILABLE',
@@ -1483,7 +1667,14 @@ async function callGeminiTranscription(
       metrics.timeouts += 1;
       throw new ApiError(504, 'TIMEOUT', 'Provider request timed out', true, getProviderOutageHeaders(), 'provider_timeout');
     }
-    throw new ApiError(503, 'NETWORK', 'Network error while contacting Gemini', true, getProviderOutageHeaders(), 'provider_timeout');
+    throw new ApiError(
+      503,
+      'NETWORK',
+      'Network error while contacting Gemini',
+      true,
+      getProviderOutageHeaders(),
+      'provider_network_error'
+    );
   } finally {
     cleanup();
   }
@@ -1508,7 +1699,7 @@ async function callOpenRouter(apiKey: string, prompt: string, model = 'google/ge
 
     if (!response.ok) {
       const body = await response.text();
-      const outage = classifyProviderOutage(response.status);
+      const outage = classifyProviderOutage(response.status, response.headers.get('retry-after'));
       throw new ApiError(
         response.status,
         response.status === 401 ? 'AUTH_REQUIRED' : response.status === 429 ? 'RATE_LIMITED' : 'PROVIDER_UNAVAILABLE',
@@ -1532,7 +1723,14 @@ async function callOpenRouter(apiKey: string, prompt: string, model = 'google/ge
       metrics.timeouts += 1;
       throw new ApiError(504, 'TIMEOUT', 'Provider request timed out', true, getProviderOutageHeaders(), 'provider_timeout');
     }
-    throw new ApiError(503, 'NETWORK', 'Network error while contacting OpenRouter', true, getProviderOutageHeaders(), 'provider_timeout');
+    throw new ApiError(
+      503,
+      'NETWORK',
+      'Network error while contacting OpenRouter',
+      true,
+      getProviderOutageHeaders(),
+      'provider_network_error'
+    );
   } finally {
     cleanup();
   }
@@ -1588,7 +1786,7 @@ async function requireLegacySession(
     throw new ApiError(401, 'AUTH_REQUIRED', 'Connect an AI key in Settings to enable AI features.');
   }
 
-  const raw = await env.AI_SESSIONS.get(`session:${sessionId}`, 'text');
+  const raw = await kvGetText(env, `session:${sessionId}`);
   if (!raw) {
     throw new ApiError(401, 'AUTH_REQUIRED', 'AI session missing. Please reconnect your key.');
   }
@@ -1597,12 +1795,12 @@ async function requireLegacySession(
   try {
     record = JSON.parse(raw) as SessionRecord;
   } catch {
-    await env.AI_SESSIONS.delete(`session:${sessionId}`);
+    await kvDelete(env, `session:${sessionId}`);
     throw new ApiError(403, 'AUTH_EXPIRED', 'AI session is invalid. Reconnect your key to continue.');
   }
 
   if (!record.expiresAt || record.expiresAt < Date.now()) {
-    await env.AI_SESSIONS.delete(`session:${sessionId}`);
+    await kvDelete(env, `session:${sessionId}`);
     throw new ApiError(403, 'AUTH_EXPIRED', 'AI session expired. Reconnect your key to continue.');
   }
 
@@ -1613,7 +1811,7 @@ async function requireLegacySession(
     apiKey = decrypted.apiKey;
     usedPreviousSecret = decrypted.usedPreviousSecret;
   } catch {
-    await env.AI_SESSIONS.delete(`session:${sessionId}`);
+    await kvDelete(env, `session:${sessionId}`);
     throw new ApiError(403, 'AUTH_EXPIRED', 'AI session could not be decrypted. Reconnect your key to continue.');
   }
 
@@ -1624,7 +1822,8 @@ async function requireLegacySession(
       if (remainingTtlSeconds <= 0) {
         throw new Error('Session expired during secret migration');
       }
-      await env.AI_SESSIONS.put(
+      await kvPutText(
+        env,
         `session:${sessionId}`,
         JSON.stringify({
           ...record,
@@ -1650,19 +1849,19 @@ async function requireLegacySession(
 }
 
 async function loadAccountKeyRecord(userId: string, env: Env): Promise<AccountKeyRecord | null> {
-  const raw = await env.AI_SESSIONS.get(`${ACCOUNT_KEY_PREFIX}${userId}`, 'text');
+  const raw = await kvGetText(env, `${ACCOUNT_KEY_PREFIX}${userId}`);
   if (!raw) return null;
 
   try {
     return JSON.parse(raw) as AccountKeyRecord;
   } catch {
-    await env.AI_SESSIONS.delete(`${ACCOUNT_KEY_PREFIX}${userId}`);
+    await kvDelete(env, `${ACCOUNT_KEY_PREFIX}${userId}`);
     return null;
   }
 }
 
 async function storeAccountKeyRecord(userId: string, record: AccountKeyRecord, env: Env): Promise<void> {
-  await env.AI_SESSIONS.put(`${ACCOUNT_KEY_PREFIX}${userId}`, JSON.stringify(record));
+  await kvPutText(env, `${ACCOUNT_KEY_PREFIX}${userId}`, JSON.stringify(record));
 }
 
 async function requireAiCredentials(
@@ -1683,7 +1882,7 @@ async function requireAiCredentials(
         apiKey = decrypted.apiKey;
         usedPreviousSecret = decrypted.usedPreviousSecret;
       } catch {
-        await env.AI_SESSIONS.delete(`${ACCOUNT_KEY_PREFIX}${userId}`);
+        await kvDelete(env, `${ACCOUNT_KEY_PREFIX}${userId}`);
         throw new ApiError(403, 'AUTH_EXPIRED', 'AI key record is invalid. Reconnect your key to continue.');
       }
 
@@ -1886,6 +2085,7 @@ export default {
             authConfig: { ...reliabilityMetrics.authConfig },
             runtimeConfig: { ...reliabilityMetrics.runtimeConfig },
             secretRotation: { ...reliabilityMetrics.secretRotation },
+            kvFailures: reliabilityMetrics.kvFailures,
           },
           vpsProxyCircuit: {
             open: remainingMs > 0,
@@ -1918,12 +2118,12 @@ export default {
         const sessionId = getSessionId(request);
         if (!sessionId) return jsonResponse({ connected: false, scope: 'device' });
 
-        const raw = await env.AI_SESSIONS.get(`session:${sessionId}`, 'text');
+        const raw = await kvGetText(env, `session:${sessionId}`);
         if (!raw) return jsonResponse({ connected: false, scope: 'device' });
 
         const record = JSON.parse(raw) as SessionRecord;
         if (record.expiresAt < Date.now()) {
-          await env.AI_SESSIONS.delete(`session:${sessionId}`);
+          await kvDelete(env, `session:${sessionId}`);
           return jsonResponse({ connected: false, scope: 'device' });
         }
 
@@ -1984,7 +2184,7 @@ export default {
           expiresAt,
         };
 
-        await env.AI_SESSIONS.put(`session:${sessionId}`, JSON.stringify(record), {
+        await kvPutText(env, `session:${sessionId}`, JSON.stringify(record), {
           expirationTtl: SESSION_TTL_SECONDS,
         });
 
@@ -2005,7 +2205,7 @@ export default {
       if (pathname === '/api/v1/auth/disconnect' && request.method === 'POST') {
         const userId = await getAuthenticatedUserId(request, env);
         if (userId) {
-          await env.AI_SESSIONS.delete(`${ACCOUNT_KEY_PREFIX}${userId}`);
+          await kvDelete(env, `${ACCOUNT_KEY_PREFIX}${userId}`);
           return jsonResponse({
             connected: false,
             scope: 'account',
@@ -2014,7 +2214,7 @@ export default {
 
         const sessionId = getSessionId(request);
         if (sessionId) {
-          await env.AI_SESSIONS.delete(`session:${sessionId}`);
+          await kvDelete(env, `session:${sessionId}`);
         }
 
         return jsonResponse(

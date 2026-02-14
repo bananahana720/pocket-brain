@@ -291,9 +291,9 @@ function App() {
   const [sharedNotePayload, setSharedNotePayload] = useState<SharedNotePayload | null>(null);
   const [isNotesHydrated, setIsNotesHydrated] = useState(false);
 
-  const pushQueueWarningToast = useCallback((message: string) => {
+  const pushQueueWarningToast = useCallback((message: string, level: 'info' | 'error' = 'info') => {
     const id = `${Date.now()}-${Math.random()}`;
-    setToasts(prev => [...prev, { id, message, type: 'info' }]);
+    setToasts(prev => [...prev, { id, message, type: level }]);
     setTimeout(() => {
       setToasts(prev => prev.filter(t => t.id !== id));
     }, 5000);
@@ -377,7 +377,7 @@ function App() {
   }, []);
 
   const assertSyncWritable = useCallback((): boolean => {
-    if (!syncEngine.syncBackpressure.blocked) {
+    if (syncEngine.syncBackpressure.mode !== 'blocked') {
       return true;
     }
 
@@ -385,13 +385,19 @@ function App() {
     const now = Date.now();
     if (now - syncBlockToastTsRef.current > 3_000) {
       syncBlockToastTsRef.current = now;
-      addToast(
-        `Sync queue is full (${syncEngine.syncBackpressure.pendingOps}/${syncEngine.syncBackpressure.cap}). Reconnect and wait for sync before editing more notes.`,
-        'error'
-      );
+      const message = syncEngine.syncBackpressure.persistenceFailure
+        ? 'Sync queue persistence failed. Writes are blocked until storage recovers.'
+        : `Sync queue reached hard cap (${syncEngine.syncBackpressure.pendingOps}/${syncEngine.syncBackpressure.cap}). Wait for sync to drain before editing more notes.`;
+      addToast(message, 'error');
     }
     return false;
-  }, [addToast, syncEngine.syncBackpressure.blocked, syncEngine.syncBackpressure.cap, syncEngine.syncBackpressure.pendingOps]);
+  }, [
+    addToast,
+    syncEngine.syncBackpressure.cap,
+    syncEngine.syncBackpressure.mode,
+    syncEngine.syncBackpressure.pendingOps,
+    syncEngine.syncBackpressure.persistenceFailure,
+  ]);
 
   const countQueuedAnalysisJobs = useCallback(
     () =>
@@ -2191,7 +2197,7 @@ function App() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <SyncStatusBadge status={syncEngine.syncStatus} />
+                <SyncStatusBadge status={syncEngine.syncStatus} backpressureMode={syncEngine.syncBackpressure.mode} />
                 <button
                   onClick={handleTodayToggle}
                   className={`relative px-3 py-2 rounded-md transition-colors flex items-center gap-1.5 border ${

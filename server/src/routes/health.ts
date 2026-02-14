@@ -34,6 +34,15 @@ export async function registerHealthRoutes(app: FastifyInstance): Promise<void> 
       '# HELP pocketbrain_sync_cursor_resets_total Total sync pull cursor reset-required responses.',
       '# TYPE pocketbrain_sync_cursor_resets_total counter',
       formatMetricLine('pocketbrain_sync_cursor_resets_total', sync.pullResetsRequired),
+      '# HELP pocketbrain_sync_push_ops_total Total sync push operations processed.',
+      '# TYPE pocketbrain_sync_push_ops_total counter',
+      formatMetricLine('pocketbrain_sync_push_ops_total', sync.pushOpsTotal),
+      '# HELP pocketbrain_sync_push_idempotent_replays_total Total idempotent sync push operation replays.',
+      '# TYPE pocketbrain_sync_push_idempotent_replays_total counter',
+      formatMetricLine('pocketbrain_sync_push_idempotent_replays_total', sync.pushOpsIdempotentReplays),
+      '# HELP pocketbrain_sync_push_write_failures_total Total sync push write failures.',
+      '# TYPE pocketbrain_sync_push_write_failures_total counter',
+      formatMetricLine('pocketbrain_sync_push_write_failures_total', sync.pushOpsWriteFailures),
       '# HELP pocketbrain_note_changes_pruned_total Total note change rows pruned by retention maintenance.',
       '# TYPE pocketbrain_note_changes_pruned_total counter',
       formatMetricLine('pocketbrain_note_changes_pruned_total', sync.noteChangesPrunedTotal),
@@ -109,9 +118,15 @@ export async function registerHealthRoutes(app: FastifyInstance): Promise<void> 
       '# HELP pocketbrain_redis_ready_failures_total Number of failed redis readiness checks.',
       '# TYPE pocketbrain_redis_ready_failures_total counter',
       formatMetricLine('pocketbrain_redis_ready_failures_total', redisTelemetry.failuresTotal),
+      '# HELP pocketbrain_redis_ready_timeout_total Number of redis readiness checks that timed out.',
+      '# TYPE pocketbrain_redis_ready_timeout_total counter',
+      formatMetricLine('pocketbrain_redis_ready_timeout_total', redisTelemetry.timeoutsTotal),
       '# HELP pocketbrain_redis_ready_consecutive_failures Consecutive failed redis readiness checks.',
       '# TYPE pocketbrain_redis_ready_consecutive_failures gauge',
       formatMetricLine('pocketbrain_redis_ready_consecutive_failures', redisTelemetry.consecutiveFailures),
+      '# HELP pocketbrain_ready_degraded_transitions_total Number of redis readiness degraded-state transitions.',
+      '# TYPE pocketbrain_ready_degraded_transitions_total counter',
+      formatMetricLine('pocketbrain_ready_degraded_transitions_total', redisTelemetry.degradedTransitions),
       '',
     ];
 
@@ -122,7 +137,15 @@ export async function registerHealthRoutes(app: FastifyInstance): Promise<void> 
   app.get('/ready', async (_request, reply) => {
     const [databaseOk, redisState] = await Promise.all([checkDatabaseReady(), checkRedisReady()]);
     const redisRequiredForReady = env.REQUIRE_REDIS_FOR_READY;
-    const readyOk = databaseOk && (!redisRequiredForReady || redisState.ok);
+    const redisRequiredFailureThreshold = env.REDIS_READY_REQUIRED_CONSECUTIVE_FAILURES ?? 1;
+    const redisRequiredDegradedGraceMs = env.REDIS_READY_REQUIRED_DEGRADED_GRACE_MS ?? 0;
+    const redisDependencyOk =
+      redisState.ok ||
+      (redisState.consecutiveFailures < redisRequiredFailureThreshold &&
+        redisState.degradedForMs < redisRequiredDegradedGraceMs);
+    const readyOk = databaseOk && (!redisRequiredForReady || redisDependencyOk);
+    const readyMode = !redisState.ok ? 'degraded' : 'strict';
+    const readyCause = !databaseOk ? 'database' : redisRequiredForReady && !redisDependencyOk ? 'redis' : null;
     const now = Date.now();
     const realtime = getRealtimeHubStatus();
     const streamTicket = getStreamTicketReplayTelemetry();
@@ -141,6 +164,8 @@ export async function registerHealthRoutes(app: FastifyInstance): Promise<void> 
         : null);
     const payload = {
       ok: readyOk,
+      readyMode,
+      readyCause,
       service: 'pocketbrain-server',
       ts: now,
       dependencies: {
@@ -151,6 +176,9 @@ export async function registerHealthRoutes(app: FastifyInstance): Promise<void> 
           ...redisState,
           degraded: !redisState.ok,
           requiredForReady: redisRequiredForReady,
+          dependencyOk: redisDependencyOk,
+          requiredFailureThreshold: redisRequiredFailureThreshold,
+          requiredDegradedGraceMs: redisRequiredDegradedGraceMs,
         },
         realtime: {
           initializationState: realtimeInitializationState,

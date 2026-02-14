@@ -17,11 +17,13 @@ import {
   pullSyncChanges,
   pushSyncOps,
   revokeDevice,
+  type SyncServiceError,
 } from '../services/syncService';
 import {
   type EnqueueSyncOpsResult,
   enqueueSyncOps,
   getSyncQueueHardCap,
+  getSyncQueueOverflowCap,
   loadSyncState,
   markSyncBootstrapped,
   removeQueuedSyncOps,
@@ -68,6 +70,34 @@ const SYNC_STREAM_FAILURE_THRESHOLD = 3;
 const SYNC_STREAM_CONTINUOUS_FAILURE_MS = 90_000;
 const SYNC_REGULAR_INTERVAL_MS = 30_000;
 const SYNC_POLLING_INTERVAL_MS = 15_000;
+const FORCE_POLLING_CAUSES = new Set(['circuit_open', 'timeout']);
+
+function normalizeRetryDelayHint(ms: number | null | undefined): number | null {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return null;
+  return Math.min(SYNC_RETRY_MAX_MS, Math.max(SYNC_RETRY_BASE_MS, Math.floor(ms)));
+}
+
+function toSyncServiceError(error: unknown): SyncServiceError | null {
+  if (!error || typeof error !== 'object') return null;
+  return error as SyncServiceError;
+}
+
+function getSyncErrorCause(error: unknown): string | null {
+  const syncError = toSyncServiceError(error);
+  if (!syncError || typeof syncError.cause !== 'string') return null;
+  return syncError.cause;
+}
+
+function shouldForcePolling(error: unknown): boolean {
+  const syncError = toSyncServiceError(error);
+  if (!syncError) return false;
+
+  if (syncError.code === 'TIMEOUT' || syncError.status === 504) {
+    return true;
+  }
+
+  return typeof syncError.cause === 'string' && FORCE_POLLING_CAUSES.has(syncError.cause);
+}
 
 function formatDurationMs(ms: number): string {
   const clamped = Math.max(0, Math.floor(ms));
@@ -237,12 +267,14 @@ export function useSyncEngine(args: {
   userId: string | null;
   notes: Note[];
   setNotes: React.Dispatch<React.SetStateAction<Note[]>>;
-  onQueueWarning?: (message: string) => void;
+  onQueueWarning?: (message: string, level?: 'info' | 'error') => void;
   onQueueRecovery?: (message: string) => void;
   onResetRecovery?: (message: string) => void;
 }) {
   const { enabled, userId, notes, setNotes, onQueueWarning, onQueueRecovery, onResetRecovery } = args;
   const syncQueueCap = getSyncQueueHardCap();
+  const syncOverflowCap = getSyncQueueOverflowCap();
+  const syncQueueHardCap = syncQueueCap + syncOverflowCap;
 
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(enabled ? 'syncing' : 'disabled');
   const [conflicts, setConflicts] = useState<SyncConflict[]>([]);
@@ -250,13 +282,19 @@ export function useSyncEngine(args: {
   const [currentDeviceId, setCurrentDeviceId] = useState<string | null>(null);
   const [isStreamFallbackActive, setIsStreamFallbackActive] = useState(false);
   const [syncBackpressure, setSyncBackpressure] = useState<SyncBackpressure>({
+    mode: 'normal',
     blocked: false,
     pendingOps: 0,
-    cap: syncQueueCap,
+    cap: syncQueueHardCap,
     overflowBy: 0,
+    softCap: syncQueueCap,
+    overflowCap: syncOverflowCap,
+    overflowOps: 0,
+    persistenceFailure: false,
   });
 
   const queueRef = useRef<SyncOp[]>([]);
+  const overflowQueueRef = useRef<SyncOp[]>([]);
   const cursorRef = useRef(0);
   const processingRef = useRef(false);
   const suppressDiffRef = useRef(false);
@@ -265,15 +303,21 @@ export function useSyncEngine(args: {
   const notesRef = useRef<Note[]>(notes);
   const conflictsRef = useRef<SyncConflict[]>([]);
   const backpressureRef = useRef<SyncBackpressure>({
+    mode: 'normal',
     blocked: false,
     pendingOps: 0,
-    cap: syncQueueCap,
+    cap: syncQueueHardCap,
     overflowBy: 0,
+    softCap: syncQueueCap,
+    overflowCap: syncOverflowCap,
+    overflowOps: 0,
+    persistenceFailure: false,
   });
   const conflictLoopRef = useRef<Map<string, number[]>>(new Map());
   const queueWarningTsRef = useRef(0);
   const retryAttemptRef = useRef(0);
   const retryTimerRef = useRef<number | null>(null);
+  const retryDueAtRef = useRef<number | null>(null);
   const pullLatestRef = useRef<() => Promise<void>>(async () => {});
   const flushPushQueueRef = useRef<() => Promise<void>>(async () => {});
   const streamFailureCountRef = useRef(0);
@@ -294,39 +338,95 @@ export function useSyncEngine(args: {
     setSyncBackpressure(next);
   }, []);
 
-  const refreshBackpressureFromQueue = useCallback((queue: SyncOp[], cap = syncQueueCap): SyncBackpressure => {
-    const normalizedCap = Math.max(1, cap);
-    const pendingOps = queue.length;
-    const overflowBy = Math.max(0, pendingOps - normalizedCap);
-    const previous = backpressureRef.current;
-    const next: SyncBackpressure = {
-      blocked: pendingOps >= normalizedCap,
-      pendingOps,
-      cap: normalizedCap,
-      overflowBy,
-    };
-
-    if (next.blocked && !previous.blocked) {
-      incrementMetric('sync_queue_block_events');
-      blockedSinceRef.current = Date.now();
-    } else if (!next.blocked && previous.blocked) {
-      incrementMetric('sync_queue_recovery_events');
-      const blockedSince = blockedSinceRef.current;
-      blockedSinceRef.current = null;
-      if (onQueueRecovery) {
-        const durationSuffix =
-          blockedSince === null ? '' : ` after ${formatDurationMs(Math.max(0, Date.now() - blockedSince))}`;
-        onQueueRecovery(`Sync queue recovered${durationSuffix}. Pending ops now ${next.pendingOps}/${next.cap}.`);
-      }
-    } else if (next.blocked && blockedSinceRef.current === null) {
-      blockedSinceRef.current = Date.now();
-    } else if (!next.blocked) {
-      blockedSinceRef.current = null;
+  const buildBackpressureState = useCallback((
+    queue: SyncOp[],
+    overflowQueue: SyncOp[],
+    options?: {
+      queueCap?: number;
+      overflowCap?: number;
+      persistenceFailure?: boolean;
+    }
+  ): SyncBackpressure => {
+    const normalizedQueueCap = Math.max(1, Math.floor(options?.queueCap ?? syncQueueCap));
+    const normalizedOverflowCap = Math.max(1, Math.floor(options?.overflowCap ?? syncOverflowCap));
+    const pendingOps = queue.length + overflowQueue.length;
+    const cap = normalizedQueueCap + normalizedOverflowCap;
+    const persistenceFailure = options?.persistenceFailure === true;
+    let mode: SyncBackpressure['mode'] = 'normal';
+    if (persistenceFailure || pendingOps >= cap) {
+      mode = 'blocked';
+    } else if (overflowQueue.length > 0) {
+      mode = 'backlog';
     }
 
-    setBackpressureState(next);
-    return next;
-  }, [onQueueRecovery, setBackpressureState, syncQueueCap]);
+    return {
+      mode,
+      blocked: mode === 'blocked',
+      pendingOps,
+      cap,
+      overflowBy: Math.max(0, pendingOps - cap),
+      softCap: normalizedQueueCap,
+      overflowCap: normalizedOverflowCap,
+      overflowOps: overflowQueue.length,
+      persistenceFailure,
+    };
+  }, [syncOverflowCap, syncQueueCap]);
+
+  const refreshBackpressureFromQueues = useCallback(
+    (
+      queue: SyncOp[],
+      overflowQueue: SyncOp[],
+      options?: {
+        queueCap?: number;
+        overflowCap?: number;
+        persistenceFailure?: boolean;
+      }
+    ): SyncBackpressure => {
+      const previous = backpressureRef.current;
+      const next = buildBackpressureState(queue, overflowQueue, options);
+
+      if (next.mode === 'backlog' && previous.mode !== 'backlog') {
+        incrementMetric('sync_queue_overflow_events');
+        incrementMetric('sync_queue_overflow_writes');
+      } else if (next.mode !== 'backlog' && previous.mode === 'backlog') {
+        incrementMetric('sync_queue_overflow_recovery_events');
+        incrementMetric('sync_queue_overflow_drains');
+        if (next.mode === 'normal') {
+          onQueueRecovery?.(`Sync backlog drained. Pending ops now ${next.pendingOps}/${next.cap}.`);
+        }
+      }
+
+      if (next.mode === 'blocked' && previous.mode !== 'blocked') {
+        incrementMetric('sync_queue_block_events');
+        blockedSinceRef.current = Date.now();
+      } else if (next.mode !== 'blocked' && previous.mode === 'blocked') {
+        incrementMetric('sync_queue_recovery_events');
+        const blockedSince = blockedSinceRef.current;
+        blockedSinceRef.current = null;
+        if (onQueueRecovery) {
+          const durationSuffix =
+            blockedSince === null ? '' : ` after ${formatDurationMs(Math.max(0, Date.now() - blockedSince))}`;
+          if (next.mode === 'backlog') {
+            onQueueRecovery(
+              `Sync queue dropped below hard cap${durationSuffix}. Writes are enabled while ${next.overflowOps} backlog op${
+                next.overflowOps === 1 ? '' : 's'
+              } drain.`
+            );
+          } else {
+            onQueueRecovery(`Sync queue recovered${durationSuffix}. Pending ops now ${next.pendingOps}/${next.cap}.`);
+          }
+        }
+      } else if (next.mode === 'blocked' && blockedSinceRef.current === null) {
+        blockedSinceRef.current = Date.now();
+      } else if (next.mode !== 'blocked') {
+        blockedSinceRef.current = null;
+      }
+
+      setBackpressureState(next);
+      return next;
+    },
+    [buildBackpressureState, onQueueRecovery, setBackpressureState]
+  );
 
   const setSyncStatusSafe = useCallback((next: SyncStatus) => {
     if (next === 'disabled') {
@@ -400,25 +500,94 @@ export function useSyncEngine(args: {
       window.clearTimeout(retryTimerRef.current);
       retryTimerRef.current = null;
     }
+    retryDueAtRef.current = null;
   }, []);
 
-  const scheduleRetry = useCallback(() => {
-    if (retryTimerRef.current !== null || !enabled || !navigator.onLine) return;
+  const scheduleRetry = useCallback((retryAfterMs?: number | null) => {
+    if (!enabled || !navigator.onLine) return;
+
+    const retryHint = normalizeRetryDelayHint(retryAfterMs);
     const baseDelay = Math.min(SYNC_RETRY_MAX_MS, SYNC_RETRY_BASE_MS * Math.pow(2, retryAttemptRef.current));
-    const delay = Math.min(SYNC_RETRY_MAX_MS, baseDelay + Math.floor(Math.random() * 250));
-    retryAttemptRef.current += 1;
+    const exponentialDelay = Math.min(SYNC_RETRY_MAX_MS, baseDelay + Math.floor(Math.random() * 250));
+    const delay = retryHint ?? exponentialDelay;
+    const dueAt = Date.now() + delay;
+
+    if (retryHint === null) {
+      retryAttemptRef.current += 1;
+    }
+
+    if (retryTimerRef.current !== null) {
+      const existingDueAt = retryDueAtRef.current;
+      if (existingDueAt !== null && dueAt >= existingDueAt - 50) {
+        return;
+      }
+      window.clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+
+    retryDueAtRef.current = dueAt;
+    if (retryHint !== null) {
+      incrementMetric('sync_retry_after_honored');
+      incrementMetric('sync_retry_after_applied');
+    }
     retryTimerRef.current = window.setTimeout(() => {
       retryTimerRef.current = null;
+      retryDueAtRef.current = null;
       void pullLatestRef.current();
       void flushPushQueueRef.current();
     }, delay);
   }, [enabled]);
 
+  const setBlockedByPersistenceFailure = useCallback((context: string, reason?: unknown) => {
+    const previous = backpressureRef.current;
+    const next = buildBackpressureState(queueRef.current, overflowQueueRef.current, {
+      queueCap: previous.softCap,
+      overflowCap: previous.overflowCap,
+      persistenceFailure: true,
+    });
+    const transitionedToBlocked = previous.mode !== 'blocked';
+
+    if (transitionedToBlocked) {
+      incrementMetric('sync_queue_block_events');
+      blockedSinceRef.current = Date.now();
+    }
+
+    incrementMetric('sync_queue_persistence_blocks');
+    setBackpressureState(next);
+
+    const now = Date.now();
+    if (onQueueWarning && now - queueWarningTsRef.current >= SYNC_QUEUE_WARNING_THROTTLE_MS) {
+      queueWarningTsRef.current = now;
+      onQueueWarning('Sync queue persistence failed. Writes are blocked until storage recovers.', 'error');
+    }
+
+    if (conflictsRef.current.length === 0) {
+      setSyncStatus('blocked');
+    }
+
+    console.error('sync queue persistence failure', { context, reason });
+  }, [buildBackpressureState, onQueueWarning, setBackpressureState]);
+
+  const probeSyncStorageWriteRecovery = useCallback(async (): Promise<boolean> => {
+    try {
+      await setSyncCursor(cursorRef.current);
+      return true;
+    } catch (error) {
+      console.error('sync queue persistence recovery probe failed', { context: 'flush_empty_queue', reason: error });
+      return false;
+    }
+  }, []);
+
   const applyEnqueueResult = useCallback((result: EnqueueSyncOpsResult, source: string) => {
     queueRef.current = result.queue;
+    overflowQueueRef.current = result.overflowQueue;
     const policy = result.queuePolicy;
-    const wasBlocked = backpressureRef.current.blocked;
-    const nextBackpressure = refreshBackpressureFromQueue(result.queue, policy.cap);
+    const previousMode = backpressureRef.current.mode;
+    const nextBackpressure = refreshBackpressureFromQueues(result.queue, result.overflowQueue, {
+      queueCap: result.overflowPolicy.queueCap,
+      overflowCap: result.overflowPolicy.overflowCap,
+      persistenceFailure: false,
+    });
     const hasCompactionDrops = policy.compactionDrops > 0;
 
     if (hasCompactionDrops) {
@@ -432,22 +601,33 @@ export function useSyncEngine(args: {
       });
     }
 
-    if (nextBackpressure.blocked && onQueueWarning) {
+    if ((nextBackpressure.mode === 'backlog' || nextBackpressure.mode === 'blocked') && onQueueWarning) {
       const now = Date.now();
       if (now - queueWarningTsRef.current >= SYNC_QUEUE_WARNING_THROTTLE_MS) {
         queueWarningTsRef.current = now;
-        onQueueWarning(
-          `Sync queue is at capacity (${nextBackpressure.pendingOps}/${nextBackpressure.cap}). Reconnect and let sync drain before editing more notes.`
-        );
+        if (nextBackpressure.mode === 'blocked') {
+          const blockedMessage = nextBackpressure.persistenceFailure
+            ? 'Sync queue persistence failed. Writes are blocked until storage recovers.'
+            : `Sync queue reached hard cap (${nextBackpressure.pendingOps}/${nextBackpressure.cap}). Wait for sync to drain before editing more notes.`;
+          onQueueWarning(blockedMessage, 'error');
+        } else {
+          onQueueWarning(
+            `Sync backlog growing (${nextBackpressure.pendingOps}/${nextBackpressure.cap}). Writes are still enabled while sync catches up.`,
+            'info'
+          );
+        }
       }
     }
 
-    if (nextBackpressure.blocked && navigator.onLine && conflictsRef.current.length === 0) {
+    if (nextBackpressure.mode === 'blocked' && navigator.onLine && conflictsRef.current.length === 0) {
+      if (!nextBackpressure.persistenceFailure && previousMode !== 'blocked') {
+        incrementMetric('sync_queue_overflow_block_events');
+      }
       setSyncStatus('blocked');
-    } else if (!nextBackpressure.blocked && wasBlocked && conflictsRef.current.length === 0) {
+    } else if (previousMode === 'blocked' && nextBackpressure.mode !== 'blocked' && conflictsRef.current.length === 0) {
       setSyncStatusSafe(navigator.onLine ? (streamFallbackActiveRef.current ? 'polling' : 'syncing') : 'offline');
     }
-  }, [onQueueWarning, refreshBackpressureFromQueue, setSyncStatusSafe]);
+  }, [onQueueWarning, refreshBackpressureFromQueues, setSyncStatusSafe]);
 
   const refreshDevices = useCallback(async () => {
     if (!enabled) {
@@ -473,7 +653,13 @@ export function useSyncEngine(args: {
     }
 
     if (queueRef.current.length === 0) {
-      refreshBackpressureFromQueue(queueRef.current);
+      if (backpressureRef.current.persistenceFailure) {
+        const persistenceRecovered = await probeSyncStorageWriteRecovery();
+        if (!persistenceRecovered) {
+          return;
+        }
+      }
+      refreshBackpressureFromQueues(queueRef.current, overflowQueueRef.current, { persistenceFailure: false });
       if (conflictsRef.current.length === 0) {
         setSyncStatusSafe(streamFallbackActiveRef.current ? 'polling' : 'synced');
       }
@@ -492,7 +678,8 @@ export function useSyncEngine(args: {
           response = await pushSyncOps(batch);
           resetRetryBackoff();
         } catch (error) {
-          const status = (error as Error & { status?: number }).status;
+          const syncError = toSyncServiceError(error);
+          const status = syncError?.status;
           if (status === 401 || status === 403) {
             setSyncStatusSafe('degraded');
             return;
@@ -501,8 +688,18 @@ export function useSyncEngine(args: {
             setSyncStatusSafe('offline');
             return;
           }
-          setSyncStatusSafe('degraded');
-          scheduleRetry();
+          if (shouldForcePolling(error)) {
+            incrementMetric('sync_retry_forced_polling');
+            incrementMetric('sync_polling_forced');
+            if (getSyncErrorCause(error) === 'circuit_open') {
+              incrementMetric('sync_vps_circuit_open');
+            }
+            activateStreamFallback();
+            setSyncStatusSafe('polling');
+          } else {
+            setSyncStatusSafe(streamFallbackActiveRef.current ? 'polling' : 'degraded');
+          }
+          scheduleRetry(syncError?.retryAfterMs);
           return;
         }
 
@@ -513,7 +710,8 @@ export function useSyncEngine(args: {
           }
           const state = await removeQueuedSyncOps(appliedIds);
           queueRef.current = state.queue;
-          refreshBackpressureFromQueue(state.queue);
+          overflowQueueRef.current = state.overflowQueue;
+          refreshBackpressureFromQueues(state.queue, state.overflowQueue, { persistenceFailure: false });
           cursorRef.current = Math.max(cursorRef.current, response.nextCursor);
           await setSyncCursor(cursorRef.current);
 
@@ -534,7 +732,8 @@ export function useSyncEngine(args: {
           const conflictRequestIds = response.conflicts.map(conflict => conflict.requestId);
           const state = await removeQueuedSyncOps(conflictRequestIds);
           queueRef.current = state.queue;
-          refreshBackpressureFromQueue(state.queue);
+          overflowQueueRef.current = state.overflowQueue;
+          refreshBackpressureFromQueues(state.queue, state.overflowQueue, { persistenceFailure: false });
 
           for (const conflict of response.conflicts) {
             const now = Date.now();
@@ -587,9 +786,10 @@ export function useSyncEngine(args: {
   }, [
     applyEnqueueResult,
     enabled,
-    refreshBackpressureFromQueue,
+    activateStreamFallback,
+    probeSyncStorageWriteRecovery,
+    refreshBackpressureFromQueues,
     resetRetryBackoff,
-    resetStreamFailureTracking,
     scheduleRetry,
     setNotes,
     setSyncStatusSafe,
@@ -614,7 +814,7 @@ export function useSyncEngine(args: {
         const baseSnapshot = snapshot.notes
           .filter(note => !note.deletedAt)
           .sort((a, b) => b.createdAt - a.createdAt);
-        setNotes(applyPendingQueue(baseSnapshot, queueRef.current));
+        setNotes(applyPendingQueue(baseSnapshot, [...queueRef.current, ...overflowQueueRef.current]));
         cursorRef.current = Math.max(snapshot.cursor, result.nextCursor || 0);
         await setSyncCursor(cursorRef.current);
         incrementMetric('sync_cursor_reset_recoveries');
@@ -634,23 +834,34 @@ export function useSyncEngine(args: {
       if (conflictsRef.current.length === 0) {
         setSyncStatusSafe(streamFallbackActiveRef.current ? 'polling' : 'synced');
       }
-    } catch {
+    } catch (error) {
+      const syncError = toSyncServiceError(error);
       if (!navigator.onLine) {
         setSyncStatusSafe('offline');
+      } else if (shouldForcePolling(error)) {
+        incrementMetric('sync_retry_forced_polling');
+        incrementMetric('sync_polling_forced');
+        if (getSyncErrorCause(error) === 'circuit_open') {
+          incrementMetric('sync_vps_circuit_open');
+        }
+        activateStreamFallback();
+        setSyncStatusSafe('polling');
+        scheduleRetry(syncError?.retryAfterMs);
       } else if (streamFallbackActiveRef.current) {
         setSyncStatusSafe('polling');
-        scheduleRetry();
+        scheduleRetry(syncError?.retryAfterMs);
       } else {
         setSyncStatusSafe('degraded');
-        scheduleRetry();
+        scheduleRetry(syncError?.retryAfterMs);
       }
     }
-  }, [enabled, onResetRecovery, resetRetryBackoff, scheduleRetry, setNotes, setSyncStatusSafe]);
+  }, [activateStreamFallback, enabled, onResetRecovery, resetRetryBackoff, scheduleRetry, setNotes, setSyncStatusSafe]);
 
   useEffect(() => {
     if (!enabled || !userId) {
       initializedUserRef.current = null;
       queueRef.current = [];
+      overflowQueueRef.current = [];
       cursorRef.current = 0;
       conflictLoopRef.current.clear();
       streamFallbackActiveRef.current = false;
@@ -662,10 +873,15 @@ export function useSyncEngine(args: {
       setDevices([]);
       setCurrentDeviceId(null);
       setBackpressureState({
+        mode: 'normal',
         blocked: false,
         pendingOps: 0,
-        cap: syncQueueCap,
+        cap: syncQueueHardCap,
         overflowBy: 0,
+        softCap: syncQueueCap,
+        overflowCap: syncOverflowCap,
+        overflowOps: 0,
+        persistenceFailure: false,
       });
       setSyncStatus('disabled');
       prevNotesRef.current = notes;
@@ -687,7 +903,11 @@ export function useSyncEngine(args: {
 
       const persisted = await loadSyncState();
       queueRef.current = persisted.queue;
-      refreshBackpressureFromQueue(queueRef.current);
+      overflowQueueRef.current = persisted.overflowQueue;
+      if (persisted.overflowQueue.length > 0) {
+        incrementMetric('sync_queue_overflow_rehydrated');
+      }
+      refreshBackpressureFromQueues(queueRef.current, overflowQueueRef.current, { persistenceFailure: false });
       cursorRef.current = persisted.cursor;
 
       if (!persisted.bootstrappedUserId && notesRef.current.length > 0) {
@@ -702,11 +922,10 @@ export function useSyncEngine(args: {
         await setSyncCursor(cursorRef.current);
 
         suppressDiffRef.current = true;
-        setNotes(
-          snapshot.notes
-            .filter(note => !note.deletedAt)
-            .sort((a, b) => b.createdAt - a.createdAt)
-        );
+        const baseSnapshot = snapshot.notes
+          .filter(note => !note.deletedAt)
+          .sort((a, b) => b.createdAt - a.createdAt);
+        setNotes(applyPendingQueue(baseSnapshot, [...queueRef.current, ...overflowQueueRef.current]));
       }
 
       await refreshDevices();
@@ -732,13 +951,15 @@ export function useSyncEngine(args: {
     flushPushQueue,
     notes,
     pullLatest,
-    refreshBackpressureFromQueue,
+    refreshBackpressureFromQueues,
     refreshDevices,
     resetRetryBackoff,
     scheduleRetry,
     setBackpressureState,
     setNotes,
     setSyncStatusSafe,
+    syncOverflowCap,
+    syncQueueHardCap,
     syncQueueCap,
     userId,
   ]);
@@ -802,11 +1023,16 @@ export function useSyncEngine(args: {
         applyEnqueueResult(state, 'note_diff');
       })
       .then(() => flushPushQueue())
-      .catch(() => {
-        setSyncStatusSafe('degraded');
-        scheduleRetry();
+      .catch(error => {
+        const syncError = toSyncServiceError(error);
+        setBlockedByPersistenceFailure('note_diff', error);
+        if (syncError?.retryAfterMs !== null && typeof syncError?.retryAfterMs === 'number') {
+          scheduleRetry(syncError.retryAfterMs);
+        } else {
+          scheduleRetry();
+        }
       });
-  }, [applyEnqueueResult, enabled, flushPushQueue, notes, scheduleRetry, setSyncStatusSafe, userId]);
+  }, [applyEnqueueResult, enabled, flushPushQueue, notes, scheduleRetry, setBlockedByPersistenceFailure, userId]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -932,12 +1158,13 @@ export function useSyncEngine(args: {
           });
         })
         .then(() => flushPushQueue())
-        .catch(() => {
-          setSyncStatusSafe('degraded');
-          scheduleRetry();
+        .catch(error => {
+          const syncError = toSyncServiceError(error);
+          setBlockedByPersistenceFailure('manual_conflict_retry', error);
+          scheduleRetry(syncError?.retryAfterMs);
         });
     },
-    [applyEnqueueResult, conflicts, flushPushQueue, resolveConflictKeepServer, scheduleRetry, setSyncStatusSafe]
+    [applyEnqueueResult, conflicts, flushPushQueue, resolveConflictKeepServer, scheduleRetry, setBlockedByPersistenceFailure]
   );
 
   const dismissConflict = useCallback((requestId: string) => {

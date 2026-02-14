@@ -21,6 +21,22 @@ function columnKey(column: any): string {
   return String(column);
 }
 
+function eqValue(expr: Expr | undefined, key: string): any {
+  if (!expr) return undefined;
+  if (expr.kind === 'eq' && columnKey(expr.column) === key) {
+    return expr.value;
+  }
+  if (expr.kind === 'and') {
+    for (const part of expr.exprs) {
+      const value = eqValue(part, key);
+      if (typeof value !== 'undefined') {
+        return value;
+      }
+    }
+  }
+  return undefined;
+}
+
 function matchesExpr(row: RowRecord, expr: Expr | undefined): boolean {
   if (!expr) return true;
   if (expr.kind === 'eq') return row[columnKey(expr.column)] === expr.value;
@@ -127,50 +143,65 @@ const mockContext = vi.hoisted(() => {
     state,
     reset,
     publishSyncEvent: vi.fn().mockResolvedValue(undefined),
+    failNextNoteChangeInsert: false,
+    forceIdempotencyMissOnceForRequestId: null as string | null,
   };
 });
 
 function createDbMock() {
   const { schema, state } = mockContext;
+  const uniqueViolation = (constraint: string) =>
+    Object.assign(new Error(`duplicate key value violates unique constraint "${constraint}"`), {
+      code: '23505',
+      constraint,
+    });
 
-  const query = {
-    notes: {
-      async findFirst(args: { where?: Expr }) {
-        return clone(state.notes.find(row => matchesExpr(row, args.where)));
+  const dbMock: any = {
+    query: {
+      notes: {
+        async findFirst(args: { where?: Expr }) {
+          return clone(state.notes.find(row => matchesExpr(row, args.where)));
+        },
+        async findMany(args: { where?: Expr; limit?: number }) {
+          let rows = state.notes.filter(row => matchesExpr(row, args.where));
+          rows = rows.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+          if (typeof args.limit === 'number') {
+            rows = rows.slice(0, args.limit);
+          }
+          return clone(rows);
+        },
       },
-      async findMany(args: { where?: Expr; limit?: number }) {
-        let rows = state.notes.filter(row => matchesExpr(row, args.where));
-        rows = rows.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
-        if (typeof args.limit === 'number') {
-          rows = rows.slice(0, args.limit);
-        }
-        return clone(rows);
+      noteChanges: {
+        async findMany(args: { where?: Expr; limit?: number }) {
+          let rows = state.noteChanges.filter(row => matchesExpr(row, args.where));
+          rows = rows.sort((a, b) => Number(a.seq) - Number(b.seq));
+          if (typeof args.limit === 'number') {
+            rows = rows.slice(0, args.limit);
+          }
+          return clone(rows);
+        },
+      },
+      idempotencyKeys: {
+        async findFirst(args: { where?: Expr }) {
+          const requestId = eqValue(args.where, 'requestId');
+          const row = state.idempotencyKeys.find(candidate => matchesExpr(candidate, args.where));
+          if (
+            row &&
+            mockContext.forceIdempotencyMissOnceForRequestId &&
+            requestId === mockContext.forceIdempotencyMissOnceForRequestId
+          ) {
+            mockContext.forceIdempotencyMissOnceForRequestId = null;
+            return undefined;
+          }
+          return clone(row);
+        },
+      },
+      syncBootstrap: {
+        async findFirst(args: { where?: Expr }) {
+          return clone(state.syncBootstrap.find(row => matchesExpr(row, args.where)));
+        },
       },
     },
-    noteChanges: {
-      async findMany(args: { where?: Expr; limit?: number }) {
-        let rows = state.noteChanges.filter(row => matchesExpr(row, args.where));
-        rows = rows.sort((a, b) => Number(a.seq) - Number(b.seq));
-        if (typeof args.limit === 'number') {
-          rows = rows.slice(0, args.limit);
-        }
-        return clone(rows);
-      },
-    },
-    idempotencyKeys: {
-      async findFirst(args: { where?: Expr }) {
-        return clone(state.idempotencyKeys.find(row => matchesExpr(row, args.where)));
-      },
-    },
-    syncBootstrap: {
-      async findFirst(args: { where?: Expr }) {
-        return clone(state.syncBootstrap.find(row => matchesExpr(row, args.where)));
-      },
-    },
-  };
-
-  return {
-    query,
     select(selection?: Record<string, unknown>) {
       return {
         from(table: any) {
@@ -188,7 +219,9 @@ function createDbMock() {
               }
               const rows = state.noteChanges.filter(row => matchesExpr(row, expr));
               const minSeq =
-                rows.length > 0 ? rows.reduce((min, row) => Math.min(min, Number(row.seq || 0)), Number.MAX_SAFE_INTEGER) : 0;
+                rows.length > 0
+                  ? rows.reduce((min, row) => Math.min(min, Number(row.seq || 0)), Number.MAX_SAFE_INTEGER)
+                  : 0;
               const maxSeq = rows.reduce((max, row) => Math.max(max, Number(row.seq || 0)), 0);
               if (!selection || Object.keys(selection).length === 0) {
                 return [{ value: maxSeq }];
@@ -222,10 +255,30 @@ function createDbMock() {
                   state.idempotencyKeys.push(clone(value));
                 }
               },
+              async returning() {
+                const exists = state.idempotencyKeys.some(
+                  row => row.userId === value.userId && row.requestId === value.requestId
+                );
+                if (exists) {
+                  throw uniqueViolation('idempotency_keys_pkey');
+                }
+                state.idempotencyKeys.push(clone(value));
+                return [clone(value)];
+              },
             };
           }
 
           if (table === schema.noteChanges) {
+            if (mockContext.failNextNoteChangeInsert) {
+              mockContext.failNextNoteChangeInsert = false;
+              throw new Error('mock note_changes insert failure');
+            }
+            const duplicateRequest = state.noteChanges.some(
+              row => row.userId === value.userId && row.requestId === value.requestId
+            );
+            if (duplicateRequest) {
+              throw uniqueViolation('note_changes_user_request_idx');
+            }
             const row = {
               ...clone(value),
               seq: ++state.seq,
@@ -344,7 +397,28 @@ function createDbMock() {
         },
       };
     },
+    async transaction(callback: (tx: any) => Promise<unknown>) {
+      const snapshot = clone({
+        notes: state.notes,
+        noteChanges: state.noteChanges,
+        idempotencyKeys: state.idempotencyKeys,
+        syncBootstrap: state.syncBootstrap,
+        seq: state.seq,
+      });
+      try {
+        return await callback(dbMock);
+      } catch (error) {
+        state.notes = snapshot.notes;
+        state.noteChanges = snapshot.noteChanges;
+        state.idempotencyKeys = snapshot.idempotencyKeys;
+        state.syncBootstrap = snapshot.syncBootstrap;
+        state.seq = snapshot.seq;
+        throw error;
+      }
+    },
   };
+
+  return dbMock;
 }
 
 vi.mock('drizzle-orm', () => ({
@@ -417,6 +491,8 @@ describe('sync service', () => {
   beforeEach(() => {
     mockContext.reset();
     mockContext.publishSyncEvent.mockClear();
+    mockContext.failNextNoteChangeInsert = false;
+    mockContext.forceIdempotencyMissOnceForRequestId = null;
   });
 
   it('replays idempotent push requests without duplicating note changes', async () => {
@@ -451,6 +527,63 @@ describe('sync service', () => {
     const pull = await pullSync(userId, 0);
     expect(pull.changes).toHaveLength(1);
     expect(pull.changes[0].requestId).toBe('req-idempotent-1');
+  });
+
+  it('rolls back note mutation when note-change append fails', async () => {
+    const note = makeNote('note-rollback-append', 1);
+    mockContext.failNextNoteChangeInsert = true;
+
+    await expect(
+      pushSync({
+        userId,
+        deviceId,
+        operations: [
+          {
+            requestId: 'req-rollback-append',
+            op: 'upsert',
+            noteId: note.id,
+            baseVersion: 0,
+            note,
+          },
+        ],
+      })
+    ).rejects.toThrow('mock note_changes insert failure');
+
+    expect(mockContext.state.notes).toHaveLength(0);
+    expect(mockContext.state.noteChanges).toHaveLength(0);
+    expect(mockContext.state.idempotencyKeys).toHaveLength(0);
+    expect(mockContext.publishSyncEvent).not.toHaveBeenCalled();
+  });
+
+  it('replays deterministically when idempotency lookup races a committed request', async () => {
+    const note = makeNote('note-idempotency-race', 1);
+    const op = {
+      requestId: 'req-idempotency-race',
+      op: 'upsert' as const,
+      noteId: note.id,
+      baseVersion: 0,
+      note,
+    };
+
+    const first = await pushSync({
+      userId,
+      deviceId,
+      operations: [op],
+    });
+
+    mockContext.forceIdempotencyMissOnceForRequestId = op.requestId;
+    const replayed = await pushSync({
+      userId,
+      deviceId,
+      operations: [op],
+    });
+
+    expect(first.applied).toHaveLength(1);
+    expect(replayed.applied).toHaveLength(1);
+    expect(replayed.applied[0]).toEqual(first.applied[0]);
+    expect(replayed.conflicts).toEqual([]);
+    expect(mockContext.state.noteChanges).toHaveLength(1);
+    expect(mockContext.state.idempotencyKeys).toHaveLength(1);
   });
 
   it('flags reset required when requested cursor predates pruned change history', async () => {

@@ -1,0 +1,4 @@
+interface:
+  display_name: "PB Worker Bootstrap"
+  short_description: "Bootstrap Cloudflare worker, KV namespace, and secrets safely."
+  default_prompt: "Bootstrap the PocketBrain worker with KV and secrets, validate config, deploy, and summarize results."

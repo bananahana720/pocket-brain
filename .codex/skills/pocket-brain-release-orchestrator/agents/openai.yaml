@@ -1,0 +1,4 @@
+interface:
+  display_name: "PB Release Orchestrator"
+  short_description: "Run safe VPS release flow with gates and rollback checks."
+  default_prompt: "Run the PocketBrain release flow: config check, remote precheck, sync, deploy, verify, and report rollback triggers."

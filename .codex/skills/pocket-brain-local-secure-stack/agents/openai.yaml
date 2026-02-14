@@ -1,0 +1,4 @@
+interface:
+  display_name: "PB Local Secure Stack"
+  short_description: "Bring up local app, worker, and sync server secure path."
+  default_prompt: "Set up and run PocketBrain local secure path end-to-end, verify health endpoints, and report blockers."

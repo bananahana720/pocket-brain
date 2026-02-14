@@ -14,11 +14,28 @@ interface WorkerMetrics {
   vpsProxyRetries: number;
   vpsProxyCircuitOpens: number;
   vpsProxyCircuitRejects: number;
+  vpsProxyNoRetryPathHits: number;
+  vpsProxyRetryAfterHonored: number;
+  vpsProxy5xxPassthrough: number;
+}
+
+interface WorkerDiagnostics {
+  metrics: WorkerMetrics;
+  failureCauses?: {
+    upstream?: Record<string, number>;
+    provider?: Record<string, number>;
+  };
+  reliability?: {
+    authConfig?: Record<string, number>;
+    runtimeConfig?: Record<string, number>;
+    secretRotation?: Record<string, number>;
+    kvFailures?: number;
+  };
 }
 
 const DiagnosticsPanel: React.FC = () => {
   const [clientMetrics, setClientMetrics] = useState(() => getClientMetricsSnapshot());
-  const [workerMetrics, setWorkerMetrics] = useState<WorkerMetrics | null>(null);
+  const [workerDiagnostics, setWorkerDiagnostics] = useState<WorkerDiagnostics | null>(null);
 
   useEffect(() => {
     const interval = window.setInterval(async () => {
@@ -29,7 +46,7 @@ const DiagnosticsPanel: React.FC = () => {
         if (!res.ok) return;
         const json = await res.json();
         if (json?.metrics) {
-          setWorkerMetrics(json.metrics as WorkerMetrics);
+          setWorkerDiagnostics(json as WorkerDiagnostics);
         }
       } catch {
         // Optional endpoint in local dev.
@@ -53,9 +70,21 @@ const DiagnosticsPanel: React.FC = () => {
         <p>Sync cursor resets: {clientMetrics.counters.sync_cursor_resets}</p>
         <p>Sync cursor reset recoveries: {clientMetrics.counters.sync_cursor_reset_recoveries}</p>
         <p>Sync queue compaction drops: {clientMetrics.counters.sync_queue_compaction_drops}</p>
+        <p>Sync queue overflow events: {clientMetrics.counters.sync_queue_overflow_events}</p>
+        <p>Sync queue overflow recoveries: {clientMetrics.counters.sync_queue_overflow_recovery_events}</p>
+        <p>Sync overflow writes: {clientMetrics.counters.sync_queue_overflow_writes}</p>
+        <p>Sync overflow drains: {clientMetrics.counters.sync_queue_overflow_drains}</p>
+        <p>Sync overflow rehydrated: {clientMetrics.counters.sync_queue_overflow_rehydrated}</p>
+        <p>Sync overflow hard-block events: {clientMetrics.counters.sync_queue_overflow_block_events}</p>
         <p>Sync queue block events: {clientMetrics.counters.sync_queue_block_events}</p>
         <p>Sync queue recoveries: {clientMetrics.counters.sync_queue_recovery_events}</p>
+        <p>Sync queue persistence blocks: {clientMetrics.counters.sync_queue_persistence_blocks}</p>
         <p>Sync blocked mutations: {clientMetrics.counters.sync_queue_blocked_mutations}</p>
+        <p>Sync Retry-After honored: {clientMetrics.counters.sync_retry_after_honored}</p>
+        <p>Sync Retry-After applied: {clientMetrics.counters.sync_retry_after_applied}</p>
+        <p>Sync forced polling: {clientMetrics.counters.sync_retry_forced_polling}</p>
+        <p>Sync polling forced: {clientMetrics.counters.sync_polling_forced}</p>
+        <p>Sync VPS circuit-open causes: {clientMetrics.counters.sync_vps_circuit_open}</p>
         <p>Avg capture visible: {clientMetrics.latencyAverages.captureVisibleMs}ms</p>
         <p>Avg capture write-through: {clientMetrics.latencyAverages.captureWriteMs}ms</p>
         <p>Stale drops: {clientMetrics.counters.stale_analysis_drops}</p>
@@ -75,23 +104,40 @@ const DiagnosticsPanel: React.FC = () => {
         <p>Backups: {clientMetrics.counters.backup_writes}</p>
         <p>Backup failures: {clientMetrics.counters.backup_failures}</p>
         <p>Periodic flushes: {clientMetrics.counters.persist_periodic_flushes}</p>
+        <p>Persist retry success: {clientMetrics.counters.persist_retry_success}</p>
+        <p>Persist retry failures: {clientMetrics.counters.persist_retry_failures}</p>
         <p>Avg persist: {clientMetrics.latencyAverages.persistMs}ms</p>
         <p>Avg AI: {clientMetrics.latencyAverages.aiMs}ms</p>
       </div>
-      {workerMetrics && (
+      {workerDiagnostics && (
         <div className="mt-2 border-t border-zinc-200 pt-2 text-zinc-700 dark:border-zinc-700 dark:text-zinc-300">
-          <p>Worker requests: {workerMetrics.requests}</p>
-          <p>Worker auth failures: {workerMetrics.authFailures}</p>
-          <p>Worker provider failures: {workerMetrics.providerFailures}</p>
-          <p>Worker retries: {workerMetrics.retries}</p>
-          <p>Worker timeouts: {workerMetrics.timeouts}</p>
-          <p>Worker rate-limited: {workerMetrics.rateLimited}</p>
-          <p>Worker circuit opens: {workerMetrics.circuitOpens}</p>
-          <p>Worker VPS proxy failures: {workerMetrics.vpsProxyFailures}</p>
-          <p>Worker VPS proxy timeouts: {workerMetrics.vpsProxyTimeouts}</p>
-          <p>Worker VPS proxy retries: {workerMetrics.vpsProxyRetries}</p>
-          <p>Worker VPS circuit opens: {workerMetrics.vpsProxyCircuitOpens}</p>
-          <p>Worker VPS circuit rejects: {workerMetrics.vpsProxyCircuitRejects}</p>
+          <p>Worker requests: {workerDiagnostics.metrics.requests}</p>
+          <p>Worker auth failures: {workerDiagnostics.metrics.authFailures}</p>
+          <p>Worker provider failures: {workerDiagnostics.metrics.providerFailures}</p>
+          <p>Worker retries: {workerDiagnostics.metrics.retries}</p>
+          <p>Worker timeouts: {workerDiagnostics.metrics.timeouts}</p>
+          <p>Worker rate-limited: {workerDiagnostics.metrics.rateLimited}</p>
+          <p>Worker circuit opens: {workerDiagnostics.metrics.circuitOpens}</p>
+          <p>Worker VPS proxy failures: {workerDiagnostics.metrics.vpsProxyFailures}</p>
+          <p>Worker VPS proxy timeouts: {workerDiagnostics.metrics.vpsProxyTimeouts}</p>
+          <p>Worker VPS proxy retries: {workerDiagnostics.metrics.vpsProxyRetries}</p>
+          <p>Worker VPS circuit opens: {workerDiagnostics.metrics.vpsProxyCircuitOpens}</p>
+          <p>Worker VPS circuit rejects: {workerDiagnostics.metrics.vpsProxyCircuitRejects}</p>
+          <p>Worker VPS no-retry path hits: {workerDiagnostics.metrics.vpsProxyNoRetryPathHits}</p>
+          <p>Worker Retry-After honored: {workerDiagnostics.metrics.vpsProxyRetryAfterHonored}</p>
+          <p>Worker upstream 5xx passthrough: {workerDiagnostics.metrics.vpsProxy5xxPassthrough}</p>
+          <p>
+            Worker upstream causes:{' '}
+            {JSON.stringify(workerDiagnostics.failureCauses?.upstream || {})}
+          </p>
+          <p>
+            Worker provider causes:{' '}
+            {JSON.stringify(workerDiagnostics.failureCauses?.provider || {})}
+          </p>
+          <p>
+            Worker reliability:{' '}
+            {JSON.stringify(workerDiagnostics.reliability || {})}
+          </p>
         </div>
       )}
     </aside>

@@ -24,6 +24,7 @@ redis.on('error', () => {
 interface RedisReadyTelemetryState {
   checksTotal: number;
   failuresTotal: number;
+  timeoutsTotal: number;
   consecutiveFailures: number;
   lastCheckAt: number | null;
   lastCheckDurationMs: number | null;
@@ -32,11 +33,13 @@ interface RedisReadyTelemetryState {
   lastErrorMessage: string | null;
   degradedSinceTs: number | null;
   totalDegradedMs: number;
+  degradedTransitions: number;
 }
 
 export interface RedisReadyTelemetry {
   checksTotal: number;
   failuresTotal: number;
+  timeoutsTotal: number;
   consecutiveFailures: number;
   lastCheckAt: number | null;
   lastCheckDurationMs: number | null;
@@ -47,6 +50,7 @@ export interface RedisReadyTelemetry {
   degradedSinceTs: number | null;
   degradedForMs: number;
   totalDegradedMs: number;
+  degradedTransitions: number;
 }
 
 export interface RedisReadyState extends RedisReadyTelemetry {
@@ -57,6 +61,7 @@ export interface RedisReadyState extends RedisReadyTelemetry {
 const redisReadyTelemetryState: RedisReadyTelemetryState = {
   checksTotal: 0,
   failuresTotal: 0,
+  timeoutsTotal: 0,
   consecutiveFailures: 0,
   lastCheckAt: null,
   lastCheckDurationMs: null,
@@ -65,7 +70,10 @@ const redisReadyTelemetryState: RedisReadyTelemetryState = {
   lastErrorMessage: null,
   degradedSinceTs: null,
   totalDegradedMs: 0,
+  degradedTransitions: 0,
 };
+
+const REDIS_READY_TIMEOUT_MESSAGE = 'redis readiness timeout';
 
 function resolveErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim()) {
@@ -94,6 +102,7 @@ function markRedisReadyDegraded(error: unknown, now = Date.now()): void {
   redisReadyTelemetryState.lastErrorMessage = resolveErrorMessage(error);
   if (redisReadyTelemetryState.degradedSinceTs === null) {
     redisReadyTelemetryState.degradedSinceTs = now;
+    redisReadyTelemetryState.degradedTransitions += 1;
   }
 }
 
@@ -104,6 +113,7 @@ function getRedisReadyTelemetrySnapshot(now = Date.now()): RedisReadyTelemetry {
   return {
     checksTotal: redisReadyTelemetryState.checksTotal,
     failuresTotal: redisReadyTelemetryState.failuresTotal,
+    timeoutsTotal: redisReadyTelemetryState.timeoutsTotal,
     consecutiveFailures: redisReadyTelemetryState.consecutiveFailures,
     lastCheckAt: redisReadyTelemetryState.lastCheckAt,
     lastCheckDurationMs: redisReadyTelemetryState.lastCheckDurationMs,
@@ -114,7 +124,29 @@ function getRedisReadyTelemetrySnapshot(now = Date.now()): RedisReadyTelemetry {
     degradedSinceTs: redisReadyTelemetryState.degradedSinceTs,
     degradedForMs,
     totalDegradedMs: redisReadyTelemetryState.totalDegradedMs + degradedForMs,
+    degradedTransitions: redisReadyTelemetryState.degradedTransitions,
   };
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+  if (timeoutMs <= 0) return promise;
+
+  return new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+    promise
+      .then(value => {
+        clearTimeout(timeout);
+        resolve(value);
+      })
+      .catch(error => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+  });
+}
+
+function isRedisReadyTimeout(error: unknown): boolean {
+  return resolveErrorMessage(error) === REDIS_READY_TIMEOUT_MESSAGE;
 }
 
 export async function connectInfra(): Promise<void> {
@@ -142,13 +174,14 @@ export async function checkDatabaseReady(): Promise<boolean> {
 export async function checkRedisReady(): Promise<RedisReadyState> {
   const checkStartedAt = Date.now();
   redisReadyTelemetryState.checksTotal += 1;
+  const timeoutMs = env.REDIS_READY_TIMEOUT_MS;
 
   try {
     if (redis.status === 'wait') {
-      await redis.connect();
+      await withTimeout(redis.connect(), timeoutMs, REDIS_READY_TIMEOUT_MESSAGE);
     }
 
-    const pong = await redis.ping();
+    const pong = await withTimeout(redis.ping(), timeoutMs, REDIS_READY_TIMEOUT_MESSAGE);
     const now = Date.now();
     redisReadyTelemetryState.lastCheckAt = now;
     redisReadyTelemetryState.lastCheckDurationMs = Math.max(0, now - checkStartedAt);
@@ -167,6 +200,9 @@ export async function checkRedisReady(): Promise<RedisReadyState> {
     const now = Date.now();
     redisReadyTelemetryState.lastCheckAt = now;
     redisReadyTelemetryState.lastCheckDurationMs = Math.max(0, now - checkStartedAt);
+    if (isRedisReadyTimeout(error)) {
+      redisReadyTelemetryState.timeoutsTotal += 1;
+    }
     markRedisReadyDegraded(error, now);
     return {
       ok: false,

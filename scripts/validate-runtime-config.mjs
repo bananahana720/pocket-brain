@@ -312,6 +312,14 @@ function validateServerConfig(errors) {
     errors.push('server: STREAM_TICKET_SECRET must be set (or fallback secret must be valid) with at least 16 chars');
   }
 
+  const streamTicketTtlRaw = String(config.STREAM_TICKET_TTL_SECONDS || '').trim();
+  if (streamTicketTtlRaw) {
+    const parsedTtl = Number(streamTicketTtlRaw);
+    if (!Number.isInteger(parsedTtl) || parsedTtl < 15 || parsedTtl > 900) {
+      errors.push('server: STREAM_TICKET_TTL_SECONDS must be an integer between 15 and 900');
+    }
+  }
+
   if (isProduction) {
     const corsOrigins = parseCorsOrigins(config.CORS_ORIGIN || '*');
     if (corsOrigins.length === 0 || corsOrigins.includes('*')) {
@@ -325,6 +333,10 @@ function validateServerConfig(errors) {
 
     if (streamSecret && keySecret && streamSecret === keySecret) {
       errors.push('server: STREAM_TICKET_SECRET must differ from KEY_ENCRYPTION_SECRET in production');
+    }
+
+    if (parseBoolean(config.ALLOW_LEGACY_SSE_QUERY_TOKEN) === true) {
+      errors.push('server: ALLOW_LEGACY_SSE_QUERY_TOKEN must be false in production');
     }
   }
 }
@@ -351,9 +363,26 @@ function validateWorkerConfig(errors) {
     String(config.CLERK_ISSUER || '').trim(),
     String(config.CLERK_AUDIENCE || '').trim(),
   ];
+  const [clerkJwksUrl, clerkIssuer] = clerkTuple;
   const clerkDefined = clerkTuple.filter(Boolean).length;
   if (clerkDefined > 0 && clerkDefined < 3) {
     errors.push('worker: CLERK_JWKS_URL, CLERK_ISSUER, and CLERK_AUDIENCE must be set together');
+  }
+  if (isProduction && allowInsecureDevAuth !== true && clerkDefined === 0) {
+    errors.push(
+      'worker: CLERK_JWKS_URL, CLERK_ISSUER, and CLERK_AUDIENCE are required in production unless ALLOW_INSECURE_DEV_AUTH=true'
+    );
+  }
+  if (clerkDefined === 3) {
+    const jwksValidation = validateHttpsOrigin(clerkJwksUrl);
+    if (!jwksValidation.ok) {
+      errors.push('worker: CLERK_JWKS_URL must be a valid absolute URL and use https:// outside loopback hosts');
+    }
+
+    const issuerValidation = validateHttpsOrigin(clerkIssuer);
+    if (!issuerValidation.ok) {
+      errors.push('worker: CLERK_ISSUER must be a valid absolute URL and use https:// outside loopback hosts');
+    }
   }
 
   const keySecret = String(config.KEY_ENCRYPTION_SECRET || process.env.KEY_ENCRYPTION_SECRET || '').trim();
@@ -364,6 +393,18 @@ function validateWorkerConfig(errors) {
         isProduction ? 'production' : 'runtime env'
       }`
     );
+  }
+
+  const previousKeySecret = String(config.KEY_ENCRYPTION_SECRET_PREV || '').trim();
+  if (previousKeySecret) {
+    if (isPlaceholderSecret(previousKeySecret) || previousKeySecret.length < keySecretMinLen) {
+      errors.push(
+        `worker: KEY_ENCRYPTION_SECRET_PREV must be non-placeholder and at least ${keySecretMinLen} chars when set`
+      );
+    }
+    if (keySecret && previousKeySecret === keySecret) {
+      errors.push('worker: KEY_ENCRYPTION_SECRET_PREV must differ from KEY_ENCRYPTION_SECRET when set');
+    }
   }
 
   const vpsOrigin = String(config.VPS_API_ORIGIN || '').trim();

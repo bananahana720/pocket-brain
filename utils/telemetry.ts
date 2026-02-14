@@ -27,11 +27,25 @@ export type ClientMetricName =
   | 'sync_cursor_resets'
   | 'sync_cursor_reset_recoveries'
   | 'sync_queue_compaction_drops'
+  | 'sync_queue_overflow_events'
+  | 'sync_queue_overflow_recovery_events'
+  | 'sync_queue_overflow_writes'
+  | 'sync_queue_overflow_drains'
+  | 'sync_queue_overflow_rehydrated'
+  | 'sync_queue_overflow_block_events'
   | 'sync_queue_block_events'
   | 'sync_queue_recovery_events'
+  | 'sync_queue_persistence_blocks'
   | 'sync_queue_blocked_mutations'
+  | 'sync_retry_after_honored'
+  | 'sync_retry_after_applied'
+  | 'sync_retry_forced_polling'
+  | 'sync_polling_forced'
+  | 'sync_vps_circuit_open'
   | 'sync_sse_fallback_activations'
-  | 'sync_sse_fallback_recoveries';
+  | 'sync_sse_fallback_recoveries'
+  | 'persist_retry_success'
+  | 'persist_retry_failures';
 
 interface ClientMetrics {
   counters: Record<ClientMetricName, number>;
@@ -75,11 +89,25 @@ const metrics: ClientMetrics = {
     sync_cursor_resets: 0,
     sync_cursor_reset_recoveries: 0,
     sync_queue_compaction_drops: 0,
+    sync_queue_overflow_events: 0,
+    sync_queue_overflow_recovery_events: 0,
+    sync_queue_overflow_writes: 0,
+    sync_queue_overflow_drains: 0,
+    sync_queue_overflow_rehydrated: 0,
+    sync_queue_overflow_block_events: 0,
     sync_queue_block_events: 0,
     sync_queue_recovery_events: 0,
+    sync_queue_persistence_blocks: 0,
     sync_queue_blocked_mutations: 0,
+    sync_retry_after_honored: 0,
+    sync_retry_after_applied: 0,
+    sync_retry_forced_polling: 0,
+    sync_polling_forced: 0,
+    sync_vps_circuit_open: 0,
     sync_sse_fallback_activations: 0,
     sync_sse_fallback_recoveries: 0,
+    persist_retry_success: 0,
+    persist_retry_failures: 0,
   },
   aiErrorCodes: {},
   latencies: {

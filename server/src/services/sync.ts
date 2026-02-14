@@ -64,6 +64,9 @@ export interface SyncPullResult {
 interface SyncHealthMetrics {
   pullRequests: number;
   pullResetsRequired: number;
+  pushOpsTotal: number;
+  pushOpsIdempotentReplays: number;
+  pushOpsWriteFailures: number;
   lastResetAt: number | null;
   lastResetCursor: number | null;
   lastResetOldestAvailableCursor: number | null;
@@ -95,6 +98,9 @@ const SYNC_FIELD_NAMES = new Set<string>(SYNC_FIELD_KEYS.map(field => String(fie
 const syncHealthMetrics: SyncHealthMetrics = {
   pullRequests: 0,
   pullResetsRequired: 0,
+  pushOpsTotal: 0,
+  pushOpsIdempotentReplays: 0,
+  pushOpsWriteFailures: 0,
   lastResetAt: null,
   lastResetCursor: null,
   lastResetOldestAvailableCursor: null,
@@ -105,8 +111,27 @@ const syncHealthMetrics: SyncHealthMetrics = {
   lastNoteChangesPrunedCount: 0,
 };
 
+type SyncDbExecutor = Pick<typeof db, 'insert' | 'update' | 'query'>;
+
+interface DbErrorLike {
+  code?: string;
+}
+
 function nowTs(): number {
   return Date.now();
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as DbErrorLike).code === '23505';
+}
+
+async function publishCommittedSyncEvent(userId: string, cursor: number): Promise<void> {
+  await publishSyncEvent({
+    userId,
+    cursor,
+    type: 'sync',
+    emittedAt: nowTs(),
+  });
 }
 
 function areValuesEqual(a: unknown, b: unknown): boolean {
@@ -240,9 +265,14 @@ function responseFromIdempotency(value: string):
   }
 }
 
-async function writeIdempotency(userId: string, requestId: string, payload: unknown): Promise<void> {
+async function writeIdempotency(
+  executor: SyncDbExecutor,
+  userId: string,
+  requestId: string,
+  payload: unknown
+): Promise<void> {
   const createdAt = nowTs();
-  await db
+  await executor
     .insert(idempotencyKeys)
     .values({
       userId,
@@ -251,7 +281,7 @@ async function writeIdempotency(userId: string, requestId: string, payload: unkn
       createdAt,
       expiresAt: createdAt + IDEMPOTENCY_TTL_MS,
     })
-    .onConflictDoNothing();
+    .returning({ requestId: idempotencyKeys.requestId });
 }
 
 async function loadIdempotency(userId: string, requestId: string): Promise<string | null> {
@@ -265,6 +295,7 @@ async function loadIdempotency(userId: string, requestId: string): Promise<strin
 }
 
 async function appendChange(args: {
+  executor: SyncDbExecutor;
   userId: string;
   noteId: string;
   opType: 'upsert' | 'delete';
@@ -274,7 +305,7 @@ async function appendChange(args: {
   requestId: string;
   deviceId: string;
 }): Promise<number> {
-  const [inserted] = await db
+  const [inserted] = await args.executor
     .insert(noteChanges)
     .values({
       userId: args.userId,
@@ -289,17 +320,11 @@ async function appendChange(args: {
     })
     .returning({ seq: noteChanges.seq });
 
-  await publishSyncEvent({
-    userId: args.userId,
-    cursor: inserted.seq,
-    type: 'sync',
-    emittedAt: nowTs(),
-  });
-
   return inserted.seq;
 }
 
 async function upsertNote(args: {
+  executor: SyncDbExecutor;
   userId: string;
   deviceId: string;
   op: SyncOp;
@@ -339,7 +364,7 @@ async function upsertNote(args: {
   const nextVersion = currentVersion + 1;
   const now = nowTs();
 
-  const [persisted] = await db
+  const [persisted] = await args.executor
     .insert(notes)
     .values({
       userId,
@@ -388,6 +413,7 @@ async function upsertNote(args: {
     .returning();
 
   const cursor = await appendChange({
+    executor: args.executor,
     userId,
     noteId: op.noteId,
     opType: 'upsert',
@@ -410,6 +436,7 @@ async function upsertNote(args: {
 }
 
 async function deleteNote(args: {
+  executor: SyncDbExecutor;
   userId: string;
   deviceId: string;
   op: SyncOp;
@@ -432,6 +459,7 @@ async function deleteNote(args: {
     };
 
     const cursor = await appendChange({
+      executor: args.executor,
       userId,
       noteId: op.noteId,
       opType: 'delete',
@@ -463,7 +491,7 @@ async function deleteNote(args: {
   const nextVersion = currentVersion + 1;
   const deletedAt = nowTs();
 
-  const [persisted] = await db
+  const [persisted] = await args.executor
     .update(notes)
     .set({
       deletedAt,
@@ -475,6 +503,7 @@ async function deleteNote(args: {
     .returning();
 
   const cursor = await appendChange({
+    executor: args.executor,
     userId,
     noteId: op.noteId,
     opType: 'delete',
@@ -602,63 +631,90 @@ export async function pushSync(args: {
   const operations = args.operations.slice(0, env.SYNC_BATCH_LIMIT);
 
   for (const op of operations) {
+    syncHealthMetrics.pushOpsTotal += 1;
     const existingIdempotency = await loadIdempotency(args.userId, op.requestId);
     if (existingIdempotency) {
       const parsed = responseFromIdempotency(existingIdempotency);
       if (parsed?.kind === 'applied') {
+        syncHealthMetrics.pushOpsIdempotentReplays += 1;
         applied.push(parsed.payload);
         nextCursor = Math.max(nextCursor, parsed.payload.cursor);
         continue;
       }
       if (parsed?.kind === 'conflict') {
+        syncHealthMetrics.pushOpsIdempotentReplays += 1;
         conflicts.push(parsed.payload);
         continue;
       }
     }
 
-    const current = await db.query.notes.findFirst({
-      where: and(eq(notes.userId, args.userId), eq(notes.id, op.noteId)),
-    });
-
-    if (op.op === 'upsert' && op.note) {
-      const result = await upsertNote({
-        userId: args.userId,
-        deviceId: args.deviceId,
-        op,
-        current: current || null,
-      });
-
-      if (result.applied) {
-        applied.push(result.applied);
-        nextCursor = Math.max(nextCursor, result.applied.cursor);
-        await writeIdempotency(args.userId, op.requestId, { kind: 'applied', payload: result.applied });
-      }
-
-      if (result.conflict) {
-        conflicts.push(result.conflict);
-        await writeIdempotency(args.userId, op.requestId, { kind: 'conflict', payload: result.conflict });
-      }
+    if (op.op === 'upsert' && !op.note) {
       continue;
     }
 
-    if (op.op === 'delete') {
-      const result = await deleteNote({
-        userId: args.userId,
-        deviceId: args.deviceId,
-        op,
-        current: current || null,
+    try {
+      const result = await db.transaction(async tx => {
+        const current = await tx.query.notes.findFirst({
+          where: and(eq(notes.userId, args.userId), eq(notes.id, op.noteId)),
+        });
+
+        const operationResult =
+          op.op === 'upsert'
+            ? await upsertNote({
+                executor: tx,
+                userId: args.userId,
+                deviceId: args.deviceId,
+                op,
+                current: current || null,
+              })
+            : await deleteNote({
+                executor: tx,
+                userId: args.userId,
+                deviceId: args.deviceId,
+                op,
+                current: current || null,
+              });
+
+        if (operationResult.applied) {
+          await writeIdempotency(tx, args.userId, op.requestId, { kind: 'applied', payload: operationResult.applied });
+        }
+
+        if (operationResult.conflict) {
+          await writeIdempotency(tx, args.userId, op.requestId, { kind: 'conflict', payload: operationResult.conflict });
+        }
+
+        return operationResult;
       });
 
       if (result.applied) {
         applied.push(result.applied);
         nextCursor = Math.max(nextCursor, result.applied.cursor);
-        await writeIdempotency(args.userId, op.requestId, { kind: 'applied', payload: result.applied });
+        await publishCommittedSyncEvent(args.userId, result.applied.cursor);
       }
 
       if (result.conflict) {
         conflicts.push(result.conflict);
-        await writeIdempotency(args.userId, op.requestId, { kind: 'conflict', payload: result.conflict });
       }
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        const replayedIdempotency = await loadIdempotency(args.userId, op.requestId);
+        if (replayedIdempotency) {
+          const parsed = responseFromIdempotency(replayedIdempotency);
+          if (parsed?.kind === 'applied') {
+            syncHealthMetrics.pushOpsIdempotentReplays += 1;
+            applied.push(parsed.payload);
+            nextCursor = Math.max(nextCursor, parsed.payload.cursor);
+            continue;
+          }
+          if (parsed?.kind === 'conflict') {
+            syncHealthMetrics.pushOpsIdempotentReplays += 1;
+            conflicts.push(parsed.payload);
+            continue;
+          }
+        }
+      }
+      syncHealthMetrics.pushOpsWriteFailures += 1;
+      throw error;
     }
   }
 
@@ -728,6 +784,7 @@ export async function bootstrapSync(args: {
       .returning();
 
     lastCursor = await appendChange({
+      executor: db,
       userId: args.userId,
       noteId: id,
       opType: note.deletedAt ? 'delete' : 'upsert',
@@ -737,6 +794,7 @@ export async function bootstrapSync(args: {
       requestId: `bootstrap:${id}:${note.updatedAt || now}`,
       deviceId: args.deviceId,
     });
+    await publishCommittedSyncEvent(args.userId, lastCursor);
 
     imported += 1;
   }

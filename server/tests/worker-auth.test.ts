@@ -154,6 +154,15 @@ function mockFetchRoutes(routes: FetchRoute[]) {
   });
 }
 
+async function readDiagnosticsMetrics(env: any) {
+  const response = await worker.fetch(
+    new Request('http://127.0.0.1/api/v1/metrics'),
+    env
+  );
+  expect(response.status).toBe(200);
+  return response.json();
+}
+
 describe('worker jwt auth', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -236,6 +245,91 @@ describe('worker jwt auth', () => {
     expect(response.status).toBe(500);
     const payload = await response.json();
     expect(payload.error.code).toBe('AUTH_CONFIG_INVALID');
+  });
+
+  it('rejects insecure non-loopback Clerk URLs and increments invalidClerkConfig metric', async () => {
+    const fakeToken = `${base64UrlEncode('{"alg":"none"}')}.${base64UrlEncode('{"sub":"user_2"}')}.sig`;
+    const env = createEnv({
+      CLERK_JWKS_URL: 'http://jwks.example.dev/.well-known/jwks.json',
+      CLERK_ISSUER: 'https://clerk.example.dev',
+      CLERK_AUDIENCE: 'pocketbrain',
+      ALLOW_INSECURE_DEV_AUTH: 'false',
+    });
+
+    const before = await readDiagnosticsMetrics(env);
+    const response = await worker.fetch(
+      new Request('https://worker.example/api/v1/auth/status', {
+        headers: {
+          Authorization: `Bearer ${fakeToken}`,
+        },
+      }),
+      env
+    );
+
+    expect(response.status).toBe(500);
+    const payload = await response.json();
+    expect(payload.error.code).toBe('AUTH_CONFIG_INVALID');
+
+    const after = await readDiagnosticsMetrics(env);
+    expect(after.reliability.authConfig.invalidClerkConfig).toBeGreaterThan(
+      before.reliability.authConfig.invalidClerkConfig
+    );
+  });
+
+  it('allows loopback Clerk URLs when using http during local development', async () => {
+    const fakeToken = `${base64UrlEncode('{"alg":"none"}')}.${base64UrlEncode('{"sub":"loopback-user"}')}.sig`;
+    const env = createEnv({
+      CLERK_JWKS_URL: 'http://127.0.0.1:8787/.well-known/jwks.json',
+      CLERK_ISSUER: 'http://localhost:8787',
+      CLERK_AUDIENCE: 'pocketbrain',
+      ALLOW_INSECURE_DEV_AUTH: 'false',
+    });
+
+    const response = await worker.fetch(
+      new Request('https://worker.example/api/v1/auth/status', {
+        headers: {
+          Authorization: `Bearer ${fakeToken}`,
+        },
+      }),
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      connected: false,
+      scope: 'device',
+    });
+  });
+
+  it('returns kv_unavailable when KV reads fail and increments kvFailures metric', async () => {
+    const env = createEnv();
+    env.AI_SESSIONS = {
+      async get() {
+        throw new Error('kv down');
+      },
+      async put() {},
+      async delete() {},
+    };
+
+    const before = await readDiagnosticsMetrics(env);
+    const response = await worker.fetch(
+      new Request('https://worker.example/api/v1/auth/status', {
+        headers: {
+          Cookie: 'pb_ai_session=session-test',
+        },
+      }),
+      env
+    );
+    const payload = await response.json();
+
+    expect(response.status).toBe(503);
+    expect(payload.error.code).toBe('SERVICE_UNAVAILABLE');
+    expect(payload.error.retryable).toBe(true);
+    expect(payload.error.cause).toBe('kv_unavailable');
+    expect(response.headers.get('retry-after')).toBeTruthy();
+
+    const after = await readDiagnosticsMetrics(env);
+    expect(after.reliability.kvFailures).toBeGreaterThan(before.reliability.kvFailures);
   });
 
   it('returns device scope when audience validation fails and insecure auth is disabled', async () => {

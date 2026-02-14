@@ -162,6 +162,25 @@ describe('worker provider cause classification', () => {
     expect(response.headers.get('retry-after')).toBe('5');
   });
 
+  it('returns provider_network_error cause for provider network failures', async () => {
+    const worker = await loadWorker();
+    const env = createEnv();
+
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(createGeminiOkResponse('OK'))
+      .mockRejectedValue(new TypeError('Network failed'));
+
+    const cookie = await connectLegacySession(worker, env);
+    const response = await callAiSearch(worker, env, cookie);
+    const payload = await response.json();
+
+    expect(response.status).toBe(503);
+    expect(payload.error.code).toBe('NETWORK');
+    expect(payload.error.retryable).toBe(true);
+    expect(payload.error.cause).toBe('provider_network_error');
+    expect(response.headers.get('retry-after')).toBe('5');
+  });
+
   it('returns provider_5xx cause for upstream 5xx failures', async () => {
     const worker = await loadWorker();
     const env = createEnv();
@@ -298,5 +317,52 @@ describe('worker provider cause classification', () => {
     expect(metricsResponse.status).toBe(200);
     const metricsPayload = await metricsResponse.json();
     expect(metricsPayload.reliability.secretRotation.decryptFailures).toBeGreaterThan(0);
+  });
+
+  it('ignores invalid previous rotation secret and tracks runtime metric', async () => {
+    const worker = await loadWorker();
+    const sharedStore = new Map<string, string>();
+    const originalSecret = 'ffffffffffffffffffffffffffffffff';
+    const newSecret = '11111111111111111111111111111111';
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => createGeminiOkResponse('OK'));
+
+    const legacyEnv = createEnv({
+      store: sharedStore,
+      overrides: {
+        KEY_ENCRYPTION_SECRET: originalSecret,
+      },
+    });
+    const cookie = await connectLegacySession(worker, legacyEnv);
+
+    const runtimeEnv = createEnv({
+      store: sharedStore,
+      overrides: {
+        KEY_ENCRYPTION_SECRET: newSecret,
+        KEY_ENCRYPTION_SECRET_PREV: 'replace-with-32-byte-secret',
+      },
+    });
+
+    const beforeMetrics = await worker.fetch(
+      new Request('http://127.0.0.1/api/v1/metrics'),
+      runtimeEnv
+    );
+    expect(beforeMetrics.status).toBe(200);
+    const beforePayload = await beforeMetrics.json();
+
+    const response = await callAiSearch(worker, runtimeEnv, cookie);
+    const payload = await response.json();
+    expect(response.status).toBe(403);
+    expect(payload.error.code).toBe('AUTH_EXPIRED');
+
+    const afterMetrics = await worker.fetch(
+      new Request('http://127.0.0.1/api/v1/metrics'),
+      runtimeEnv
+    );
+    expect(afterMetrics.status).toBe(200);
+    const afterPayload = await afterMetrics.json();
+    expect(afterPayload.reliability.runtimeConfig.invalidRotationSecret).toBeGreaterThan(
+      beforePayload.reliability.runtimeConfig.invalidRotationSecret
+    );
   });
 });

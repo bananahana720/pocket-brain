@@ -17,6 +17,7 @@ async function buildMetricsApp(): Promise<FastifyInstance> {
     getRedisReadyTelemetry: () => ({
       checksTotal: 4,
       failuresTotal: 3,
+      timeoutsTotal: 1,
       consecutiveFailures: 2,
       lastCheckAt: Date.now(),
       lastCheckDurationMs: 5,
@@ -27,6 +28,7 @@ async function buildMetricsApp(): Promise<FastifyInstance> {
       degradedSinceTs: Date.now() - 1_000,
       degradedForMs: 1_000,
       totalDegradedMs: 8_000,
+      degradedTransitions: 3,
     }),
   }));
 
@@ -63,6 +65,9 @@ async function buildMetricsApp(): Promise<FastifyInstance> {
     getSyncHealthMetrics: () => ({
       pullRequests: 12,
       pullResetsRequired: 3,
+      pushOpsTotal: 21,
+      pushOpsIdempotentReplays: 5,
+      pushOpsWriteFailures: 2,
       lastResetAt: Date.now(),
       lastResetCursor: 21,
       lastResetOldestAvailableCursor: 33,
@@ -98,6 +103,9 @@ describe('metrics route', () => {
       expect(response.statusCode).toBe(200);
       expect(response.headers['content-type']).toContain('text/plain');
       expect(response.body).toContain('pocketbrain_sync_cursor_resets_total 3');
+      expect(response.body).toContain('pocketbrain_sync_push_ops_total 21');
+      expect(response.body).toContain('pocketbrain_sync_push_idempotent_replays_total 5');
+      expect(response.body).toContain('pocketbrain_sync_push_write_failures_total 2');
       expect(response.body).toContain('pocketbrain_note_changes_pruned_total 44');
       expect(response.body).toContain('pocketbrain_realtime_fallback_active 1');
       expect(response.body).toContain('pocketbrain_realtime_fallback_dwell_seconds 4');
@@ -109,6 +117,8 @@ describe('metrics route', () => {
       expect(response.body).toContain('pocketbrain_stream_ticket_replay_mode_strict 0');
       expect(response.body).toContain('pocketbrain_redis_ready_degraded 1');
       expect(response.body).toContain('pocketbrain_redis_ready_failures_total 3');
+      expect(response.body).toContain('pocketbrain_redis_ready_timeout_total 1');
+      expect(response.body).toContain('pocketbrain_ready_degraded_transitions_total 3');
     } finally {
       await app.close();
     }
