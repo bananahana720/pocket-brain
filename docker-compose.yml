@@ -9,7 +9,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER:-postgres}\" -d \"$${POSTGRES_DB:-pocketbrain}\""]
       interval: 5s
@@ -23,7 +23,7 @@ services:
     volumes:
       - redis_data:/data
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
 
   api:
     build:
@@ -38,7 +38,7 @@ services:
       - path: ./server/.env
         required: false
     ports:
-      - "8788:8788"
+      - "127.0.0.1:8788:8788"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8788/ready >/dev/null 2>&1 || exit 1"]
       interval: 10s
