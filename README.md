@@ -96,10 +96,15 @@ Create a `.env.local` file in the project root.
 
 **Recommended production setup (secure):**
 
-1. Deploy the Cloudflare Worker in `/worker` and route `/api/*` to it.
-2. Pick one Worker route mode for production config checks:
-   - Declare top-level `routes` in `worker/wrangler.toml` (recommended IaC path), or
-   - Keep routes in Cloudflare Dashboard and set `WORKER_ROUTE_MODE=dashboard` when running `npm run config:check:worker` (and any deploy workflow that runs it).
+1. Use this production request path architecture:
+   - `app.pocket-brain.org` serves the frontend UI.
+   - Cloudflare routes `app.pocket-brain.org/api/*` to the Worker in `/worker`.
+   - The Worker uses a dedicated upstream origin for `/api/v2/*` (`https://api-origin.pocket-brain.org`) via `VPS_API_ORIGIN`.
+   - Do not route `api-origin.pocket-brain.org` through this same Worker; keep it as a direct backend origin to avoid recursive proxy loops.
+2. Keep Worker routes managed in `worker/wrangler.toml` (IaC path):
+   - `workers_dev = false`
+   - top-level `routes = [{ pattern = "app.pocket-brain.org/api/*", zone_name = "pocket-brain.org" }]`
+   - Use `WORKER_ROUTE_MODE=dashboard` only if you intentionally move route ownership to Cloudflare Dashboard.
 3. Set Worker secret: `KEY_ENCRYPTION_SECRET`.
 4. Set Worker Clerk JWT verification vars together:
    - `CLERK_JWKS_URL`
@@ -118,7 +123,8 @@ Create a `.env.local` file in the project root.
    - `SYNC_BATCH_LIMIT=100`
    - `SYNC_PULL_LIMIT=500`
    - `REQUIRE_REDIS_FOR_READY` defaults to `true` in production (`false` in dev/test); set explicitly to override
-7. Create/connect your API key from the in-app drawer (`Menu > AI Security`).
+7. Frontend API calls should remain same-origin (`https://app.pocket-brain.org/api/*`) in production; do not point production `/api/v1` traffic to a `workers.dev` hostname.
+8. Create/connect your API key from the in-app drawer (`Menu > AI Security`).
 
 If Worker Clerk vars are partial/missing while a bearer token is provided, the Worker responds with `AUTH_CONFIG_INVALID`.
 If you are rolling out from an older server build that still has the compatibility toggle, set `ALLOW_LEGACY_SSE_QUERY_TOKEN=false` permanently before cutover. Current stream-ticket-only builds no longer use that flag.

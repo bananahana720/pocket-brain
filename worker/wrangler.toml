@@ -2,7 +2,8 @@ name = "pocketbrain-ai-proxy"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
 account_id = "c3941b01e85131cba914b73b037ffef7"
-workers_dev = true
+workers_dev = false
+routes = [{ pattern = "app.pocket-brain.org/api/*", zone_name = "pocket-brain.org" }]
 
 [[kv_namespaces]]
 binding = "AI_SESSIONS"
@@ -19,7 +20,7 @@ new_sqlite_classes = ["ControlPlaneDO"]
 
 [vars]
 DEFAULT_MODEL = "google/gemini-2.5-flash"
-VPS_API_ORIGIN = "http://15.204.218.124.sslip.io:8080"
+VPS_API_ORIGIN = "https://api-origin.pocket-brain.org"
 VPS_PROXY_TIMEOUT_MS = "10000"
 VPS_PROXY_RETRIES = "2"
 CLERK_JWKS_URL = "https://positive-sturgeon-24.clerk.accounts.dev/.well-known/jwks.json"

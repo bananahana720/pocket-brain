@@ -23,6 +23,7 @@ Set `ALLOW_INSECURE_DEV_AUTH=false` in production. Keep insecure auth enabled on
 - `VPS_API_ORIGIN` (required in production for `/api/v2/*` passthrough)
   - Use `https://` for non-loopback hosts.
   - Local loopback example: `http://127.0.0.1:8788`.
+  - Anti-recursion rule: `VPS_API_ORIGIN` must be a direct backend origin and must not be any hostname/path that routes back through this Worker (for example `https://app.pocket-brain.org/api` or a `workers.dev` URL).
 - `VPS_PROXY_TIMEOUT_MS` (default `7000`): timeout for Worker `/api/v2/*` upstream calls.
 - `VPS_PROXY_RETRIES` (default `1`): retry attempts for transient `/api/v2/*` failures (except `/api/v2/events` stream handshake).
 - Worker also applies a short in-memory circuit-breaker for repeated `/api/v2/*` upstream failures to fail fast during outages.
@@ -81,10 +82,10 @@ In a second terminal (app):
 VITE_USE_AI_PROXY=true VITE_DEV_PROXY_WORKER=true npm run dev
 ```
 
-`worker/wrangler.toml` is configured with `workers_dev = true` for local-first workflow.  
-For production route-based deploys, set:
+`worker/wrangler.toml` is configured for route-based production deploys:
 - `workers_dev = false`
 - top-level `routes = [{ pattern = ".../api/*", zone_name = "..." }]`
+- In production, clients should call same-origin `https://app.pocket-brain.org/api/*`; do not use `<worker>.workers.dev/api/v1` as the public API base.
 
 If production routes are managed in Cloudflare Dashboard instead of `worker/wrangler.toml`, set:
 - `WORKER_ROUTE_MODE=dashboard` when running `npm run config:check:worker` (and deployment workflows that run runtime config checks)
@@ -96,7 +97,7 @@ npm run worker:secret:set
 npm run worker:deploy
 ```
 
-Then route `/api/*` traffic to this Worker in Cloudflare so the frontend can call same-origin API endpoints.
+Then route `app.pocket-brain.org/api/*` traffic to this Worker in Cloudflare so the frontend can call same-origin API endpoints, and set `VPS_API_ORIGIN` to a separate backend origin like `https://api-origin.pocket-brain.org`.
 
 ## Monthly Secret Rotation Drill
 
