@@ -139,6 +139,15 @@ body::after {
   animation: signalSweep 5s linear infinite;
 }
 
+@keyframes signalSweep {
+  0% {
+    transform: translateX(-130%) skewX(-28deg);
+  }
+  100% {
+    transform: translateX(220%) skewX(-28deg);
+  }
+}
+
 .mission-note,
 .mission-dock-panel,
 .mission-drawer,
