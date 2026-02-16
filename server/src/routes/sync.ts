@@ -1,16 +1,28 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { bootstrapSync, getNotesSnapshot, pullSync, pushSync, type SyncOp } from '../services/sync.js';
+import { env } from '../config/env.js';
+
+const REQUEST_ID_MAX_LENGTH = 128;
+const NOTE_ID_MAX_LENGTH = 128;
+const NOTE_CONTENT_MAX_LENGTH = 100_000;
+const NOTE_TITLE_MAX_LENGTH = 512;
+const NOTE_TAG_MAX_LENGTH = 64;
+const NOTE_TAGS_MAX = 20;
+const CONTENT_HASH_MAX_LENGTH = 128;
+const DEVICE_ID_MAX_LENGTH = 128;
+const SOURCE_FINGERPRINT_MAX_LENGTH = 128;
+const CHANGED_FIELD_MAX_LENGTH = 64;
 
 const syncNoteSchema = z.object({
-  id: z.string().min(1),
-  content: z.string(),
+  id: z.string().min(1).max(NOTE_ID_MAX_LENGTH),
+  content: z.string().max(NOTE_CONTENT_MAX_LENGTH),
   createdAt: z.number().int(),
   updatedAt: z.number().int(),
   version: z.number().int().min(0),
   deletedAt: z.number().int().optional(),
-  title: z.string().optional(),
-  tags: z.array(z.string()).optional(),
+  title: z.string().max(NOTE_TITLE_MAX_LENGTH).optional(),
+  tags: z.array(z.string().min(1).max(NOTE_TAG_MAX_LENGTH)).max(NOTE_TAGS_MAX).optional(),
   type: z.enum(['NOTE', 'TASK', 'IDEA']).optional(),
   isProcessed: z.boolean().optional(),
   isCompleted: z.boolean().optional(),
@@ -20,8 +32,8 @@ const syncNoteSchema = z.object({
   priority: z.enum(['urgent', 'normal', 'low']).optional(),
   analysisState: z.enum(['pending', 'complete', 'failed']).optional(),
   analysisVersion: z.number().int().optional(),
-  contentHash: z.string().optional(),
-  lastModifiedByDeviceId: z.string().optional(),
+  contentHash: z.string().max(CONTENT_HASH_MAX_LENGTH).optional(),
+  lastModifiedByDeviceId: z.string().min(1).max(DEVICE_ID_MAX_LENGTH).optional(),
 });
 
 const syncNoteBaseSchema = syncNoteSchema.partial();
@@ -30,23 +42,23 @@ const syncPushSchema = z.object({
   operations: z
     .array(
       z.object({
-        requestId: z.string().min(8),
+        requestId: z.string().min(8).max(REQUEST_ID_MAX_LENGTH),
         op: z.enum(['upsert', 'delete']),
-        noteId: z.string().min(1),
+        noteId: z.string().min(1).max(NOTE_ID_MAX_LENGTH),
         baseVersion: z.number().int().min(0),
         note: syncNoteSchema.optional(),
-        clientChangedFields: z.array(z.string().min(1)).max(32).optional(),
+        clientChangedFields: z.array(z.string().min(1).max(CHANGED_FIELD_MAX_LENGTH)).max(32).optional(),
         baseNote: syncNoteBaseSchema.optional(),
         autoMergeAttempted: z.boolean().optional(),
       })
     )
     .min(1)
-    .max(100),
+    .max(env.SYNC_BATCH_LIMIT),
 });
 
 const syncBootstrapSchema = z.object({
   notes: z.array(syncNoteSchema).max(5000),
-  sourceFingerprint: z.string().default('local-import-v1'),
+  sourceFingerprint: z.string().max(SOURCE_FINGERPRINT_MAX_LENGTH).default('local-import-v1'),
 });
 
 export async function registerSyncRoutes(app: FastifyInstance): Promise<void> {

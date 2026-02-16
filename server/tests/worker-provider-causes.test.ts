@@ -86,7 +86,7 @@ function createEnv(options?: {
       },
     },
     CONTROL_PLANE_DO: controlPlane,
-    KEY_ENCRYPTION_SECRET: '0123456789abcdef0123456789abcdef',
+    KEY_ENCRYPTION_SECRET: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     ALLOW_INSECURE_DEV_AUTH: 'true',
     ...options?.overrides,
   } as any;

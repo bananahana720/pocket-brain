@@ -2,6 +2,7 @@ import Fastify, { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerSyncRoutes } from '../src/routes/sync.js';
 import * as syncService from '../src/services/sync.js';
+import { env } from '../src/config/env.js';
 
 function makeNote(id: string) {
   const now = Date.now();
@@ -36,6 +37,41 @@ describe('sync routes', () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await app.close();
+  });
+
+  it('passes includeDeleted flag through to notes snapshot service', async () => {
+    const activeNote = makeNote('n-active');
+    const deletedNote = {
+      ...makeNote('n-deleted'),
+      deletedAt: Date.now(),
+    };
+    const snapshotSpy = vi
+      .spyOn(syncService, 'getNotesSnapshot')
+      .mockResolvedValueOnce({ notes: [activeNote, deletedNote], cursor: 9 })
+      .mockResolvedValueOnce({ notes: [activeNote], cursor: 10 });
+
+    const defaultResponse = await app.inject({
+      method: 'GET',
+      url: '/api/v2/notes',
+    });
+    const filteredResponse = await app.inject({
+      method: 'GET',
+      url: '/api/v2/notes?includeDeleted=false',
+    });
+
+    expect(defaultResponse.statusCode).toBe(200);
+    expect(defaultResponse.json()).toEqual({
+      notes: [activeNote, deletedNote],
+      cursor: 9,
+    });
+    expect(filteredResponse.statusCode).toBe(200);
+    expect(filteredResponse.json()).toEqual({
+      notes: [activeNote],
+      cursor: 10,
+    });
+
+    expect(snapshotSpy).toHaveBeenNthCalledWith(1, 'user-1', true);
+    expect(snapshotSpy).toHaveBeenNthCalledWith(2, 'user-1', false);
   });
 
   it('returns applied results and stable idempotent replay response', async () => {
@@ -130,6 +166,33 @@ describe('sync routes', () => {
     expect(payload.conflicts[0].currentVersion).toBe(3);
   });
 
+  it('normalizes invalid pull cursor values and returns reset metadata from service', async () => {
+    const pullSpy = vi.spyOn(syncService, 'pullSync').mockResolvedValue({
+      changes: [],
+      nextCursor: 42,
+      resetRequired: true,
+      resetReason: 'CURSOR_TOO_OLD',
+      oldestAvailableCursor: 11,
+      latestCursor: 42,
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/v2/sync/pull?cursor=not-a-number',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      changes: [],
+      nextCursor: 42,
+      resetRequired: true,
+      resetReason: 'CURSOR_TOO_OLD',
+      oldestAvailableCursor: 11,
+      latestCursor: 42,
+    });
+    expect(pullSpy).toHaveBeenCalledWith('user-1', 0);
+  });
+
   it('rejects malformed sync push payloads', async () => {
     const response = await app.inject({
       method: 'POST',
@@ -151,6 +214,52 @@ describe('sync routes', () => {
     expect(payload.error.code).toBe('BAD_REQUEST');
   });
 
+  it('rejects sync batches that exceed the configured sync batch limit', async () => {
+    const pushSpy = vi.spyOn(syncService, 'pushSync');
+    const operations = Array.from({ length: env.SYNC_BATCH_LIMIT + 1 }, (_, index) => ({
+      requestId: `request-${String(index).padStart(5, '0')}`,
+      op: 'delete' as const,
+      noteId: `note-${index}`,
+      baseVersion: 0,
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v2/sync/push',
+      payload: { operations },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe('BAD_REQUEST');
+    expect(pushSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects oversized note payloads in sync push requests', async () => {
+    const pushSpy = vi.spyOn(syncService, 'pushSync');
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v2/sync/push',
+      payload: {
+        operations: [
+          {
+            requestId: 'request-oversized-note',
+            op: 'upsert',
+            noteId: 'n-oversized',
+            baseVersion: 0,
+            note: {
+              ...makeNote('n-oversized'),
+              content: 'x'.repeat(120_000),
+            },
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe('BAD_REQUEST');
+    expect(pushSpy).not.toHaveBeenCalled();
+  });
+
   it('bootstraps local notes once through the route', async () => {
     const bootstrapSpy = vi.spyOn(syncService, 'bootstrapSync').mockResolvedValue({
       imported: 3,
@@ -170,5 +279,45 @@ describe('sync routes', () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ imported: 3, alreadyBootstrapped: false, cursor: 33 });
     expect(bootstrapSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns alreadyBootstrapped payload on repeated bootstrap submissions', async () => {
+    const firstPayload = {
+      imported: 3,
+      alreadyBootstrapped: false,
+      cursor: 33,
+    };
+    const secondPayload = {
+      imported: 3,
+      alreadyBootstrapped: true,
+      cursor: 33,
+    };
+
+    const bootstrapSpy = vi
+      .spyOn(syncService, 'bootstrapSync')
+      .mockResolvedValueOnce(firstPayload)
+      .mockResolvedValueOnce(secondPayload);
+
+    const requestBody = {
+      notes: [makeNote('n1'), makeNote('n2'), makeNote('n3')],
+      sourceFingerprint: 'test-fingerprint',
+    };
+
+    const first = await app.inject({
+      method: 'POST',
+      url: '/api/v2/sync/bootstrap',
+      payload: requestBody,
+    });
+    const second = await app.inject({
+      method: 'POST',
+      url: '/api/v2/sync/bootstrap',
+      payload: requestBody,
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(first.json()).toEqual(firstPayload);
+    expect(second.json()).toEqual(secondPayload);
+    expect(bootstrapSpy).toHaveBeenCalledTimes(2);
   });
 });

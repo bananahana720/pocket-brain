@@ -96,6 +96,28 @@ describe('worker /api/v2 proxy resilience', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('forwards cookie headers for events stream routes', async () => {
+    const worker = await loadWorker();
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(':\n\n', { status: 200 }));
+
+    const response = await worker.fetch(
+      new Request('https://worker.example/api/v2/events', {
+        headers: {
+          Cookie: 'pb_stream_ticket=test-ticket; other_cookie=value',
+        },
+      }),
+      createEnv()
+    );
+
+    expect(response.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0];
+    const proxiedHeaders = init?.headers as Headers;
+    expect(proxiedHeaders.get('cookie')).toContain('pb_stream_ticket=test-ticket');
+  });
+
   it('does not retry events ticket path by default', async () => {
     const worker = await loadWorker();
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('upstream down', { status: 503 }));
@@ -188,6 +210,57 @@ describe('worker /api/v2 proxy resilience', () => {
     const payload = await response.json();
     expect(payload.error.code).toBe('SERVICE_UNAVAILABLE');
     expect(payload.error.cause).toBe('origin_unconfigured');
+    expect(payload.error.retryable).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('fails fast when VPS_API_ORIGIN matches worker origin to prevent proxy recursion', async () => {
+    const worker = await loadWorker();
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+    const response = await worker.fetch(
+      new Request('https://worker.example/api/v2/sync/pull?cursor=0'),
+      createEnv({
+        VPS_API_ORIGIN: 'https://worker.example',
+      })
+    );
+
+    expect(response.status).toBe(500);
+    const payload = await response.json();
+    expect(payload.error.code).toBe('CONFIG_ERROR');
+    expect(payload.error.cause).toBe('origin_unconfigured');
+    expect(payload.error.retryable).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects oversized proxied request bodies with 413 before upstream fetch', async () => {
+    const worker = await loadWorker();
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+    const response = await worker.fetch(
+      new Request('https://worker.example/api/v2/sync/push', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          operations: [
+            {
+              requestId: 'request-oversized-worker-proxy',
+              op: 'upsert',
+              noteId: 'note-oversized-worker-proxy',
+              baseVersion: 0,
+              note: { id: 'note-oversized-worker-proxy', content: 'x'.repeat(40_000) },
+            },
+          ],
+        }),
+      }),
+      createEnv({
+        VPS_PROXY_MAX_BODY_BYTES: '32768',
+      })
+    );
+
+    expect(response.status).toBe(413);
+    const payload = await response.json();
+    expect(payload.error.code).toBe('PAYLOAD_TOO_LARGE');
     expect(payload.error.retryable).toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();
   });

@@ -5,12 +5,32 @@ const decoder = new TextDecoder();
 const KEY_DB_NAME = 'pocketbrain_crypto';
 const KEY_DB_VERSION = 1;
 const KEY_STORE = 'keys';
-const AUTO_BACKUP_KEY_ID = 'auto_backup_key_v1';
+const LEGACY_AUTO_BACKUP_KEY_ID = 'auto_backup_key_v1';
+const AUTO_BACKUP_KEY_ID_PREFIX = 'auto_backup_key_v1';
+const AUTO_BACKUP_ANON_SCOPE = '__anon__';
 
 interface AutoBackupKeyRecord {
   id: string;
   key: CryptoKey;
   createdAt: number;
+}
+
+function normalizeAutoBackupScope(scopeId: string | null | undefined): string {
+  if (typeof scopeId !== 'string') {
+    return AUTO_BACKUP_ANON_SCOPE;
+  }
+
+  const trimmed = scopeId.trim();
+  if (!trimmed) {
+    return AUTO_BACKUP_ANON_SCOPE;
+  }
+
+  const sanitized = trimmed.replace(/[^a-zA-Z0-9._-]/g, '_');
+  return sanitized || AUTO_BACKUP_ANON_SCOPE;
+}
+
+function resolveAutoBackupKeyId(scopeId: string | null | undefined): string {
+  return `${AUTO_BACKUP_KEY_ID_PREFIX}:${normalizeAutoBackupScope(scopeId)}`;
 }
 
 async function deriveKey(passphrase: string, salt: Uint8Array): Promise<CryptoKey> {
@@ -74,25 +94,35 @@ function promisifyRequest<T>(request: IDBRequest<T>): Promise<T> {
   });
 }
 
-async function loadAutoBackupKeyRecord(): Promise<AutoBackupKeyRecord | null> {
+async function loadAutoBackupKeyRecord(scopeId: string | null = null): Promise<AutoBackupKeyRecord | null> {
+  const scopedId = resolveAutoBackupKeyId(scopeId);
   const db = await openKeyDb();
   try {
     const tx = db.transaction(KEY_STORE, 'readonly');
     const store = tx.objectStore(KEY_STORE);
-    const record = (await promisifyRequest(store.get(AUTO_BACKUP_KEY_ID))) as AutoBackupKeyRecord | undefined;
+    const record = (await promisifyRequest(store.get(scopedId))) as AutoBackupKeyRecord | undefined;
     if (!record || !(record.key instanceof CryptoKey)) return null;
-    return record;
+    return {
+      ...record,
+      id: scopedId,
+    };
+  } catch {
+    return null;
   } finally {
     db.close();
   }
 }
 
-async function saveAutoBackupKeyRecord(record: AutoBackupKeyRecord): Promise<void> {
+async function saveAutoBackupKeyRecord(record: AutoBackupKeyRecord, scopeId: string | null = null): Promise<void> {
+  const id = resolveAutoBackupKeyId(scopeId);
   const db = await openKeyDb();
   try {
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(KEY_STORE, 'readwrite');
-      tx.objectStore(KEY_STORE).put(record);
+      tx.objectStore(KEY_STORE).put({
+        ...record,
+        id,
+      } satisfies AutoBackupKeyRecord);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error || new Error('Failed to save backup key'));
       tx.onabort = () => reject(tx.error || new Error('Backup key save aborted'));
@@ -102,12 +132,17 @@ async function saveAutoBackupKeyRecord(record: AutoBackupKeyRecord): Promise<voi
   }
 }
 
-export async function clearAutoBackupKey(): Promise<void> {
+export async function clearAutoBackupKey(scopeId: string | null = null): Promise<void> {
+  const scopedId = resolveAutoBackupKeyId(scopeId);
+  const normalizedScope = normalizeAutoBackupScope(scopeId);
   const db = await openKeyDb();
   try {
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(KEY_STORE, 'readwrite');
-      tx.objectStore(KEY_STORE).delete(AUTO_BACKUP_KEY_ID);
+      tx.objectStore(KEY_STORE).delete(scopedId);
+      if (normalizedScope === AUTO_BACKUP_ANON_SCOPE) {
+        tx.objectStore(KEY_STORE).delete(LEGACY_AUTO_BACKUP_KEY_ID);
+      }
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error || new Error('Failed to clear backup key'));
       tx.onabort = () => reject(tx.error || new Error('Backup key clear aborted'));
@@ -117,9 +152,46 @@ export async function clearAutoBackupKey(): Promise<void> {
   }
 }
 
-export async function getOrCreateAutoBackupKey(): Promise<CryptoKey> {
-  const existing = await loadAutoBackupKeyRecord();
-  if (existing) return existing.key;
+export async function getOrCreateAutoBackupKey(scopeId: string | null = null): Promise<CryptoKey> {
+  const scopedId = resolveAutoBackupKeyId(scopeId);
+  const existing = await loadAutoBackupKeyRecord(scopeId);
+  if (existing) {
+    if (existing.id !== scopedId) {
+      await saveAutoBackupKeyRecord(
+        {
+          ...existing,
+          id: scopedId,
+        },
+        scopeId
+      );
+    }
+    return existing.key;
+  }
+
+  let legacyKeyRecord: AutoBackupKeyRecord | null = null;
+  const db = await openKeyDb();
+  try {
+    const tx = db.transaction(KEY_STORE, 'readonly');
+    const legacyRecord = (await promisifyRequest(tx.objectStore(KEY_STORE).get(LEGACY_AUTO_BACKUP_KEY_ID))) as
+      | AutoBackupKeyRecord
+      | undefined;
+    if (legacyRecord && legacyRecord.key instanceof CryptoKey) {
+      legacyKeyRecord = legacyRecord;
+    }
+  } finally {
+    db.close();
+  }
+
+  if (legacyKeyRecord) {
+    await saveAutoBackupKeyRecord(
+      {
+        ...legacyKeyRecord,
+        id: scopedId,
+      },
+      scopeId
+    );
+    return legacyKeyRecord.key;
+  }
 
   const key = await crypto.subtle.generateKey(
     {
@@ -130,16 +202,23 @@ export async function getOrCreateAutoBackupKey(): Promise<CryptoKey> {
     ['encrypt', 'decrypt']
   );
 
-  await saveAutoBackupKeyRecord({
-    id: AUTO_BACKUP_KEY_ID,
-    key,
-    createdAt: Date.now(),
-  });
+  await saveAutoBackupKeyRecord(
+    {
+      id: resolveAutoBackupKeyId(scopeId),
+      key,
+      createdAt: Date.now(),
+    },
+    scopeId
+  );
 
   return key;
 }
 
-export async function createEncryptedBackupPayloadWithKey(notes: Note[], key: CryptoKey): Promise<string> {
+export async function createEncryptedBackupPayloadWithKey(
+  notes: Note[],
+  key: CryptoKey,
+  options?: { keyScopeId?: string | null }
+): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const plaintext = encoder.encode(JSON.stringify(notes));
   const ciphertext = await crypto.subtle.encrypt(
@@ -156,7 +235,7 @@ export async function createEncryptedBackupPayloadWithKey(notes: Note[], key: Cr
       version: 2,
       algorithm: 'AES-GCM',
       kdf: 'IDB_KEY',
-      keyRef: AUTO_BACKUP_KEY_ID,
+      keyRef: resolveAutoBackupKeyId(options?.keyScopeId),
       iv: toBase64(iv),
       ciphertext: toBase64(fromBuffer(ciphertext)),
       createdAt: new Date().toISOString(),

@@ -145,6 +145,8 @@ const mockContext = vi.hoisted(() => {
     publishSyncEvent: vi.fn().mockResolvedValue(undefined),
     failNextNoteChangeInsert: false,
     forceIdempotencyMissOnceForRequestId: null as string | null,
+    bumpVersionBeforeNextNotesConflictUpdateForNoteId: null as string | null,
+    bumpVersionBeforeNextNotesUpdateForNoteId: null as string | null,
   };
 });
 
@@ -294,12 +296,31 @@ function createDbMock() {
           if (table === schema.notes) {
             const baseRow = clone(value);
             return {
-              onConflictDoUpdate(args: { set: Record<string, unknown> }) {
+              onConflictDoUpdate(args: { set: Record<string, unknown>; where?: Expr }) {
                 const existingIndex = state.notes.findIndex(
                   row => row.userId === baseRow.userId && row.id === baseRow.id
                 );
 
                 if (existingIndex >= 0) {
+                  if (mockContext.bumpVersionBeforeNextNotesConflictUpdateForNoteId === baseRow.id) {
+                    const existing = state.notes[existingIndex];
+                    state.notes[existingIndex] = {
+                      ...existing,
+                      content: `race-${existing.content}`,
+                      version: Number(existing.version || 0) + 1,
+                      updatedAt: Number(existing.updatedAt || 0) + 1,
+                    };
+                    mockContext.bumpVersionBeforeNextNotesConflictUpdateForNoteId = null;
+                  }
+
+                  if (args.where && !matchesExpr(state.notes[existingIndex], args.where)) {
+                    return {
+                      async returning() {
+                        return [];
+                      },
+                    };
+                  }
+
                   state.notes[existingIndex] = {
                     ...state.notes[existingIndex],
                     ...clone(args.set),
@@ -348,6 +369,24 @@ function createDbMock() {
               }
 
               const updatedRows: RowRecord[] = [];
+              if (mockContext.bumpVersionBeforeNextNotesUpdateForNoteId) {
+                const targetNoteId = mockContext.bumpVersionBeforeNextNotesUpdateForNoteId;
+                const targetUserId = eqValue(expr, 'userId');
+                const targetIndex = state.notes.findIndex(
+                  row => row.id === targetNoteId && (!targetUserId || row.userId === targetUserId)
+                );
+                if (targetIndex >= 0) {
+                  const existing = state.notes[targetIndex];
+                  state.notes[targetIndex] = {
+                    ...existing,
+                    content: `race-${existing.content}`,
+                    version: Number(existing.version || 0) + 1,
+                    updatedAt: Number(existing.updatedAt || 0) + 1,
+                  };
+                }
+                mockContext.bumpVersionBeforeNextNotesUpdateForNoteId = null;
+              }
+
               state.notes = state.notes.map(row => {
                 if (!matchesExpr(row, expr)) return row;
                 const next = { ...row, ...clone(values) };
@@ -465,6 +504,7 @@ import {
   pruneTombstones,
   pushSync,
 } from '../src/services/sync.js';
+import { env } from '../src/config/env.js';
 
 function makeNote(id: string, version = 1) {
   const now = Date.now();
@@ -493,6 +533,8 @@ describe('sync service', () => {
     mockContext.publishSyncEvent.mockClear();
     mockContext.failNextNoteChangeInsert = false;
     mockContext.forceIdempotencyMissOnceForRequestId = null;
+    mockContext.bumpVersionBeforeNextNotesConflictUpdateForNoteId = null;
+    mockContext.bumpVersionBeforeNextNotesUpdateForNoteId = null;
   });
 
   it('replays idempotent push requests without duplicating note changes', async () => {
@@ -624,6 +666,37 @@ describe('sync service', () => {
     expect(metrics.pullResetsRequired).toBeGreaterThanOrEqual(1);
   });
 
+  it('enforces SYNC_PULL_LIMIT and leaves remaining changes for follow-up pulls', async () => {
+    const totalChanges = env.SYNC_PULL_LIMIT + 2;
+    const operations = Array.from({ length: totalChanges }, (_, index) => ({
+      requestId: `req-pull-limit-${String(index).padStart(4, '0')}`,
+      op: 'delete' as const,
+      noteId: `note-pull-limit-${index}`,
+      baseVersion: 0,
+    }));
+
+    for (let start = 0; start < operations.length; start += env.SYNC_BATCH_LIMIT) {
+      await pushSync({
+        userId,
+        deviceId,
+        operations: operations.slice(start, start + env.SYNC_BATCH_LIMIT),
+      });
+    }
+
+    const firstPull = await pullSync(userId, 0);
+    expect(firstPull.changes).toHaveLength(env.SYNC_PULL_LIMIT);
+    const firstPullCursors = firstPull.changes.map(change => change.cursor);
+    expect(firstPullCursors).toEqual([...firstPullCursors].sort((a, b) => a - b));
+    expect(firstPullCursors[0]).toBe(1);
+    expect(firstPullCursors.at(-1)).toBe(env.SYNC_PULL_LIMIT);
+    expect(firstPull.nextCursor).toBe(env.SYNC_PULL_LIMIT);
+
+    const secondPull = await pullSync(userId, firstPull.nextCursor);
+    expect(secondPull.changes).toHaveLength(2);
+    expect(secondPull.changes.map(change => change.cursor)).toEqual([env.SYNC_PULL_LIMIT + 1, env.SYNC_PULL_LIMIT + 2]);
+    expect(secondPull.nextCursor).toBe(env.SYNC_PULL_LIMIT + 2);
+  });
+
   it('reports conflicts with server-changed fields derived from base snapshot', async () => {
     const initial = makeNote('note-conflict', 1);
     await pushSync({
@@ -698,6 +771,93 @@ describe('sync service', () => {
     expect(conflict.conflicts).toHaveLength(1);
     expect(conflict.conflicts[0].changedFields).toContain('content');
     expect(conflict.conflicts[0].changedFields).not.toContain('title');
+  });
+
+  it('returns a conflict on upsert CAS miss when concurrent write changes the same base version', async () => {
+    const note = makeNote('note-upsert-cas-race', 1);
+    await pushSync({
+      userId,
+      deviceId,
+      operations: [
+        {
+          requestId: 'req-upsert-cas-seed',
+          op: 'upsert',
+          noteId: note.id,
+          baseVersion: 0,
+          note,
+        },
+      ],
+    });
+
+    mockContext.bumpVersionBeforeNextNotesConflictUpdateForNoteId = note.id;
+
+    const result = await pushSync({
+      userId,
+      deviceId,
+      operations: [
+        {
+          requestId: 'req-upsert-cas-race',
+          op: 'upsert',
+          noteId: note.id,
+          baseVersion: 1,
+          note: {
+            ...note,
+            content: 'client-update-after-base-v1',
+            version: 2,
+            updatedAt: Date.now(),
+          },
+          clientChangedFields: ['content'],
+        },
+      ],
+    });
+
+    expect(result.applied).toEqual([]);
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0].noteId).toBe(note.id);
+    expect(result.conflicts[0].baseVersion).toBe(1);
+    expect(result.conflicts[0].currentVersion).toBe(2);
+    expect(result.conflicts[0].serverNote.version).toBe(2);
+    expect(result.conflicts[0].serverNote.content).toContain('race-');
+  });
+
+  it('returns a conflict on delete CAS miss when concurrent write changes the same base version', async () => {
+    const note = makeNote('note-delete-cas-race', 1);
+    await pushSync({
+      userId,
+      deviceId,
+      operations: [
+        {
+          requestId: 'req-delete-cas-seed',
+          op: 'upsert',
+          noteId: note.id,
+          baseVersion: 0,
+          note,
+        },
+      ],
+    });
+
+    mockContext.bumpVersionBeforeNextNotesUpdateForNoteId = note.id;
+
+    const result = await pushSync({
+      userId,
+      deviceId,
+      operations: [
+        {
+          requestId: 'req-delete-cas-race',
+          op: 'delete',
+          noteId: note.id,
+          baseVersion: 1,
+        },
+      ],
+    });
+
+    expect(result.applied).toEqual([]);
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0].noteId).toBe(note.id);
+    expect(result.conflicts[0].baseVersion).toBe(1);
+    expect(result.conflicts[0].currentVersion).toBe(2);
+    expect(result.conflicts[0].serverNote.version).toBe(2);
+    expect(result.conflicts[0].serverNote.content).toContain('race-');
   });
 
   it('creates tombstones on delete, supports filtering, and prunes expired tombstones', async () => {

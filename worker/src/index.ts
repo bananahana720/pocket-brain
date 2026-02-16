@@ -48,6 +48,7 @@ interface Env {
   VPS_PROXY_CIRCUIT_FAILURE_THRESHOLD?: string;
   VPS_PROXY_CIRCUIT_OPEN_MS?: string;
   VPS_PROXY_NO_RETRY_PATHS?: string;
+  VPS_PROXY_MAX_BODY_BYTES?: string;
 }
 
 type AIProvider = 'gemini' | 'openrouter';
@@ -158,6 +159,9 @@ const DEFAULT_VPS_PROXY_RETRIES = 1;
 const DEFAULT_VPS_PROXY_CIRCUIT_FAILURE_THRESHOLD = 3;
 const DEFAULT_VPS_PROXY_CIRCUIT_OPEN_MS = 20_000;
 const DEFAULT_VPS_PROXY_NO_RETRY_PATHS = ['/api/v2/events', '/api/v2/events/ticket'];
+const DEFAULT_VPS_PROXY_MAX_BODY_BYTES = 512 * 1024;
+const MIN_VPS_PROXY_MAX_BODY_BYTES = 32 * 1024;
+const MAX_VPS_PROXY_MAX_BODY_BYTES = 10 * 1024 * 1024;
 const PRODUCTION_SECRET_PLACEHOLDERS = new Set([
   'replace-with-32-byte-secret',
   'replace-with-separate-stream-ticket-secret',
@@ -649,6 +653,10 @@ function parseNoRetryPaths(value: string | undefined): Set<string> {
   return new Set(values);
 }
 
+function isEventsProxyPath(pathname: string): boolean {
+  return pathname === '/api/v2/events' || pathname.startsWith('/api/v2/events/');
+}
+
 function recordVpsProxyFailure(circuitFailureThreshold: number, circuitOpenMs: number): number {
   metrics.vpsProxyFailures += 1;
   vpsProxyCircuit.consecutiveFailures += 1;
@@ -685,8 +693,28 @@ async function proxyToVps(request: Request, env: Env, pathname: string): Promise
     throw error;
   }
 
+  const incomingOrigin = new URL(request.url).origin;
+  const upstreamOrigin = new URL(origin).origin;
+  if (incomingOrigin === upstreamOrigin) {
+    metrics.vpsProxyFailures += 1;
+    throw new ApiError(
+      500,
+      'CONFIG_ERROR',
+      'VPS API origin cannot match the worker origin for proxy routes.',
+      false,
+      undefined,
+      'origin_unconfigured'
+    );
+  }
+
   const timeoutMs = parseBoundedEnvNumber(env.VPS_PROXY_TIMEOUT_MS, DEFAULT_VPS_PROXY_TIMEOUT_MS, 1_000, 30_000);
   const retries = parseBoundedEnvNumber(env.VPS_PROXY_RETRIES, DEFAULT_VPS_PROXY_RETRIES, 0, 5);
+  const maxProxyBodyBytes = parseBoundedEnvNumber(
+    env.VPS_PROXY_MAX_BODY_BYTES,
+    DEFAULT_VPS_PROXY_MAX_BODY_BYTES,
+    MIN_VPS_PROXY_MAX_BODY_BYTES,
+    MAX_VPS_PROXY_MAX_BODY_BYTES
+  );
   const circuitFailureThreshold = parseBoundedEnvNumber(
     env.VPS_PROXY_CIRCUIT_FAILURE_THRESHOLD,
     DEFAULT_VPS_PROXY_CIRCUIT_FAILURE_THRESHOLD,
@@ -715,10 +743,32 @@ async function proxyToVps(request: Request, env: Env, pathname: string): Promise
   forwardHeader('content-type');
   forwardHeader('accept');
   forwardHeader('cache-control');
+  if (isEventsProxyPath(pathname)) {
+    forwardHeader('cookie');
+  }
 
   const method = request.method.toUpperCase();
   const hasBody = method !== 'GET' && method !== 'HEAD';
-  const bodyBuffer = hasBody ? await request.arrayBuffer() : null;
+  let bodyBuffer: ArrayBuffer | null = null;
+  if (hasBody) {
+    const contentLength = Number(request.headers.get('content-length') || '');
+    if (Number.isFinite(contentLength) && contentLength > maxProxyBodyBytes) {
+      throw new ApiError(
+        413,
+        'PAYLOAD_TOO_LARGE',
+        `Proxy request body exceeds limit (${maxProxyBodyBytes} bytes).`
+      );
+    }
+
+    bodyBuffer = await request.arrayBuffer();
+    if (bodyBuffer.byteLength > maxProxyBodyBytes) {
+      throw new ApiError(
+        413,
+        'PAYLOAD_TOO_LARGE',
+        `Proxy request body exceeds limit (${maxProxyBodyBytes} bytes).`
+      );
+    }
+  }
 
   const attempts = shouldRetry ? retries + 1 : 1;
   for (let attempt = 0; attempt < attempts; attempt++) {
@@ -1067,7 +1117,7 @@ function requireJsonContentType(request: Request): void {
 function ensureEncryptionSecretConfigured(env: Env): void {
   const secret = typeof env.KEY_ENCRYPTION_SECRET === 'string' ? env.KEY_ENCRYPTION_SECRET.trim() : '';
   const minLength = getEncryptionSecretMinLength(env);
-  if (!secret || secret.length < minLength) {
+  if (!secret || secret.length < minLength || isPlaceholderSecret(secret)) {
     reliabilityMetrics.runtimeConfig.invalidEncryptionSecret += 1;
     throw new ApiError(500, 'INTERNAL_ERROR', 'AI proxy encryption secret is not configured');
   }

@@ -173,7 +173,8 @@ fi
 CORS_ORIGIN="$(read_env_value CORS_ORIGIN)"
 if [[ -z "$CORS_ORIGIN" ]]; then
   if [[ "$MODE" == "production" ]]; then
-    CORS_ORIGIN="*"
+    echo "CORS_ORIGIN must be set in $SOURCE_ENV for production mode." >&2
+    exit 1
   else
     CORS_ORIGIN="http://localhost:3000"
   fi

@@ -25,6 +25,7 @@ import {
   getSyncQueueHardCap,
   getSyncQueueOverflowCap,
   loadSyncState,
+  saveSyncState,
   markSyncBootstrapped,
   removeQueuedSyncOps,
   setSyncCursor,
@@ -570,13 +571,13 @@ export function useSyncEngine(args: {
 
   const probeSyncStorageWriteRecovery = useCallback(async (): Promise<boolean> => {
     try {
-      await setSyncCursor(cursorRef.current);
+      await setSyncCursor(cursorRef.current, userId);
       return true;
     } catch (error) {
       console.error('sync queue persistence recovery probe failed', { context: 'flush_empty_queue', reason: error });
       return false;
     }
-  }, []);
+  }, [userId]);
 
   const applyEnqueueResult = useCallback((result: EnqueueSyncOpsResult, source: string) => {
     queueRef.current = result.queue;
@@ -708,12 +709,12 @@ export function useSyncEngine(args: {
           for (const applied of response.applied) {
             conflictLoopRef.current.delete(applied.note.id);
           }
-          const state = await removeQueuedSyncOps(appliedIds);
+          const state = await removeQueuedSyncOps(appliedIds, userId);
           queueRef.current = state.queue;
           overflowQueueRef.current = state.overflowQueue;
           refreshBackpressureFromQueues(state.queue, state.overflowQueue, { persistenceFailure: false });
           cursorRef.current = Math.max(cursorRef.current, response.nextCursor);
-          await setSyncCursor(cursorRef.current);
+          await setSyncCursor(cursorRef.current, userId);
 
           suppressDiffRef.current = true;
           setNotes(prev => {
@@ -730,7 +731,7 @@ export function useSyncEngine(args: {
 
         if (response.conflicts.length > 0) {
           const conflictRequestIds = response.conflicts.map(conflict => conflict.requestId);
-          const state = await removeQueuedSyncOps(conflictRequestIds);
+          const state = await removeQueuedSyncOps(conflictRequestIds, userId);
           queueRef.current = state.queue;
           overflowQueueRef.current = state.overflowQueue;
           refreshBackpressureFromQueues(state.queue, state.overflowQueue, { persistenceFailure: false });
@@ -757,7 +758,7 @@ export function useSyncEngine(args: {
           }
 
           if (retryOps.length > 0) {
-            const retryState = await enqueueSyncOps(retryOps);
+            const retryState = await enqueueSyncOps(retryOps, userId);
             applyEnqueueResult(retryState, 'conflict_retry');
           }
 
@@ -793,6 +794,7 @@ export function useSyncEngine(args: {
     scheduleRetry,
     setNotes,
     setSyncStatusSafe,
+    userId,
   ]);
 
   const pullLatest = useCallback(async () => {
@@ -816,7 +818,7 @@ export function useSyncEngine(args: {
           .sort((a, b) => b.createdAt - a.createdAt);
         setNotes(applyPendingQueue(baseSnapshot, [...queueRef.current, ...overflowQueueRef.current]));
         cursorRef.current = Math.max(snapshot.cursor, result.nextCursor || 0);
-        await setSyncCursor(cursorRef.current);
+        await setSyncCursor(cursorRef.current, userId);
         incrementMetric('sync_cursor_reset_recoveries');
         onResetRecovery?.('Recovered sync state after a stale cursor reset.');
         if (conflictsRef.current.length === 0) {
@@ -830,7 +832,7 @@ export function useSyncEngine(args: {
         setNotes(prev => applyRemoteChanges(prev, result.changes));
       }
       cursorRef.current = Math.max(cursorRef.current, result.nextCursor);
-      await setSyncCursor(cursorRef.current);
+      await setSyncCursor(cursorRef.current, userId);
       if (conflictsRef.current.length === 0) {
         setSyncStatusSafe(streamFallbackActiveRef.current ? 'polling' : 'synced');
       }
@@ -855,7 +857,7 @@ export function useSyncEngine(args: {
         scheduleRetry(syncError?.retryAfterMs);
       }
     }
-  }, [activateStreamFallback, enabled, onResetRecovery, resetRetryBackoff, scheduleRetry, setNotes, setSyncStatusSafe]);
+  }, [activateStreamFallback, enabled, onResetRecovery, resetRetryBackoff, scheduleRetry, setNotes, setSyncStatusSafe, userId]);
 
   useEffect(() => {
     if (!enabled || !userId) {
@@ -894,6 +896,12 @@ export function useSyncEngine(args: {
 
     let cancelled = false;
     initializedUserRef.current = userId;
+    queueRef.current = [];
+    overflowQueueRef.current = [];
+    cursorRef.current = 0;
+    conflictLoopRef.current.clear();
+    setConflicts([]);
+    refreshBackpressureFromQueues([], [], { persistenceFailure: false });
 
     const init = async () => {
       streamFallbackActiveRef.current = false;
@@ -901,7 +909,26 @@ export function useSyncEngine(args: {
       resetStreamFailureTracking();
       setSyncStatusSafe('syncing');
 
-      const persisted = await loadSyncState();
+      let persisted = await loadSyncState(userId);
+      const hasScopeMismatch =
+        persisted.scopeUserId !== userId ||
+        (persisted.bootstrappedUserId !== null && persisted.bootstrappedUserId !== userId);
+      if (hasScopeMismatch) {
+        const resetState = {
+          cursor: 0,
+          queue: [],
+          overflowQueue: [],
+          bootstrappedUserId: null,
+          scopeUserId: userId,
+        };
+        persisted = resetState;
+        try {
+          await saveSyncState(resetState, userId);
+        } catch (error) {
+          console.error('Failed to reset mismatched sync scope state', { userId, error });
+        }
+      }
+
       queueRef.current = persisted.queue;
       overflowQueueRef.current = persisted.overflowQueue;
       if (persisted.overflowQueue.length > 0) {
@@ -913,13 +940,13 @@ export function useSyncEngine(args: {
       if (!persisted.bootstrappedUserId && notesRef.current.length > 0) {
         const bootstrap = await bootstrapSync(notesRef.current, 'local-automatic-migration-v1');
         cursorRef.current = Math.max(cursorRef.current, bootstrap.cursor);
-        await markSyncBootstrapped(userId);
+        await markSyncBootstrapped(userId, userId);
       }
 
       const snapshot = await fetchNotesSnapshot(true);
       if (!cancelled) {
         cursorRef.current = Math.max(cursorRef.current, snapshot.cursor);
-        await setSyncCursor(cursorRef.current);
+        await setSyncCursor(cursorRef.current, userId);
 
         suppressDiffRef.current = true;
         const baseSnapshot = snapshot.notes
@@ -1018,7 +1045,7 @@ export function useSyncEngine(args: {
     prevNotesRef.current = next;
     if (nextOps.length === 0) return;
 
-    enqueueSyncOps(nextOps)
+    enqueueSyncOps(nextOps, userId)
       .then(state => {
         applyEnqueueResult(state, 'note_diff');
       })
@@ -1148,7 +1175,7 @@ export function useSyncEngine(args: {
               autoMergeAttempted: true,
             };
 
-      enqueueSyncOps([retryOp])
+      enqueueSyncOps([retryOp], userId)
         .then(state => {
           applyEnqueueResult(state, 'manual_conflict_retry');
           setConflicts(prev => {
@@ -1164,7 +1191,7 @@ export function useSyncEngine(args: {
           scheduleRetry(syncError?.retryAfterMs);
         });
     },
-    [applyEnqueueResult, conflicts, flushPushQueue, resolveConflictKeepServer, scheduleRetry, setBlockedByPersistenceFailure]
+    [applyEnqueueResult, conflicts, flushPushQueue, resolveConflictKeepServer, scheduleRetry, setBlockedByPersistenceFailure, userId]
   );
 
   const dismissConflict = useCallback((requestId: string) => {

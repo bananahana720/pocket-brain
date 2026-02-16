@@ -246,6 +246,18 @@ function isPlaceholderSecret(value) {
   );
 }
 
+function isPlaceholderClerkKey(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return true;
+  return (
+    normalized.startsWith('sk_test_') ||
+    normalized.startsWith('pk_test_') ||
+    normalized.includes('replace-with') ||
+    normalized.includes('your-') ||
+    normalized.includes('example')
+  );
+}
+
 function parseCorsOrigins(rawValue) {
   return String(rawValue || '')
     .split(',')
@@ -321,6 +333,16 @@ function validateServerConfig(errors) {
   }
 
   if (isProduction) {
+    const clerkSecretKey = String(config.CLERK_SECRET_KEY || '').trim();
+    if (isPlaceholderClerkKey(clerkSecretKey)) {
+      errors.push('server: CLERK_SECRET_KEY must be a non-placeholder production key (no test key patterns)');
+    }
+
+    const clerkPublishableKey = String(config.CLERK_PUBLISHABLE_KEY || '').trim();
+    if (clerkPublishableKey && isPlaceholderClerkKey(clerkPublishableKey)) {
+      errors.push('server: CLERK_PUBLISHABLE_KEY must be a non-placeholder production key when set');
+    }
+
     const corsOrigins = parseCorsOrigins(config.CORS_ORIGIN || '*');
     if (corsOrigins.length === 0 || corsOrigins.includes('*')) {
       errors.push('server: CORS_ORIGIN must be explicit (no wildcard) in production');

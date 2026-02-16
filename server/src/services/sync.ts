@@ -188,6 +188,29 @@ function computeServerChangedFields(op: SyncOp, serverNote: SyncNote): string[] 
   return Array.from(changed.values());
 }
 
+function makeMissingServerNote(noteId: string, version: number): SyncNote {
+  const timestamp = nowTs();
+  return {
+    id: noteId,
+    content: '',
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    version,
+    deletedAt: timestamp,
+  };
+}
+
+function makeConflict(op: SyncOp, serverNote: SyncNote, currentVersion: number): SyncPushResult['conflicts'][number] {
+  return {
+    requestId: op.requestId,
+    noteId: op.noteId,
+    baseVersion: op.baseVersion,
+    currentVersion,
+    serverNote,
+    changedFields: computeServerChangedFields(op, serverNote),
+  };
+}
+
 function toSyncNote(row: typeof notes.$inferSelect): SyncNote {
   return {
     id: row.id,
@@ -338,30 +361,11 @@ async function upsertNote(args: {
   const currentVersion = current?.version || 0;
 
   if (op.baseVersion !== currentVersion) {
-    const serverNote = current
-      ? toSyncNote(current)
-      : ({
-          id: op.noteId,
-          content: '',
-          createdAt: normalized.createdAt,
-          updatedAt: normalized.updatedAt,
-          version: currentVersion,
-          deletedAt: nowTs(),
-        } as SyncNote);
-
-    const conflict = {
-      requestId: op.requestId,
-      noteId: op.noteId,
-      baseVersion: op.baseVersion,
-      currentVersion,
-      serverNote,
-      changedFields: computeServerChangedFields(op, serverNote),
-    };
-
-    return { conflict };
+    const serverNote = current ? toSyncNote(current) : makeMissingServerNote(op.noteId, currentVersion);
+    return { conflict: makeConflict(op, serverNote, currentVersion) };
   }
 
-  const nextVersion = currentVersion + 1;
+  const nextVersion = op.baseVersion + 1;
   const now = nowTs();
 
   const [persisted] = await args.executor
@@ -409,19 +413,30 @@ async function upsertNote(args: {
         deletedAt: normalized.deletedAt,
         lastModifiedByDeviceId: deviceId,
       },
+      where: and(eq(notes.userId, userId), eq(notes.id, op.noteId), eq(notes.version, op.baseVersion)),
     })
     .returning();
 
+  if (!persisted) {
+    const latest = await args.executor.query.notes.findFirst({
+      where: and(eq(notes.userId, userId), eq(notes.id, op.noteId)),
+    });
+    const latestVersion = latest?.version || 0;
+    const serverNote = latest ? toSyncNote(latest) : makeMissingServerNote(op.noteId, latestVersion);
+    return { conflict: makeConflict(op, serverNote, latestVersion) };
+  }
+
+  const persistedNote = toSyncNote(persisted);
   const cursor = await appendChange({
     executor: args.executor,
     userId,
     noteId: op.noteId,
     opType: 'upsert',
     payload: {
-      note: toSyncNote(persisted),
+      note: persistedNote,
     },
     baseVersion: op.baseVersion,
-    newVersion: nextVersion,
+    newVersion: persistedNote.version,
     requestId: op.requestId,
     deviceId,
   });
@@ -429,7 +444,7 @@ async function upsertNote(args: {
   return {
     applied: {
       requestId: op.requestId,
-      note: toSyncNote(persisted),
+      note: persistedNote,
       cursor,
     },
   };
@@ -477,18 +492,11 @@ async function deleteNote(args: {
   if (op.baseVersion !== currentVersion) {
     const serverNote = toSyncNote(current);
     return {
-      conflict: {
-        requestId: op.requestId,
-        noteId: op.noteId,
-        baseVersion: op.baseVersion,
-        currentVersion,
-        serverNote,
-        changedFields: computeServerChangedFields(op, serverNote),
-      },
+      conflict: makeConflict(op, serverNote, currentVersion),
     };
   }
 
-  const nextVersion = currentVersion + 1;
+  const nextVersion = op.baseVersion + 1;
   const deletedAt = nowTs();
 
   const [persisted] = await args.executor
@@ -499,17 +507,27 @@ async function deleteNote(args: {
       version: nextVersion,
       lastModifiedByDeviceId: deviceId,
     })
-    .where(and(eq(notes.userId, userId), eq(notes.id, op.noteId)))
+    .where(and(eq(notes.userId, userId), eq(notes.id, op.noteId), eq(notes.version, op.baseVersion)))
     .returning();
 
+  if (!persisted) {
+    const latest = await args.executor.query.notes.findFirst({
+      where: and(eq(notes.userId, userId), eq(notes.id, op.noteId)),
+    });
+    const latestVersion = latest?.version || 0;
+    const serverNote = latest ? toSyncNote(latest) : makeMissingServerNote(op.noteId, latestVersion);
+    return { conflict: makeConflict(op, serverNote, latestVersion) };
+  }
+
+  const persistedNote = toSyncNote(persisted);
   const cursor = await appendChange({
     executor: args.executor,
     userId,
     noteId: op.noteId,
     opType: 'delete',
-    payload: { note: toSyncNote(persisted) },
+    payload: { note: persistedNote },
     baseVersion: op.baseVersion,
-    newVersion: nextVersion,
+    newVersion: persistedNote.version,
     requestId: op.requestId,
     deviceId,
   });
@@ -517,7 +535,7 @@ async function deleteNote(args: {
   return {
     applied: {
       requestId: op.requestId,
-      note: toSyncNote(persisted),
+      note: persistedNote,
       cursor,
     },
   };
@@ -624,13 +642,15 @@ export async function pushSync(args: {
   deviceId: string;
   operations: SyncOp[];
 }): Promise<SyncPushResult> {
+  if (args.operations.length > env.SYNC_BATCH_LIMIT) {
+    throw new Error(`Sync batch size ${args.operations.length} exceeds limit ${env.SYNC_BATCH_LIMIT}`);
+  }
+
   const applied: SyncPushResult['applied'] = [];
   const conflicts: SyncPushResult['conflicts'] = [];
   let nextCursor = await getCurrentCursor(args.userId);
 
-  const operations = args.operations.slice(0, env.SYNC_BATCH_LIMIT);
-
-  for (const op of operations) {
+  for (const op of args.operations) {
     syncHealthMetrics.pushOpsTotal += 1;
     const existingIdempotency = await loadIdempotency(args.userId, op.requestId);
     if (existingIdempotency) {

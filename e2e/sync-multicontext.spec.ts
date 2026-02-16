@@ -231,23 +231,23 @@ test.describe('sync multi-context', () => {
       await gotoWithNotes(mobile);
 
       await createNoteViaUI(desktop, 'Desktop sync note');
-      await expect(desktop.getByText('Desktop sync note')).toBeVisible();
+      await expect(desktop.locator('p', { hasText: 'Desktop sync note' }).first()).toBeVisible();
       await expect.poll(() => notes.size, { timeout: 10_000 }).toBeGreaterThan(0);
 
       await mobile.reload();
-      await expect(mobile.getByText('Desktop sync note')).toBeVisible();
+      await expect(mobile.locator('p', { hasText: 'Desktop sync note' }).first()).toBeVisible();
 
       await mobileContext.setOffline(true);
       await expect(mobile.getByTitle('Sync status: Offline')).toBeVisible();
 
       await createNoteViaUI(mobile, 'Mobile offline replay note');
-      await expect(mobile.getByText('Mobile offline replay note')).toBeVisible();
+      await expect(mobile.locator('p', { hasText: 'Mobile offline replay note' }).first()).toBeVisible();
 
       await mobileContext.setOffline(false);
       await expect(mobile.getByTitle('Sync status: Synced')).toBeVisible({ timeout: 10000 });
 
       await desktop.reload();
-      await expect(desktop.getByText('Mobile offline replay note')).toBeVisible();
+      await expect(desktop.locator('p', { hasText: 'Mobile offline replay note' }).first()).toBeVisible();
       expect(eventStreamUrls.length).toBeGreaterThan(0);
       for (const streamUrl of eventStreamUrls) {
         const parsed = new URL(streamUrl);

@@ -58,11 +58,15 @@ import {
 
 const STORAGE_KEY = 'pocketbrain_notes';
 const STORAGE_SHADOW_KEY = 'pocketbrain_notes_shadow';
+const STORAGE_SCOPE_META_KEY = 'pocketbrain_storage_scope_v1';
+const ANALYSIS_QUEUE_SCOPE_META_KEY = 'pocketbrain_analysis_queue_scope_v1';
 const BACKUP_RECORDED_KEY = 'pocketbrain_last_backup_at';
 const BACKUP_REMINDER_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 const AUTO_BACKUP_PAYLOAD_KEY = 'pocketbrain_auto_backup_payload';
 const AUTO_BACKUP_LAST_AT_KEY = 'pocketbrain_auto_backup_last_at';
+const AUTO_BACKUP_META_KEY = 'pocketbrain_auto_backup_meta_v1';
 const LEGACY_AUTO_BACKUP_SECRET_KEY = 'pocketbrain_auto_backup_secret';
+const ANONYMOUS_STORAGE_SCOPE = '__anon__';
 const AUTO_BACKUP_INTERVAL_MS = 30 * 60 * 1000;
 const AI_EXPIRY_WARN_MS = 15 * 60 * 1000;
 const OP_COMPACT_THRESHOLD = 200;
@@ -86,6 +90,42 @@ const TodayView = React.lazy(() => import('./components/TodayView'));
 const Drawer = React.lazy(() => import('./components/Drawer'));
 const DiagnosticsPanel = React.lazy(() => import('./components/DiagnosticsPanel'));
 const ThoughtGraphView = React.lazy(() => import('./components/ThoughtGraphView'));
+
+type AutoBackupScopeMetadata = {
+  scope: string;
+  userId: string | null;
+  keyScopeId: string;
+  updatedAt: number;
+};
+
+function normalizeStorageScope(userId: string | null): string {
+  if (!userId) return ANONYMOUS_STORAGE_SCOPE;
+  const trimmed = userId.trim();
+  return trimmed.length > 0 ? trimmed : ANONYMOUS_STORAGE_SCOPE;
+}
+
+function getScopedStorageKey(base: string, scope: string): string {
+  return `${base}::${scope}`;
+}
+
+function parseAutoBackupScopeMetadata(raw: string | null): AutoBackupScopeMetadata | null {
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<AutoBackupScopeMetadata>;
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (typeof parsed.scope !== 'string' || !parsed.scope) return null;
+    if (typeof parsed.keyScopeId !== 'string' || !parsed.keyScopeId) return null;
+    return {
+      scope: parsed.scope,
+      userId: typeof parsed.userId === 'string' && parsed.userId.length > 0 ? parsed.userId : null,
+      keyScopeId: parsed.keyScopeId,
+      updatedAt: typeof parsed.updatedAt === 'number' && Number.isFinite(parsed.updatedAt) ? parsed.updatedAt : Date.now(),
+    };
+  } catch {
+    return null;
+  }
+}
 
 function buildNoteSearchText(note: Note): string {
   return `${note.content} ${note.title || ''} ${(note.tags || []).join(' ')}`.toLowerCase();
@@ -290,6 +330,17 @@ function App() {
   const [aiDegradedMessage, setAiDegradedMessage] = useState<string | null>(null);
   const [sharedNotePayload, setSharedNotePayload] = useState<SharedNotePayload | null>(null);
   const [isNotesHydrated, setIsNotesHydrated] = useState(false);
+  const storageScope = useMemo(() => normalizeStorageScope(isSignedIn ? userId : null), [isSignedIn, userId]);
+  const scopedStorageKey = useMemo(() => getScopedStorageKey(STORAGE_KEY, storageScope), [storageScope]);
+  const scopedShadowStorageKey = useMemo(() => getScopedStorageKey(STORAGE_SHADOW_KEY, storageScope), [storageScope]);
+  const scopedBackupRecordedKey = useMemo(() => getScopedStorageKey(BACKUP_RECORDED_KEY, storageScope), [storageScope]);
+  const scopedAutoBackupPayloadKey = useMemo(() => getScopedStorageKey(AUTO_BACKUP_PAYLOAD_KEY, storageScope), [storageScope]);
+  const scopedAutoBackupLastAtKey = useMemo(() => getScopedStorageKey(AUTO_BACKUP_LAST_AT_KEY, storageScope), [storageScope]);
+  const scopedAutoBackupMetaKey = useMemo(() => getScopedStorageKey(AUTO_BACKUP_META_KEY, storageScope), [storageScope]);
+  const autoBackupKeyScopeId = useMemo(
+    () => (isSignedIn && userId ? `user:${userId}` : `scope:${storageScope}`),
+    [isSignedIn, storageScope, userId]
+  );
 
   const pushQueueWarningToast = useCallback((message: string, level: 'info' | 'error' = 'info') => {
     const id = `${Date.now()}-${Math.random()}`;
@@ -336,6 +387,7 @@ function App() {
   const indexedNotesRef = useRef<Note[]>([]);
 
   const hasLoadedRef = useRef(false);
+  const hydratedStorageScopeRef = useRef<string | null>(null);
   const previousNotesRef = useRef<Note[]>([]);
   const persistChainRef = useRef<Promise<void>>(Promise.resolve());
   const persistDirtyRef = useRef(false);
@@ -456,6 +508,7 @@ function App() {
     analysisQueueDirtyRef.current = true;
     analysisQueuePersistChainRef.current = analysisQueuePersistChainRef.current
       .then(async () => {
+        localStorage.setItem(ANALYSIS_QUEUE_SCOPE_META_KEY, storageScope);
         await saveAnalysisQueueState(snapshotAnalysisQueueState());
         analysisQueueDirtyRef.current = false;
       })
@@ -464,7 +517,7 @@ function App() {
         console.error('Failed to persist analysis queue state', error);
         incrementMetric('analysis_queue_persist_failures');
       });
-  }, [snapshotAnalysisQueueState]);
+  }, [snapshotAnalysisQueueState, storageScope]);
 
   const pruneStaleAnalysisJobs = useCallback(() => {
     const cutoff = Date.now() - MAX_ANALYSIS_JOB_AGE_MS;
@@ -494,15 +547,16 @@ function App() {
 
       try {
         const serialized = JSON.stringify(snapshotNotes);
-        localStorage.setItem(STORAGE_SHADOW_KEY, serialized);
+        localStorage.setItem(STORAGE_SCOPE_META_KEY, storageScope);
+        localStorage.setItem(scopedShadowStorageKey, serialized);
         if (includePrimary) {
-          localStorage.setItem(STORAGE_KEY, serialized);
+          localStorage.setItem(scopedStorageKey, serialized);
         }
       } catch (error) {
         console.error('Failed to write local fallback snapshot', error);
       }
     },
-    []
+    [scopedShadowStorageKey, scopedStorageKey, storageScope]
   );
 
   const flushPersistentState = useCallback(() => {
@@ -531,21 +585,31 @@ function App() {
       if (snapshotNotes.length === 0) return;
       if (autoBackupInFlightRef.current) return;
 
-      const rawLast = localStorage.getItem(AUTO_BACKUP_LAST_AT_KEY);
+      const rawLast = localStorage.getItem(scopedAutoBackupLastAtKey);
       const last = rawLast ? Number(rawLast) : 0;
       if (last && Date.now() - last < AUTO_BACKUP_INTERVAL_MS) return;
 
       autoBackupInFlightRef.current = true;
       try {
-        const key = await getOrCreateAutoBackupKey();
-        const payload = await createEncryptedBackupPayloadWithKey(snapshotNotes, key);
+        const key = await getOrCreateAutoBackupKey(autoBackupKeyScopeId);
+        const payload = await createEncryptedBackupPayloadWithKey(snapshotNotes, key, {
+          keyScopeId: autoBackupKeyScopeId,
+        });
         const restored = await parseEncryptedBackupPayloadWithKey(payload, key);
         if (!Array.isArray(restored) || restored.length !== snapshotNotes.length) {
           throw new Error('Auto-backup restore check failed');
         }
 
-        localStorage.setItem(AUTO_BACKUP_PAYLOAD_KEY, payload);
-        localStorage.setItem(AUTO_BACKUP_LAST_AT_KEY, String(Date.now()));
+        const updatedAt = Date.now();
+        const metadata: AutoBackupScopeMetadata = {
+          scope: storageScope,
+          userId: isSignedIn && userId ? userId : null,
+          keyScopeId: autoBackupKeyScopeId,
+          updatedAt,
+        };
+        localStorage.setItem(scopedAutoBackupPayloadKey, payload);
+        localStorage.setItem(scopedAutoBackupLastAtKey, String(updatedAt));
+        localStorage.setItem(scopedAutoBackupMetaKey, JSON.stringify(metadata));
         incrementMetric('backup_writes');
       } catch (error) {
         console.error('Automatic encrypted backup failed', error);
@@ -554,18 +618,46 @@ function App() {
         autoBackupInFlightRef.current = false;
       }
     },
-    []
+    [
+      autoBackupKeyScopeId,
+      isSignedIn,
+      scopedAutoBackupLastAtKey,
+      scopedAutoBackupMetaKey,
+      scopedAutoBackupPayloadKey,
+      storageScope,
+      userId,
+    ]
   );
 
   const tryRestoreAutoBackup = useCallback(async (): Promise<Note[] | null> => {
-    const payload = localStorage.getItem(AUTO_BACKUP_PAYLOAD_KEY);
+    let payload = localStorage.getItem(scopedAutoBackupPayloadKey);
+    const metadata = parseAutoBackupScopeMetadata(localStorage.getItem(scopedAutoBackupMetaKey));
+    const scopedMetadataMatches = !metadata || metadata.scope === storageScope;
+    if (!payload && storageScope === ANONYMOUS_STORAGE_SCOPE) {
+      payload = localStorage.getItem(AUTO_BACKUP_PAYLOAD_KEY);
+    }
     if (!payload) return null;
+    if (!scopedMetadataMatches) return null;
 
     try {
-      const key = await getOrCreateAutoBackupKey();
+      const keyScopeId = metadata?.keyScopeId || autoBackupKeyScopeId;
+      const key = await getOrCreateAutoBackupKey(keyScopeId);
       const restored = await parseEncryptedBackupPayloadWithKey(payload, key);
+      if (!localStorage.getItem(scopedAutoBackupPayloadKey)) {
+        localStorage.setItem(scopedAutoBackupPayloadKey, payload);
+      }
+      if (!localStorage.getItem(scopedAutoBackupMetaKey)) {
+        const nextMetadata: AutoBackupScopeMetadata = {
+          scope: storageScope,
+          userId: isSignedIn && userId ? userId : null,
+          keyScopeId,
+          updatedAt: Date.now(),
+        };
+        localStorage.setItem(scopedAutoBackupMetaKey, JSON.stringify(nextMetadata));
+      }
       return Array.isArray(restored) ? restored : null;
     } catch {
+      if (storageScope !== ANONYMOUS_STORAGE_SCOPE) return null;
       const legacySecret = localStorage.getItem(LEGACY_AUTO_BACKUP_SECRET_KEY);
       if (!legacySecret) return null;
 
@@ -573,16 +665,32 @@ function App() {
         const restored = await parseEncryptedBackupPayload(payload, legacySecret);
         if (!Array.isArray(restored)) return null;
 
-        const key = await getOrCreateAutoBackupKey();
-        const migratedPayload = await createEncryptedBackupPayloadWithKey(restored, key);
-        localStorage.setItem(AUTO_BACKUP_PAYLOAD_KEY, migratedPayload);
+        const key = await getOrCreateAutoBackupKey(autoBackupKeyScopeId);
+        const migratedPayload = await createEncryptedBackupPayloadWithKey(restored, key, {
+          keyScopeId: autoBackupKeyScopeId,
+        });
+        const metadataForMigration: AutoBackupScopeMetadata = {
+          scope: storageScope,
+          userId: null,
+          keyScopeId: autoBackupKeyScopeId,
+          updatedAt: Date.now(),
+        };
+        localStorage.setItem(scopedAutoBackupPayloadKey, migratedPayload);
+        localStorage.setItem(scopedAutoBackupMetaKey, JSON.stringify(metadataForMigration));
         localStorage.removeItem(LEGACY_AUTO_BACKUP_SECRET_KEY);
         return restored;
       } catch {
         return null;
       }
     }
-  }, []);
+  }, [
+    autoBackupKeyScopeId,
+    isSignedIn,
+    scopedAutoBackupMetaKey,
+    scopedAutoBackupPayloadKey,
+    storageScope,
+    userId,
+  ]);
 
   const refreshAiAuth = useCallback(async () => {
     const proxyEnabled = isProxyEnabled();
@@ -846,8 +954,42 @@ function App() {
   );
 
   const recordBackupCompletion = useCallback(() => {
-    localStorage.setItem(BACKUP_RECORDED_KEY, String(Date.now()));
-  }, []);
+    localStorage.setItem(scopedBackupRecordedKey, String(Date.now()));
+  }, [scopedBackupRecordedKey]);
+
+  useEffect(() => {
+    if (hydratedStorageScopeRef.current === storageScope) {
+      return;
+    }
+
+    hydratedStorageScopeRef.current = storageScope;
+    hasLoadedRef.current = false;
+    setIsNotesHydrated(false);
+
+    for (const controller of analysisControllersRef.current.values()) {
+      controller.abort();
+    }
+    analysisControllersRef.current.clear();
+    pendingAnalysisRef.current = [];
+    deferredAnalysisRef.current = [];
+    transientReplayQueueRef.current = [];
+    deadLetterAnalysisRef.current = [];
+    deadLetterToastShownRef.current = false;
+    backupReminderShownRef.current = false;
+    analysisPauseUntilRef.current = 0;
+    if (analysisResumeTimerRef.current !== null) {
+      window.clearTimeout(analysisResumeTimerRef.current);
+      analysisResumeTimerRef.current = null;
+    }
+
+    prePersistedCaptureSignaturesRef.current.clear();
+    previousNotesRef.current = [];
+    notesRef.current = [];
+    indexedNotesRef.current = [];
+    searchTextIndexRef.current.clear();
+    tagIndexRef.current.clear();
+    setNotes([]);
+  }, [storageScope]);
 
   // --- Load/Save Logic (IndexedDB + migration) ---
   useEffect(() => {
@@ -855,12 +997,70 @@ function App() {
 
     const bootstrap = async () => {
       try {
-        let loaded = await migrateFromLocalStorage(STORAGE_KEY);
+        const persistedScope = localStorage.getItem(STORAGE_SCOPE_META_KEY);
+        const firstScopedMigration = persistedScope === null;
+        if (firstScopedMigration && storageScope !== ANONYMOUS_STORAGE_SCOPE) {
+          const legacyPrimary = localStorage.getItem(STORAGE_KEY);
+          if (legacyPrimary && !localStorage.getItem(scopedStorageKey)) {
+            localStorage.setItem(scopedStorageKey, legacyPrimary);
+          }
+
+          const legacyShadow = localStorage.getItem(STORAGE_SHADOW_KEY);
+          if (legacyShadow && !localStorage.getItem(scopedShadowStorageKey)) {
+            localStorage.setItem(scopedShadowStorageKey, legacyShadow);
+          }
+
+          const legacyBackupPayload = localStorage.getItem(AUTO_BACKUP_PAYLOAD_KEY);
+          if (legacyBackupPayload && !localStorage.getItem(scopedAutoBackupPayloadKey)) {
+            const migratedAt = Date.now();
+            const migratedMetadata: AutoBackupScopeMetadata = {
+              scope: storageScope,
+              userId: isSignedIn && userId ? userId : null,
+              keyScopeId: autoBackupKeyScopeId,
+              updatedAt: migratedAt,
+            };
+            localStorage.setItem(scopedAutoBackupPayloadKey, legacyBackupPayload);
+            localStorage.setItem(scopedAutoBackupMetaKey, JSON.stringify(migratedMetadata));
+            const legacyBackupLastAt = localStorage.getItem(AUTO_BACKUP_LAST_AT_KEY);
+            if (legacyBackupLastAt) {
+              localStorage.setItem(scopedAutoBackupLastAtKey, legacyBackupLastAt);
+            } else {
+              localStorage.setItem(scopedAutoBackupLastAtKey, String(migratedAt));
+            }
+          }
+        }
+
+        const shouldResetForScope = persistedScope !== null && persistedScope !== storageScope;
+        if (shouldResetForScope) {
+          await compactSnapshot([]);
+          await saveAnalysisQueueState({
+            pending: [],
+            deferred: [],
+            transient: [],
+            deadLetter: [],
+          });
+          localStorage.setItem(ANALYSIS_QUEUE_SCOPE_META_KEY, storageScope);
+        }
+        localStorage.setItem(STORAGE_SCOPE_META_KEY, storageScope);
+
+        let loaded =
+          storageScope === ANONYMOUS_STORAGE_SCOPE ? await migrateFromLocalStorage(scopedStorageKey) : [];
         if (!loaded.length) {
-          const localFallback = localStorage.getItem(STORAGE_KEY);
+          const localFallback = localStorage.getItem(scopedStorageKey);
           if (localFallback) {
             try {
               loaded = JSON.parse(localFallback) as Note[];
+            } catch {
+              loaded = [];
+            }
+          }
+        }
+
+        if (!loaded.length && storageScope === ANONYMOUS_STORAGE_SCOPE) {
+          const legacyFallback = localStorage.getItem(STORAGE_KEY);
+          if (legacyFallback) {
+            try {
+              loaded = JSON.parse(legacyFallback) as Note[];
             } catch {
               loaded = [];
             }
@@ -875,8 +1075,24 @@ function App() {
           }
         }
 
-        const persistedQueue = await loadAnalysisQueueState();
-        const normalizedQueue = normalizePersistedAnalysisQueue(persistedQueue, loaded);
+        const persistedQueueScope = localStorage.getItem(ANALYSIS_QUEUE_SCOPE_META_KEY);
+        const queueScopeMatches =
+          persistedQueueScope === storageScope ||
+          (persistedQueueScope === null && storageScope === ANONYMOUS_STORAGE_SCOPE);
+        const scopedQueueSource = queueScopeMatches
+          ? await loadAnalysisQueueState()
+          : {
+              pending: [],
+              deferred: [],
+              transient: [],
+              deadLetter: [],
+            };
+        if (!queueScopeMatches) {
+          await saveAnalysisQueueState(scopedQueueSource);
+        }
+        localStorage.setItem(ANALYSIS_QUEUE_SCOPE_META_KEY, storageScope);
+
+        const normalizedQueue = normalizePersistedAnalysisQueue(scopedQueueSource, loaded);
         if (normalizedQueue.dropped > 0) {
           incrementMetric('stale_analysis_drops', normalizedQueue.dropped);
         }
@@ -937,7 +1153,9 @@ function App() {
         incrementMetric('load_failures');
 
         let restored: Note[] = [];
-        const shadowFallback = localStorage.getItem(STORAGE_SHADOW_KEY);
+        const shadowFallback =
+          localStorage.getItem(scopedShadowStorageKey) ||
+          (storageScope === ANONYMOUS_STORAGE_SCOPE ? localStorage.getItem(STORAGE_SHADOW_KEY) : null);
         if (shadowFallback) {
           try {
             restored = JSON.parse(shadowFallback) as Note[];
@@ -981,7 +1199,16 @@ function App() {
     pruneStaleAnalysisJobs,
     removeJobsForNoteId,
     runAnalysisQueue,
+    autoBackupKeyScopeId,
+    isSignedIn,
+    scopedShadowStorageKey,
+    scopedAutoBackupLastAtKey,
+    scopedAutoBackupMetaKey,
+    scopedAutoBackupPayloadKey,
+    scopedStorageKey,
+    storageScope,
     tryRestoreAutoBackup,
+    userId,
   ]);
 
   useEffect(() => {
@@ -1253,7 +1480,7 @@ function App() {
     if (!hasLoadedRef.current) return;
     if (notes.length === 0) return;
 
-    const raw = localStorage.getItem(BACKUP_RECORDED_KEY);
+    const raw = localStorage.getItem(scopedBackupRecordedKey);
     const lastBackup = raw ? Number(raw) : 0;
     if (!lastBackup || Date.now() - lastBackup > BACKUP_REMINDER_INTERVAL_MS) {
       backupReminderShownRef.current = true;
@@ -1262,7 +1489,7 @@ function App() {
         onClick: () => setIsDrawerOpen(true),
       });
     }
-  }, [notes.length, addToast]);
+  }, [notes.length, addToast, scopedBackupRecordedKey]);
 
   useEffect(() => {
     notesRef.current = notes;
@@ -1802,16 +2029,37 @@ function App() {
     persistAnalysisQueueStateSafely();
 
     setNotes([]);
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(STORAGE_SHADOW_KEY);
-    localStorage.removeItem(AUTO_BACKUP_PAYLOAD_KEY);
-    localStorage.removeItem(AUTO_BACKUP_LAST_AT_KEY);
-    localStorage.removeItem(LEGACY_AUTO_BACKUP_SECRET_KEY);
-    void clearAutoBackupKey().catch(error => console.error('Failed to clear backup key', error));
+    localStorage.removeItem(scopedStorageKey);
+    localStorage.removeItem(scopedShadowStorageKey);
+    localStorage.removeItem(scopedAutoBackupPayloadKey);
+    localStorage.removeItem(scopedAutoBackupLastAtKey);
+    localStorage.removeItem(scopedAutoBackupMetaKey);
+    localStorage.removeItem(scopedBackupRecordedKey);
+    if (storageScope === ANONYMOUS_STORAGE_SCOPE) {
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(STORAGE_SHADOW_KEY);
+      localStorage.removeItem(AUTO_BACKUP_PAYLOAD_KEY);
+      localStorage.removeItem(AUTO_BACKUP_LAST_AT_KEY);
+      localStorage.removeItem(LEGACY_AUTO_BACKUP_SECRET_KEY);
+    }
+    localStorage.setItem(STORAGE_SCOPE_META_KEY, storageScope);
+    localStorage.setItem(ANALYSIS_QUEUE_SCOPE_META_KEY, storageScope);
+    void clearAutoBackupKey(autoBackupKeyScopeId).catch(error => console.error('Failed to clear backup key', error));
     previousNotesRef.current = [];
     resetNotesStore().catch(error => console.error('Failed to clear IndexedDB store', error));
     addToast('All data cleared', 'info');
-  }, [addToast, persistAnalysisQueueStateSafely]);
+  }, [
+    addToast,
+    autoBackupKeyScopeId,
+    persistAnalysisQueueStateSafely,
+    scopedAutoBackupLastAtKey,
+    scopedAutoBackupMetaKey,
+    scopedAutoBackupPayloadKey,
+    scopedBackupRecordedKey,
+    scopedShadowStorageKey,
+    scopedStorageKey,
+    storageScope,
+  ]);
 
   const handleImportNotes = useCallback((newNotes: Note[]) => {
     if (!assertSyncWritable()) return;

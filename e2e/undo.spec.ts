@@ -12,7 +12,7 @@ test.describe('Undo system', () => {
 
     await page.getByRole('button', { name: 'Undo' }).click();
     await expect(page.getByText('Action undone').first()).toBeVisible();
-    await expect(page.getByText('Bring me back')).toBeVisible();
+    await expect(page.getByText('Bring me back').first()).toBeVisible();
   });
 
   test('undo delete via Ctrl+Z keyboard shortcut', async ({ page }) => {
@@ -26,6 +26,6 @@ test.describe('Undo system', () => {
     await page.locator('h1').click();
     await page.keyboard.press('Meta+z');
     await expect(page.getByText('Action undone').first()).toBeVisible();
-    await expect(page.getByText('Keyboard undo')).toBeVisible();
+    await expect(page.getByText('Keyboard undo').first()).toBeVisible();
   });
 });

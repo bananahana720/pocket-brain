@@ -8,7 +8,9 @@ const ANALYSIS_QUEUE_STORE = 'analysis_queue';
 const SYNC_STATE_STORE = 'sync_state';
 const SNAPSHOT_KEY = 'current';
 const ANALYSIS_QUEUE_KEY = 'current';
-const SYNC_STATE_KEY = 'current';
+const LEGACY_SYNC_STATE_KEY = 'current';
+const SYNC_STATE_KEY_PREFIX = 'scope:';
+const ANONYMOUS_SYNC_SCOPE = '__anon__';
 const DEFAULT_SYNC_QUEUE_HARD_CAP = 500;
 const DEFAULT_SYNC_QUEUE_OVERFLOW_CAP = DEFAULT_SYNC_QUEUE_HARD_CAP;
 
@@ -112,6 +114,7 @@ interface SyncStateRecord {
   queue: SyncOp[];
   overflowQueue: SyncOp[];
   bootstrappedUserId: string | null;
+  scopeUserId: string | null;
 }
 
 export interface PersistedSyncState {
@@ -119,6 +122,7 @@ export interface PersistedSyncState {
   queue: SyncOp[];
   overflowQueue: SyncOp[];
   bootstrappedUserId: string | null;
+  scopeUserId: string | null;
 }
 
 export interface SyncQueuePolicyStats {
@@ -145,6 +149,46 @@ export interface SyncQueueOverflowPolicyStats {
 export interface EnqueueSyncOpsResult extends PersistedSyncState {
   queuePolicy: SyncQueuePolicyStats;
   overflowPolicy: SyncQueueOverflowPolicyStats;
+}
+
+function normalizeSyncScopeUserId(userId: string | null | undefined): string | null {
+  if (typeof userId !== 'string') return null;
+  const trimmed = userId.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function resolveSyncStateScope(userId: string | null | undefined): string {
+  return normalizeSyncScopeUserId(userId) || ANONYMOUS_SYNC_SCOPE;
+}
+
+function resolveSyncStateKey(userId: string | null | undefined): string {
+  return `${SYNC_STATE_KEY_PREFIX}${resolveSyncStateScope(userId)}`;
+}
+
+function toPersistedSyncState(
+  record: SyncStateRecord | undefined,
+  requestedScopeUserId: string | null
+): PersistedSyncState {
+  if (!record) {
+    return {
+      cursor: 0,
+      queue: [],
+      overflowQueue: [],
+      bootstrappedUserId: null,
+      scopeUserId: requestedScopeUserId,
+    };
+  }
+
+  return {
+    cursor: typeof record.cursor === 'number' ? Math.max(0, Math.floor(record.cursor)) : 0,
+    queue: sanitizeSyncQueue(record.queue),
+    overflowQueue: sanitizeSyncQueue(record.overflowQueue),
+    bootstrappedUserId: normalizeSyncScopeUserId(record.bootstrappedUserId),
+    scopeUserId:
+      normalizeSyncScopeUserId(record.scopeUserId) ??
+      normalizeSyncScopeUserId(record.bootstrappedUserId) ??
+      requestedScopeUserId,
+  };
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -302,45 +346,57 @@ export async function loadAnalysisQueueState(): Promise<AnalysisQueueState> {
   }
 }
 
-export async function loadSyncState(): Promise<PersistedSyncState> {
+export async function loadSyncState(userId: string | null = null): Promise<PersistedSyncState> {
+  const scopeUserId = normalizeSyncScopeUserId(userId);
+  const scopedKey = resolveSyncStateKey(scopeUserId);
+
   const db = await openDb();
   try {
     const tx = db.transaction(SYNC_STATE_STORE, 'readonly');
     const store = tx.objectStore(SYNC_STATE_STORE);
-    const record = (await promisifyRequest(store.get(SYNC_STATE_KEY))) as SyncStateRecord | undefined;
+    const record = (await promisifyRequest(store.get(scopedKey))) as SyncStateRecord | undefined;
 
-    if (!record) {
-      return {
-        cursor: 0,
-        queue: [],
-        overflowQueue: [],
-        bootstrappedUserId: null,
-      };
+    if (record) {
+      return toPersistedSyncState(record, scopeUserId);
+    }
+
+    const legacyRecord = (await promisifyRequest(store.get(LEGACY_SYNC_STATE_KEY))) as SyncStateRecord | undefined;
+    if (!legacyRecord) {
+      return toPersistedSyncState(undefined, scopeUserId);
+    }
+
+    const legacyState = toPersistedSyncState(legacyRecord, null);
+    const legacyScopeUserId = normalizeSyncScopeUserId(legacyState.scopeUserId);
+    const scopeMatches = legacyScopeUserId === scopeUserId;
+    if (!scopeMatches) {
+      return toPersistedSyncState(undefined, scopeUserId);
     }
 
     return {
-      cursor: typeof record.cursor === 'number' ? Math.max(0, Math.floor(record.cursor)) : 0,
-      queue: sanitizeSyncQueue(record.queue),
-      overflowQueue: sanitizeSyncQueue(record.overflowQueue),
-      bootstrappedUserId: typeof record.bootstrappedUserId === 'string' ? record.bootstrappedUserId : null,
+      ...legacyState,
+      scopeUserId: scopeUserId,
     };
   } finally {
     db.close();
   }
 }
 
-export async function saveSyncState(state: PersistedSyncState): Promise<void> {
+export async function saveSyncState(state: PersistedSyncState, userId: string | null = null): Promise<void> {
+  const scopeUserId = normalizeSyncScopeUserId(userId);
+  const key = resolveSyncStateKey(scopeUserId);
+
   const db = await openDb();
   try {
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(SYNC_STATE_STORE, 'readwrite');
       tx.objectStore(SYNC_STATE_STORE).put({
-        id: SYNC_STATE_KEY,
+        id: key,
         updatedAt: Date.now(),
         cursor: Math.max(0, Math.floor(state.cursor || 0)),
         queue: state.queue,
         overflowQueue: state.overflowQueue,
-        bootstrappedUserId: state.bootstrappedUserId,
+        bootstrappedUserId: normalizeSyncScopeUserId(state.bootstrappedUserId),
+        scopeUserId,
       } satisfies SyncStateRecord);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error || new Error('Failed to save sync state'));
@@ -463,6 +519,7 @@ function normalizeSyncStateQueues(
   return {
     cursor: state.cursor,
     bootstrappedUserId: state.bootstrappedUserId,
+    scopeUserId: state.scopeUserId,
     queue,
     overflowQueue,
     queuePolicy: {
@@ -482,6 +539,7 @@ function hasSameQueueState(a: PersistedSyncState, b: PersistedSyncState): boolea
   return (
     a.cursor === b.cursor &&
     a.bootstrappedUserId === b.bootstrappedUserId &&
+    a.scopeUserId === b.scopeUserId &&
     isSameQueueByRequestId(a.queue, b.queue) &&
     isSameQueueByRequestId(a.overflowQueue, b.overflowQueue)
   );
@@ -499,8 +557,8 @@ function isSameQueueByRequestId(a: SyncOp[], b: SyncOp[]): boolean {
   return true;
 }
 
-export async function enqueueSyncOps(ops: SyncOp[]): Promise<EnqueueSyncOpsResult> {
-  const current = await loadSyncState();
+export async function enqueueSyncOps(ops: SyncOp[], userId: string | null = null): Promise<EnqueueSyncOpsResult> {
+  const current = await loadSyncState(userId);
   const normalizedCurrent = withNoQueueDrops(current);
   const baseState: PersistedSyncState = {
     ...current,
@@ -508,7 +566,7 @@ export async function enqueueSyncOps(ops: SyncOp[]): Promise<EnqueueSyncOpsResul
     overflowQueue: normalizedCurrent.overflowQueue,
   };
   if (!hasSameQueueState(current, baseState)) {
-    await saveSyncState(baseState);
+    await saveSyncState(baseState, userId);
   }
 
   if (ops.length === 0) {
@@ -537,7 +595,7 @@ export async function enqueueSyncOps(ops: SyncOp[]): Promise<EnqueueSyncOpsResul
     queue: normalizedNext.queue,
     overflowQueue: normalizedNext.overflowQueue,
   };
-  await saveSyncState(updated);
+  await saveSyncState(updated, userId);
   return {
     ...updated,
     queuePolicy: normalizedNext.queuePolicy,
@@ -545,8 +603,11 @@ export async function enqueueSyncOps(ops: SyncOp[]): Promise<EnqueueSyncOpsResul
   };
 }
 
-export async function removeQueuedSyncOps(requestIds: string[]): Promise<PersistedSyncState> {
-  const current = await loadSyncState();
+export async function removeQueuedSyncOps(
+  requestIds: string[],
+  userId: string | null = null
+): Promise<PersistedSyncState> {
+  const current = await loadSyncState(userId);
   const idSet = new Set(requestIds);
   const filteredCombined =
     requestIds.length === 0
@@ -563,28 +624,31 @@ export async function removeQueuedSyncOps(requestIds: string[]): Promise<Persist
     overflowQueue: normalized.overflowQueue,
   };
   if (!hasSameQueueState(current, updated)) {
-    await saveSyncState(updated);
+    await saveSyncState(updated, userId);
   }
   return updated;
 }
 
-export async function setSyncCursor(cursor: number): Promise<PersistedSyncState> {
-  const current = await loadSyncState();
+export async function setSyncCursor(cursor: number, userId: string | null = null): Promise<PersistedSyncState> {
+  const current = await loadSyncState(userId);
   const updated: PersistedSyncState = {
     ...current,
     cursor: Math.max(current.cursor, Math.max(0, Math.floor(cursor || 0))),
   };
-  await saveSyncState(updated);
+  await saveSyncState(updated, userId);
   return updated;
 }
 
-export async function markSyncBootstrapped(userId: string): Promise<PersistedSyncState> {
-  const current = await loadSyncState();
+export async function markSyncBootstrapped(
+  userId: string,
+  scopeUserId: string | null = userId
+): Promise<PersistedSyncState> {
+  const current = await loadSyncState(scopeUserId);
   const updated: PersistedSyncState = {
     ...current,
-    bootstrappedUserId: userId,
+    bootstrappedUserId: normalizeSyncScopeUserId(userId),
   };
-  await saveSyncState(updated);
+  await saveSyncState(updated, scopeUserId);
   return updated;
 }
 

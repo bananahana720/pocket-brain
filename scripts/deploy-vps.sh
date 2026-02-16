@@ -55,6 +55,14 @@ if (!Array.isArray(journal.entries) || journal.entries.length === 0) {
   fi
 }
 
+read_env_value_from_file() {
+  local file_path="$1"
+  local key="$2"
+  local value
+  value="$(grep -E "^${key}=" "$file_path" | tail -n1 | cut -d= -f2- || true)"
+  printf "%s" "$value"
+}
+
 collect_runtime_diagnostics() {
   echo "==> docker compose ps"
   docker compose ps || true
@@ -111,6 +119,27 @@ wait_for_http_200() {
     cat "$output_file"
   fi
   return 1
+}
+
+sync_worker_key_encryption_secret() {
+  local rendered_env_path="server/.env"
+  if [[ ! -f "$rendered_env_path" ]]; then
+    echo "Rendered env file not found: $rendered_env_path" >&2
+    return 1
+  fi
+
+  local key_secret
+  key_secret="$(read_env_value_from_file "$rendered_env_path" "KEY_ENCRYPTION_SECRET")"
+  if [[ -z "$key_secret" ]]; then
+    echo "KEY_ENCRYPTION_SECRET missing from $rendered_env_path; refusing worker deploy." >&2
+    return 1
+  fi
+
+  echo "==> Syncing worker KEY_ENCRYPTION_SECRET"
+  if ! printf '%s' "$key_secret" | npm run worker:secret:set >/dev/null; then
+    echo "Failed to set KEY_ENCRYPTION_SECRET in Cloudflare Worker." >&2
+    return 1
+  fi
 }
 
 acquire_deploy_lock() {
@@ -189,8 +218,8 @@ docker compose config -q
 echo "==> Validating Drizzle migration metadata"
 assert_migration_metadata_present
 
-echo "==> Rebuilding and restarting containers"
-docker compose up -d --build
+echo "==> Starting infra services (postgres, redis)"
+docker compose up -d postgres redis
 
 echo "==> Waiting for postgres to become reachable"
 if ! wait_for_postgres; then
@@ -204,12 +233,18 @@ if ! ensure_database_exists; then
   exit 1
 fi
 
+echo "==> Building API image for migration task"
+docker compose build api
+
 echo "==> Applying database migrations"
-if ! docker compose exec -T api npm run db:migrate; then
+if ! docker compose run --rm --no-deps -T api npm run db:migrate; then
   echo "==> drizzle migrate failed; aborting deploy" >&2
   collect_runtime_diagnostics
   exit 1
 fi
+
+echo "==> Starting application services (api, nginx)"
+docker compose up -d --build api nginx
 
 API_READY_FILE="/tmp/pocketbrain-api-ready.json"
 NGINX_READY_FILE="/tmp/pocketbrain-nginx-ready.json"
@@ -225,6 +260,9 @@ if ! wait_for_http_200 "http://127.0.0.1:8080/ready" "$NGINX_READY_FILE" "nginx_
 fi
 
 if [[ "$DEPLOY_WORKER" == "true" ]]; then
+  if ! sync_worker_key_encryption_secret; then
+    exit 1
+  fi
   echo "==> Deploying Cloudflare Worker"
   npm run worker:deploy
 fi
