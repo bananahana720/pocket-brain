@@ -20,6 +20,8 @@ Options:
   --skip-pull               Passes --skip-pull to remote deploy script.
   --ready-retries <count>   Readiness retries passed to remote deploy/verify checks.
   --ready-delay <seconds>   Readiness delay passed to remote deploy/verify checks.
+  --public-base-url <url>   Optional base URL passed to post-deploy public API verification.
+  --public-bearer <token>   Optional bearer token passed to post-deploy public API verification.
   --sync-only               Only run remote git pull --ff-only (no docker rebuild/redeploy).
   --precheck-only           Validate SSH and remote repo path, then exit.
   --help                    Show this help text.
@@ -30,6 +32,13 @@ Environment:
   VPS_SSH_PORT      Default SSH port
   VPS_SSH_IDENTITY  Default SSH identity file
   VPS_SSH_RETRY_ATTEMPTS  SSH retry attempts for remote precheck/validation steps
+  VPS_POSTGRES_READY_RETRIES  Postgres readiness retries for remote deploy-vps.sh.
+  VPS_POSTGRES_READY_DELAY_SECONDS  Postgres readiness delay for remote deploy-vps.sh.
+  VPS_REDIS_READY_RETRIES  Redis readiness retries for remote deploy-vps.sh.
+  VPS_REDIS_READY_DELAY_SECONDS  Redis readiness delay for remote deploy-vps.sh.
+  VPS_PUBLIC_BASE_URL  Optional default for --public-base-url
+  VPS_PUBLIC_BEARER  Optional default for --public-bearer
+  VPS_PUBLIC_BEARER_TOKEN  Optional default for --public-bearer
 
 The script auto-loads these vars from `.vps-remote.env` (preferred) and `.env`.
 
@@ -55,6 +64,12 @@ SSH_IDENTITY="${VPS_SSH_IDENTITY:-}"
 SSH_RETRIES="${VPS_SSH_RETRY_ATTEMPTS:-3}"
 READY_RETRIES="${VPS_READY_RETRIES:-30}"
 READY_DELAY_SECONDS="${VPS_READY_DELAY_SECONDS:-2}"
+POSTGRES_READY_RETRIES="${VPS_POSTGRES_READY_RETRIES:-20}"
+POSTGRES_READY_DELAY_SECONDS="${VPS_POSTGRES_READY_DELAY_SECONDS:-2}"
+REDIS_READY_RETRIES="${VPS_REDIS_READY_RETRIES:-20}"
+REDIS_READY_DELAY_SECONDS="${VPS_REDIS_READY_DELAY_SECONDS:-2}"
+PUBLIC_BASE_URL="${VPS_PUBLIC_BASE_URL:-}"
+PUBLIC_BEARER="${VPS_PUBLIC_BEARER:-${VPS_PUBLIC_BEARER_TOKEN:-}}"
 ALLOW_STASH=false
 WITH_WORKER=false
 SKIP_PULL=false
@@ -89,6 +104,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --ready-delay)
       READY_DELAY_SECONDS="${2:-}"
+      shift 2
+      ;;
+    --public-base-url)
+      PUBLIC_BASE_URL="${2:-}"
+      shift 2
+      ;;
+    --public-bearer)
+      PUBLIC_BEARER="${2:-}"
       shift 2
       ;;
     --allow-stash)
@@ -145,6 +168,22 @@ if ! [[ "$READY_DELAY_SECONDS" =~ ^[0-9]+$ ]] || [[ "$READY_DELAY_SECONDS" -lt 1
   echo "Invalid ready retry delay: $READY_DELAY_SECONDS (expected integer >= 1)." >&2
   exit 1
 fi
+if ! [[ "$POSTGRES_READY_RETRIES" =~ ^[0-9]+$ ]] || [[ "$POSTGRES_READY_RETRIES" -lt 1 ]]; then
+  echo "Invalid postgres retry count: $POSTGRES_READY_RETRIES (expected integer >= 1)." >&2
+  exit 1
+fi
+if ! [[ "$POSTGRES_READY_DELAY_SECONDS" =~ ^[0-9]+$ ]] || [[ "$POSTGRES_READY_DELAY_SECONDS" -lt 1 ]]; then
+  echo "Invalid postgres retry delay: $POSTGRES_READY_DELAY_SECONDS (expected integer >= 1)." >&2
+  exit 1
+fi
+if ! [[ "$REDIS_READY_RETRIES" =~ ^[0-9]+$ ]] || [[ "$REDIS_READY_RETRIES" -lt 1 ]]; then
+  echo "Invalid redis retry count: $REDIS_READY_RETRIES (expected integer >= 1)." >&2
+  exit 1
+fi
+if ! [[ "$REDIS_READY_DELAY_SECONDS" =~ ^[0-9]+$ ]] || [[ "$REDIS_READY_DELAY_SECONDS" -lt 1 ]]; then
+  echo "Invalid redis retry delay: $REDIS_READY_DELAY_SECONDS (expected integer >= 1)." >&2
+  exit 1
+fi
 
 SSH_ARGS=(
   -p "$SSH_PORT"
@@ -194,6 +233,8 @@ echo "==> Remote path: $PROJECT_DIR"
 echo "==> SSH port: $SSH_PORT"
 echo "==> SSH retries: $SSH_RETRIES"
 echo "==> Ready retries: $READY_RETRIES (delay ${READY_DELAY_SECONDS}s)"
+echo "==> Postgres retries: $POSTGRES_READY_RETRIES (delay ${POSTGRES_READY_DELAY_SECONDS}s)"
+echo "==> Redis retries: $REDIS_READY_RETRIES (delay ${REDIS_READY_DELAY_SECONDS}s)"
 if [[ -n "$SSH_IDENTITY" ]]; then
   echo "==> SSH identity: $SSH_IDENTITY"
 fi
@@ -276,7 +317,8 @@ if [[ "$WITH_WORKER" == "true" ]]; then
 fi
 
 echo "==> Running remote deploy workflow"
-if ! run_ssh "set -euo pipefail; cd $REMOTE_PROJECT_DIR; bash scripts/deploy-vps.sh$DEPLOY_FLAGS_JOINED" "remote_deploy_workflow" 1; then
+DEPLOY_ENV_PREFIX="VPS_POSTGRES_READY_RETRIES=$(quote_for_shell "$POSTGRES_READY_RETRIES") VPS_POSTGRES_READY_DELAY_SECONDS=$(quote_for_shell "$POSTGRES_READY_DELAY_SECONDS") VPS_REDIS_READY_RETRIES=$(quote_for_shell "$REDIS_READY_RETRIES") VPS_REDIS_READY_DELAY_SECONDS=$(quote_for_shell "$REDIS_READY_DELAY_SECONDS")"
+if ! run_ssh "set -euo pipefail; cd $REMOTE_PROJECT_DIR; $DEPLOY_ENV_PREFIX bash scripts/deploy-vps.sh$DEPLOY_FLAGS_JOINED" "remote_deploy_workflow" 1; then
   collect_remote_runtime_diagnostics
   exit 1
 fi
@@ -284,6 +326,12 @@ echo "==> Running post-deploy verification"
 VERIFY_ARGS=(--host "$VPS_HOST" --path "$PROJECT_DIR" --port "$SSH_PORT" --ssh-retries "$SSH_RETRIES" --ready-retries "$READY_RETRIES" --ready-delay "$READY_DELAY_SECONDS")
 if [[ -n "$SSH_IDENTITY" ]]; then
   VERIFY_ARGS+=(--identity "$SSH_IDENTITY")
+fi
+if [[ -n "$PUBLIC_BASE_URL" ]]; then
+  VERIFY_ARGS+=(--public-base-url "$PUBLIC_BASE_URL")
+fi
+if [[ -n "$PUBLIC_BEARER" ]]; then
+  VERIFY_ARGS+=(--public-bearer "$PUBLIC_BEARER")
 fi
 bash "$ROOT_DIR/scripts/verify-vps-remote.sh" "${VERIFY_ARGS[@]}"
 echo "==> Remote deploy complete"

@@ -219,10 +219,17 @@ Options:
 
 Deploy script now:
 - validates compose config before restart
+- waits for Postgres and Redis to become reachable before migrations/startup
 - auto-creates database `pocketbrain` if missing
 - checks readiness on both direct API (`:8788/ready`) and nginx (`:8080/ready`)
 - acquires a deploy lock (`/tmp/pocketbrain-deploy.lock`) to prevent overlapping runs
 - prints compose status + logs on failure
+
+Infra readiness retry knobs (env):
+- `VPS_POSTGRES_READY_RETRIES` (default `20`)
+- `VPS_POSTGRES_READY_DELAY_SECONDS` (default `2`)
+- `VPS_REDIS_READY_RETRIES` (default `20`)
+- `VPS_REDIS_READY_DELAY_SECONDS` (default `2`)
 
 Reliability tracking + rollback thresholds:
 - Program tracker: `docs/RELIABILITY_PROGRAM.md`
@@ -284,6 +291,10 @@ The remote scripts auto-load `.vps-remote.env` and then `.env` for:
 - `VPS_READY_DELAY_SECONDS`
 - `VPS_POSTGRES_READY_RETRIES`
 - `VPS_POSTGRES_READY_DELAY_SECONDS`
+- `VPS_REDIS_READY_RETRIES`
+- `VPS_REDIS_READY_DELAY_SECONDS`
+- `VPS_PUBLIC_BASE_URL`
+- `VPS_PUBLIC_BEARER` / `VPS_PUBLIC_BEARER_TOKEN`
 
 One-off shell exports also work:
 
@@ -293,6 +304,9 @@ export VPS_PROJECT_DIR=/srv/pocket-brain
 # Optional:
 export VPS_SSH_PORT=22
 export VPS_SSH_IDENTITY=~/.ssh/id_ed25519
+export VPS_PUBLIC_BASE_URL=https://your-domain.example
+# Optional for authenticated sync pull smoke:
+# export VPS_PUBLIC_BEARER=<token>
 ```
 
 Run commands:
@@ -312,7 +326,10 @@ bash scripts/deploy-vps-remote.sh --skip-pull
 bash scripts/deploy-vps-remote.sh --allow-stash
 bash scripts/deploy-vps-remote.sh --ssh-retries 5
 bash scripts/deploy-vps-remote.sh --ready-retries 45 --ready-delay 2
+bash scripts/deploy-vps-remote.sh --public-base-url https://your-domain.example
+bash scripts/deploy-vps-remote.sh --public-base-url https://your-domain.example --public-bearer <token>
 bash scripts/verify-vps-remote.sh --ready-retries 30 --ready-delay 2
+bash scripts/verify-vps-remote.sh --public-base-url https://your-domain.example
 ```
 
 Safe CD run order:
@@ -332,6 +349,7 @@ Notes:
 - If remote deploy fails, scripts automatically print remote compose status and recent service logs.
 - If `VPS_SSH_HOST` is set as a raw IP/hostname, scripts default to `ubuntu@<host>`.
 - If `VPS_SSH_IDENTITY` is unset and `~/.ssh/id_ed25519` exists, scripts use it automatically.
+- If `VPS_PUBLIC_BASE_URL` (or `--public-base-url`) is set, post-deploy verify runs `scripts/smoke-public-api.sh` on the remote host and fails on contract mismatches.
 
 ### GitHub Actions CI/CD
 

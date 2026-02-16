@@ -47,6 +47,11 @@ load_vps_env() {
     load_var_from_file_if_unset "VPS_READY_DELAY_SECONDS" "$file_path"
     load_var_from_file_if_unset "VPS_POSTGRES_READY_RETRIES" "$file_path"
     load_var_from_file_if_unset "VPS_POSTGRES_READY_DELAY_SECONDS" "$file_path"
+    load_var_from_file_if_unset "VPS_REDIS_READY_RETRIES" "$file_path"
+    load_var_from_file_if_unset "VPS_REDIS_READY_DELAY_SECONDS" "$file_path"
+    load_var_from_file_if_unset "VPS_PUBLIC_BASE_URL" "$file_path"
+    load_var_from_file_if_unset "VPS_PUBLIC_BEARER" "$file_path"
+    load_var_from_file_if_unset "VPS_PUBLIC_BEARER_TOKEN" "$file_path"
   done
 
   if [[ -n "${VPS_SSH_HOST:-}" && "${VPS_SSH_HOST}" != *@* ]]; then
@@ -83,6 +88,14 @@ load_vps_env() {
 
   if [[ -z "${VPS_POSTGRES_READY_DELAY_SECONDS:-}" ]]; then
     export VPS_POSTGRES_READY_DELAY_SECONDS="2"
+  fi
+
+  if [[ -z "${VPS_REDIS_READY_RETRIES:-}" ]]; then
+    export VPS_REDIS_READY_RETRIES="20"
+  fi
+
+  if [[ -z "${VPS_REDIS_READY_DELAY_SECONDS:-}" ]]; then
+    export VPS_REDIS_READY_DELAY_SECONDS="2"
   fi
 }
 

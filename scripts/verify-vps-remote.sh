@@ -17,9 +17,16 @@ Options:
   --ssh-retries <count>     SSH retry attempts for verification command.
   --ready-retries <count>   Readiness retries on remote host. Default: 30.
   --ready-delay <seconds>   Delay between readiness retries. Default: 2.
+  --public-base-url <url>   Optional base URL for remote public API smoke checks.
+  --public-bearer <token>   Optional bearer token for remote public API smoke checks.
   --help                    Show this help text.
 
 The script auto-loads VPS vars from `.vps-remote.env` (preferred) and `.env`.
+
+Environment:
+  VPS_PUBLIC_BASE_URL       Optional fallback for --public-base-url.
+  VPS_PUBLIC_BEARER         Optional fallback for --public-bearer.
+  VPS_PUBLIC_BEARER_TOKEN   Optional fallback for --public-bearer.
 EOF
 }
 
@@ -38,6 +45,8 @@ SSH_IDENTITY="${VPS_SSH_IDENTITY:-}"
 SSH_RETRIES="${VPS_SSH_RETRY_ATTEMPTS:-3}"
 READY_RETRIES="${VPS_READY_RETRIES:-30}"
 READY_DELAY_SECONDS="${VPS_READY_DELAY_SECONDS:-2}"
+PUBLIC_BASE_URL="${VPS_PUBLIC_BASE_URL:-}"
+PUBLIC_BEARER="${VPS_PUBLIC_BEARER:-${VPS_PUBLIC_BEARER_TOKEN:-}}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -67,6 +76,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --ready-delay)
       READY_DELAY_SECONDS="${2:-}"
+      shift 2
+      ;;
+    --public-base-url)
+      PUBLIC_BASE_URL="${2:-}"
+      shift 2
+      ;;
+    --public-bearer)
+      PUBLIC_BEARER="${2:-}"
       shift 2
       ;;
     --help|-h)
@@ -222,5 +239,20 @@ EOF
 )"
 
 run_ssh "$REMOTE_VERIFY_CMD" "remote_verify"
+
+if [[ -z "$PUBLIC_BASE_URL" ]]; then
+  echo "==> Skipping remote public API smoke check (no --public-base-url or VPS_PUBLIC_BASE_URL set)"
+else
+  PUBLIC_BASE_URL_QUOTED="$(quote_for_shell "$PUBLIC_BASE_URL")"
+  REMOTE_PUBLIC_SMOKE_CMD="set -euo pipefail; cd $REMOTE_PROJECT_DIR; bash scripts/smoke-public-api.sh --base-url $PUBLIC_BASE_URL_QUOTED"
+  if [[ -n "$PUBLIC_BEARER" ]]; then
+    PUBLIC_BEARER_QUOTED="$(quote_for_shell "$PUBLIC_BEARER")"
+    REMOTE_PUBLIC_SMOKE_CMD+=" --bearer $PUBLIC_BEARER_QUOTED"
+    echo "==> Running remote public API smoke check against $PUBLIC_BASE_URL (authenticated)"
+  else
+    echo "==> Running remote public API smoke check against $PUBLIC_BASE_URL (unauthenticated)"
+  fi
+  run_ssh "$REMOTE_PUBLIC_SMOKE_CMD" "remote_public_smoke" 1
+fi
 
 echo "==> Remote verification complete"

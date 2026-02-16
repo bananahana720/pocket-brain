@@ -136,6 +136,7 @@ This validates JSON contracts for `/api/v1/auth/status`, `/api/v1/auth/connect` 
    - Renders `server/.env` from root `.env`
    - Runs runtime config gates (`config:check:server`, and `config:check:worker` when `--with-worker`)
    - Validates Docker Compose and Drizzle migration metadata
+   - Waits for both Postgres and Redis to become reachable before migration/startup steps
    - Rebuilds/restarts containers, ensures database `pocketbrain` exists, and applies `npm run db:migrate` in the API container
    - Validates readiness on both `http://127.0.0.1:8788/ready` and `http://127.0.0.1:8080/ready`
 
@@ -149,6 +150,10 @@ This validates JSON contracts for `/api/v1/auth/status`, `/api/v1/auth/connect` 
      - `VPS_READY_DELAY_SECONDS`
      - `VPS_POSTGRES_READY_RETRIES`
      - `VPS_POSTGRES_READY_DELAY_SECONDS`
+     - `VPS_REDIS_READY_RETRIES`
+     - `VPS_REDIS_READY_DELAY_SECONDS`
+     - `VPS_PUBLIC_BASE_URL`
+     - `VPS_PUBLIC_BEARER` / `VPS_PUBLIC_BEARER_TOKEN`
 2. Alternative: export remote connection vars per shell:
    - `export VPS_SSH_HOST=ubuntu@your-vps-host`
    - `export VPS_PROJECT_DIR=/srv/pocket-brain`
@@ -157,6 +162,8 @@ This validates JSON contracts for `/api/v1/auth/status`, `/api/v1/auth/connect` 
    - Optional: `export VPS_SSH_RETRY_ATTEMPTS=3`
    - Optional: `export VPS_READY_RETRIES=30`
    - Optional: `export VPS_READY_DELAY_SECONDS=2`
+   - Optional: `export VPS_PUBLIC_BASE_URL=https://your-domain.example`
+   - Optional: `export VPS_PUBLIC_BEARER=<token>`
 3. Validate connectivity, repo layout, and runtime prerequisites:
    - `npm run vps:precheck:remote`
 4. Sync only (git pull on VPS):
@@ -175,7 +182,10 @@ This validates JSON contracts for `/api/v1/auth/status`, `/api/v1/auth/connect` 
    - `bash scripts/deploy-vps-remote.sh --sync-only`
    - `bash scripts/deploy-vps-remote.sh --precheck-only`
    - `bash scripts/deploy-vps-remote.sh --ready-retries 45 --ready-delay 2`
+   - `bash scripts/deploy-vps-remote.sh --public-base-url https://your-domain.example`
+   - `bash scripts/deploy-vps-remote.sh --public-base-url https://your-domain.example --public-bearer <token>`
    - `bash scripts/verify-vps-remote.sh --ready-retries 30 --ready-delay 2`
+   - `bash scripts/verify-vps-remote.sh --public-base-url https://your-domain.example`
 
 ### 18) GitHub Actions CI/CD workflow
 1. Workflow file: `.github/workflows/ci-cd-vps.yml`
@@ -235,7 +245,7 @@ This validates JSON contracts for `/api/v1/auth/status`, `/api/v1/auth/connect` 
 | `npm run worker:deploy` | Deploy worker using `worker/wrangler.toml` |
 | `cp worker/.dev.vars.example worker/.dev.vars` | Seed local worker dev secrets file |
 | `cp server/.env.example server/.env` | Seed local sync-server environment file |
-| `bash scripts/deploy-vps.sh` | Deploy backend stack on VPS (pull, render env, config-gate, rebuild, migrate, readiness checks) |
+| `bash scripts/deploy-vps.sh` | Deploy backend stack on VPS (pull, render env, config-gate, wait for Postgres/Redis, rebuild, migrate, readiness checks) |
 | `bash scripts/deploy-vps.sh --with-worker` | Deploy backend stack plus Cloudflare Worker |
 | `bash scripts/deploy-vps.sh --skip-pull` | Deploy backend stack without running git pull |
 | `bash scripts/deploy-vps.sh --ready-retries 45 --ready-delay 2` | Deploy with custom readiness retry settings |
@@ -255,7 +265,9 @@ This validates JSON contracts for `/api/v1/auth/status`, `/api/v1/auth/connect` 
 | `bash scripts/deploy-vps-remote.sh --sync-only` | Run only remote `git pull --ff-only` |
 | `bash scripts/deploy-vps-remote.sh --precheck-only` | Validate SSH + remote prerequisites without syncing/deploying |
 | `bash scripts/deploy-vps-remote.sh --ready-retries 45 --ready-delay 2` | Remote deploy with custom readiness retry settings |
+| `bash scripts/deploy-vps-remote.sh --public-base-url https://your-domain.example` | Remote deploy plus post-deploy public API smoke verification |
 | `bash scripts/verify-vps-remote.sh --ready-retries 30 --ready-delay 2` | Verify remote readiness summary with custom retry settings |
+| `bash scripts/verify-vps-remote.sh --public-base-url https://your-domain.example` | Verify remote readiness and run public API smoke checks |
 | `bash scripts/smoke-public-api.sh --base-url https://your-domain.example` | Run public API smoke checks directly via script |
 | `npx wrangler secret put KEY_ENCRYPTION_SECRET_PREV --config worker/wrangler.toml` | Set previous encryption secret during rotation |
 | `npx wrangler secret delete KEY_ENCRYPTION_SECRET_PREV --config worker/wrangler.toml` | Remove previous encryption secret after rotation window |

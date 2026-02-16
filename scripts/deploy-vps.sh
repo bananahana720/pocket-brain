@@ -10,6 +10,8 @@ READY_RETRIES="${VPS_READY_RETRIES:-30}"
 READY_DELAY_SECONDS="${VPS_READY_DELAY_SECONDS:-2}"
 POSTGRES_READY_RETRIES="${VPS_POSTGRES_READY_RETRIES:-20}"
 POSTGRES_READY_DELAY_SECONDS="${VPS_POSTGRES_READY_DELAY_SECONDS:-2}"
+REDIS_READY_RETRIES="${VPS_REDIS_READY_RETRIES:-20}"
+REDIS_READY_DELAY_SECONDS="${VPS_REDIS_READY_DELAY_SECONDS:-2}"
 DEPLOY_LOCK_FILE="${VPS_DEPLOY_LOCK_FILE:-/tmp/pocketbrain-deploy.lock}"
 
 usage() {
@@ -72,6 +74,8 @@ collect_runtime_diagnostics() {
   docker compose logs --tail=200 nginx || true
   echo "==> Recent postgres logs"
   docker compose logs --tail=120 postgres || true
+  echo "==> Recent redis logs"
+  docker compose logs --tail=120 redis || true
 }
 
 wait_for_postgres() {
@@ -82,6 +86,17 @@ wait_for_postgres() {
     sleep "$POSTGRES_READY_DELAY_SECONDS"
   done
   echo "Postgres did not become ready after ${POSTGRES_READY_RETRIES} attempt(s)." >&2
+  return 1
+}
+
+wait_for_redis() {
+  for attempt in $(seq 1 "$REDIS_READY_RETRIES"); do
+    if docker compose exec -T redis redis-cli ping >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "$REDIS_READY_DELAY_SECONDS"
+  done
+  echo "Redis did not become ready after ${REDIS_READY_RETRIES} attempt(s)." >&2
   return 1
 }
 
@@ -191,6 +206,8 @@ validate_positive_integer "$READY_RETRIES" "ready retry count"
 validate_positive_integer "$READY_DELAY_SECONDS" "ready retry delay"
 validate_positive_integer "$POSTGRES_READY_RETRIES" "postgres retry count"
 validate_positive_integer "$POSTGRES_READY_DELAY_SECONDS" "postgres retry delay"
+validate_positive_integer "$REDIS_READY_RETRIES" "redis retry count"
+validate_positive_integer "$REDIS_READY_DELAY_SECONDS" "redis retry delay"
 
 echo "==> Deploying PocketBrain backend from: $ROOT_DIR"
 echo "==> Readiness retries: ${READY_RETRIES} (delay ${READY_DELAY_SECONDS}s)"
@@ -223,6 +240,12 @@ docker compose up -d postgres redis
 
 echo "==> Waiting for postgres to become reachable"
 if ! wait_for_postgres; then
+  collect_runtime_diagnostics
+  exit 1
+fi
+
+echo "==> Waiting for redis to become reachable"
+if ! wait_for_redis; then
   collect_runtime_diagnostics
   exit 1
 fi
