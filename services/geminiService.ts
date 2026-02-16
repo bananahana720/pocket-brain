@@ -12,6 +12,31 @@ const MAX_NOTE_TITLE_CHARS = 120;
 const MAX_QUERY_CHARS = 400;
 const MAX_SEARCH_CONTEXT_NOTES = 40;
 const MAX_DAILY_CONTEXT_NOTES = 60;
+const MAX_BATCH_ITEMS = 25;
+const BATCH_COUNT_WORDS: Record<string, number> = {
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+  thirteen: 13,
+  fourteen: 14,
+  fifteen: 15,
+  sixteen: 16,
+  seventeen: 17,
+  eighteen: 18,
+  nineteen: 19,
+  twenty: 20,
+};
+const BATCH_COUNT_PATTERN =
+  '(\\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)';
 
 type GoogleGenAIModule = typeof import('@google/genai');
 let googleGenAIModulePromise: Promise<GoogleGenAIModule> | null = null;
@@ -57,6 +82,18 @@ type NoteContext = Pick<
   Note,
   'id' | 'content' | 'createdAt' | 'title' | 'tags' | 'type' | 'isCompleted' | 'isArchived' | 'dueDate' | 'priority'
 >;
+type BatchItemType = 'NOTE' | 'TASK' | 'IDEA';
+type BatchPromptHints = {
+  requestedCount: number | null;
+  requestedType: BatchItemType | null;
+  generationLikely: boolean;
+};
+type BatchCountClause = {
+  count: number;
+  type: BatchItemType;
+  start: number;
+  end: number;
+};
 
 function clampText(value: string, maxChars: number): string {
   const normalized = value.replace(/\s+/g, ' ').trim();
@@ -438,6 +475,209 @@ function normalizeCleanupResult(
   };
 }
 
+function parseBatchRequestedType(value: string): BatchItemType | null {
+  if (/\bideas?\b/i.test(value)) return 'IDEA';
+  if (/\btasks?\b/i.test(value)) return 'TASK';
+  if (/\bnotes?\b/i.test(value)) return 'NOTE';
+  return null;
+}
+
+function parseBatchCountToken(token: string | undefined): number | null {
+  if (!token) return null;
+  const normalized = token.trim().toLowerCase();
+  if (!normalized) return null;
+
+  if (/^\d{1,3}$/.test(normalized)) {
+    const numeric = Number.parseInt(normalized, 10);
+    if (!Number.isFinite(numeric) || numeric <= 0) return null;
+    return Math.min(MAX_BATCH_ITEMS, numeric);
+  }
+
+  const fromWord = BATCH_COUNT_WORDS[normalized];
+  if (!fromWord) return null;
+  return Math.min(MAX_BATCH_ITEMS, fromWord);
+}
+
+function collectBatchRequestedTypes(value: string): BatchItemType[] {
+  const found = new Set<BatchItemType>();
+  for (const match of value.matchAll(/\b(ideas?|tasks?|notes?)\b/gi)) {
+    const type = parseBatchRequestedType(match[1] || '');
+    if (type) {
+      found.add(type);
+    }
+  }
+  return Array.from(found);
+}
+
+function collectBatchCountClauses(content: string): BatchCountClause[] {
+  const clauses: BatchCountClause[] = [];
+  const patterns = [
+    new RegExp(`\\b${BATCH_COUNT_PATTERN}\\s+(?:new\\s+|distinct\\s+|different\\s+|fresh\\s+)?(ideas?|tasks?|notes?)\\b`, 'gi'),
+    new RegExp(`\\b${BATCH_COUNT_PATTERN}\\s+(?:amount|number)\\s+of\\s+(ideas?|tasks?|notes?)\\b`, 'gi'),
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of content.matchAll(pattern)) {
+      const count = parseBatchCountToken(match[1]);
+      const type = parseBatchRequestedType(match[2] || '');
+      if (!count || !type || match.index === undefined) continue;
+      clauses.push({
+        count,
+        type,
+        start: match.index,
+        end: match.index + match[0].length,
+      });
+    }
+  }
+
+  if (clauses.length <= 1) {
+    return clauses;
+  }
+
+  const seen = new Set<string>();
+  return clauses
+    .sort((a, b) => a.start - b.start)
+    .filter(clause => {
+      const key = `${clause.start}:${clause.end}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function supportsAdditiveCountBridge(segment: string): boolean {
+  const normalized = segment.trim().toLowerCase();
+  if (!normalized) return true;
+  if (/\b(or|either|versus|vs)\b|[\/|]/i.test(normalized)) return false;
+  if (/\b(and|plus|also|then)\b/i.test(normalized)) return true;
+  return /^[,;+&\s]+$/.test(segment);
+}
+
+function inferRequestedCountFromClauses(content: string, clauses: BatchCountClause[]): number | null {
+  if (clauses.length === 0) return null;
+  if (clauses.length === 1) return clauses[0].count;
+
+  for (let index = 1; index < clauses.length; index += 1) {
+    const previous = clauses[index - 1];
+    const current = clauses[index];
+    const bridge = content.slice(previous.end, current.start);
+    if (!supportsAdditiveCountBridge(bridge)) {
+      return null;
+    }
+  }
+
+  const total = clauses.reduce((sum, clause) => sum + clause.count, 0);
+  return Math.min(MAX_BATCH_ITEMS, total);
+}
+
+function inferBatchPromptHints(content: string): BatchPromptHints {
+  const generationLikely =
+    /\b(create|generate|brainstorm|come up with|give me|list|draft|produce|make)\b/i.test(content) ||
+    new RegExp(`^\\s*${BATCH_COUNT_PATTERN}\\s+(ideas?|tasks?|notes?)\\b`, 'i').test(content) ||
+    /\b(?:amount|number)\s+of\s+(ideas?|tasks?|notes?)\b/i.test(content);
+  const looseGenerationCount = new RegExp(
+    `\\b(?:create|generate|brainstorm|list|make|produce)\\s+(?:me\\s+)?${BATCH_COUNT_PATTERN}\\b`,
+    'i'
+  );
+
+  let requestedCount: number | null = null;
+  let requestedType: BatchItemType | null = null;
+  let explicitClauseCount = 0;
+
+  if (generationLikely) {
+    const explicitClauses = collectBatchCountClauses(content);
+    explicitClauseCount = explicitClauses.length;
+    if (explicitClauses.length > 0) {
+      requestedCount = inferRequestedCountFromClauses(content, explicitClauses);
+      const explicitTypes = new Set(explicitClauses.map(clause => clause.type));
+      if (explicitTypes.size === 1) {
+        requestedType = explicitClauses[0].type;
+      }
+    }
+  }
+
+  if (requestedCount === null && generationLikely && explicitClauseCount === 0) {
+    const looseCountMatch = content.match(looseGenerationCount);
+    requestedCount = parseBatchCountToken(looseCountMatch?.[1]);
+  }
+
+  if (!requestedType && generationLikely) {
+    const requestedTypes = collectBatchRequestedTypes(content);
+    if (requestedTypes.length === 1) {
+      requestedType = requestedTypes[0];
+    }
+  }
+
+  return {
+    requestedCount,
+    requestedType,
+    generationLikely,
+  };
+}
+
+function parseBatchResponseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const fencedMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fencedMatch?.[1]) {
+      return JSON.parse(fencedMatch[1].trim());
+    }
+    const firstArray = text.match(/\[[\s\S]*\]/);
+    const firstObject = text.match(/\{[\s\S]*\}/);
+    const candidate =
+      firstArray && firstObject
+        ? (firstArray.index ?? Number.MAX_SAFE_INTEGER) <= (firstObject.index ?? Number.MAX_SAFE_INTEGER)
+          ? firstArray[0]
+          : firstObject[0]
+        : firstArray?.[0] || firstObject?.[0];
+    if (!candidate) throw new Error('Batch response was not valid JSON');
+    return JSON.parse(candidate);
+  }
+}
+
+function extractBatchItems(parsed: unknown): Record<string, unknown>[] {
+  if (Array.isArray(parsed)) return parsed as Record<string, unknown>[];
+  if (parsed && typeof parsed === 'object') {
+    const obj = parsed as Record<string, unknown>;
+    if (Array.isArray(obj.items)) return obj.items as Record<string, unknown>[];
+    if (Array.isArray(obj.results)) return obj.results as Record<string, unknown>[];
+  }
+  return [];
+}
+
+function normalizeBatchResults(
+  rawItems: Record<string, unknown>[],
+  fallbackContent: string,
+  hints: BatchPromptHints
+): AIAnalysisResult[] {
+  const normalized = rawItems.slice(0, MAX_BATCH_ITEMS).map(item => {
+    const itemType = typeof item.type === 'string' ? (item.type as string) : 'NOTE';
+    const type = hints.generationLikely && hints.requestedType ? parseNoteType(hints.requestedType) : parseNoteType(itemType);
+    const content = typeof item.content === 'string' && item.content.trim() ? item.content.trim() : fallbackContent;
+    const title = typeof item.title === 'string' && item.title.trim() ? item.title.trim() : 'Quick Note';
+    const tags = Array.isArray(item.tags)
+      ? item.tags
+          .map(tag => (typeof tag === 'string' ? tag.trim() : ''))
+          .filter(Boolean)
+          .slice(0, 3)
+      : [];
+
+    return {
+      content,
+      title,
+      tags,
+      type,
+    };
+  });
+
+  if (hints.requestedCount && normalized.length > hints.requestedCount) {
+    return normalized.slice(0, hints.requestedCount);
+  }
+
+  return normalized;
+}
+
 function buildAnalyzePrompt(content: string): string {
   const today = new Date().toISOString().split('T')[0];
   return `Analyze the following note content. Classify it as a NOTE, TASK, or IDEA.
@@ -455,17 +695,42 @@ Respond with JSON only.
 Content: "${content}"`;
 }
 
-function buildBatchPrompt(content: string): string {
-  return `You are an expert organizer. The user has provided a "brain dump" of text.
-Split this text into distinct, atomic items (Tasks, Ideas, or Notes).
+function buildBatchPrompt(content: string, hints: BatchPromptHints): string {
+  const countInstruction = hints.requestedCount
+    ? `The user requested ${hints.requestedCount} items. Return exactly ${hints.requestedCount} items.`
+    : 'If the user asks for a specific item count, return exactly that many items.';
+  const typeInstruction = hints.requestedType
+    ? `The user asked for ${hints.requestedType} items. Use type="${hints.requestedType}" for generated items unless the input clearly mixes types.`
+    : 'Respect explicit type hints (ideas -> IDEA, tasks -> TASK, notes -> NOTE).';
 
-For EACH item, provide:
-- content: the extracted content for this specific item
-- title: a short punchy title (max 5 words)
+  return `You are Smart Batch for a notes app.
+Decide whether the input should be SPLIT (extract existing thoughts) or GENERATE (create new ideas/tasks/notes).
+
+Rules:
+- SPLIT mode: preserve meaning, split into atomic items, do not invent facts.
+- GENERATE mode: create useful, diverse, concise items aligned with the request.
+- Return between 1 and ${MAX_BATCH_ITEMS} items.
+- ${countInstruction}
+- ${typeInstruction}
+
+For each item include:
+- content: the item text
+- title: short title (max 5 words)
 - tags: up to 3 relevant tags
-- type: one of NOTE, TASK, or IDEA
+- type: NOTE, TASK, or IDEA
 
-Respond with a JSON array only.
+Respond with JSON only in this shape:
+{
+  "mode": "split" | "generate",
+  "items": [
+    {
+      "content": "...",
+      "title": "...",
+      "tags": ["..."],
+      "type": "NOTE" | "TASK" | "IDEA"
+    }
+  ]
+}
 
 Input Text: "${content}"`;
 }
@@ -513,6 +778,7 @@ const ANALYSIS_SCHEMA = {
 const BATCH_SCHEMA = {
   type: 'object',
   properties: {
+    mode: { type: 'string', enum: ['split', 'generate'] },
     items: {
       type: 'array',
       items: {
@@ -665,6 +931,8 @@ export const processBatchEntry = async (
   content: string,
   options?: RequestOptions
 ): Promise<AIAnalysisResult[]> => {
+  const batchHints = inferBatchPromptHints(content);
+
   if (hasProxy()) {
     const payload = await proxyPost<{ results: AIAnalysisResult[] }>('/api/v1/ai/batch', { content }, options);
     return payload.results;
@@ -673,16 +941,10 @@ export const processBatchEntry = async (
   try {
     return await withLocalProviderFallback(async provider => {
       if (provider === 'openrouter') {
-        const text = await openRouterChat(buildBatchPrompt(content), BATCH_SCHEMA);
+        const text = await openRouterChat(buildBatchPrompt(content, batchHints), BATCH_SCHEMA);
         if (!text) return [];
-        const parsed = JSON.parse(text);
-        const items = parsed.items || parsed;
-        return (items as Record<string, unknown>[]).map(r => ({
-          content: r.content as string,
-          title: r.title as string,
-          tags: r.tags as string[],
-          type: parseNoteType(r.type as string),
-        }));
+        const parsed = parseBatchResponseJson(text);
+        return normalizeBatchResults(extractBatchItems(parsed), content, batchHints);
       }
 
       const gemini = await getGeminiRuntime();
@@ -691,21 +953,28 @@ export const processBatchEntry = async (
 
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
-        contents: buildBatchPrompt(content),
+        contents: buildBatchPrompt(content, batchHints),
         config: {
           responseMimeType: 'application/json',
           responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                content: { type: Type.STRING },
-                title: { type: Type.STRING },
-                tags: { type: Type.ARRAY, items: { type: Type.STRING } },
-                type: { type: Type.STRING, enum: ['NOTE', 'TASK', 'IDEA'] },
+            type: Type.OBJECT,
+            properties: {
+              mode: { type: Type.STRING, enum: ['split', 'generate'] },
+              items: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    content: { type: Type.STRING },
+                    title: { type: Type.STRING },
+                    tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    type: { type: Type.STRING, enum: ['NOTE', 'TASK', 'IDEA'] },
+                  },
+                  required: ['content', 'title', 'tags', 'type'],
+                },
               },
-              required: ['content', 'title', 'tags', 'type'],
             },
+            required: ['items'],
           },
         },
       });
@@ -713,13 +982,8 @@ export const processBatchEntry = async (
       const text = response.text;
       if (!text) return [];
 
-      const results = JSON.parse(text);
-      return results.map((r: { content: string; title: string; tags: string[]; type: string }) => ({
-        content: r.content,
-        title: r.title,
-        tags: r.tags,
-        type: parseNoteType(r.type),
-      }));
+      const parsed = parseBatchResponseJson(text);
+      return normalizeBatchResults(extractBatchItems(parsed), content, batchHints);
     });
   } catch (error) {
     if (error instanceof AIServiceError) throw error;

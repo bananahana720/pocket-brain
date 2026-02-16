@@ -143,11 +143,20 @@ This validates JSON contracts for `/api/v1/auth/status`, `/api/v1/auth/connect` 
 1. Preferred: create local remote config file once:
    - `cp .vps-remote.env.example .vps-remote.env`
    - Edit `VPS_SSH_HOST`, `VPS_PROJECT_DIR`, and optional SSH/retry fields.
+   - Optional remote retry defaults (auto-loaded by scripts):
+     - `VPS_SSH_RETRY_ATTEMPTS`
+     - `VPS_READY_RETRIES`
+     - `VPS_READY_DELAY_SECONDS`
+     - `VPS_POSTGRES_READY_RETRIES`
+     - `VPS_POSTGRES_READY_DELAY_SECONDS`
 2. Alternative: export remote connection vars per shell:
    - `export VPS_SSH_HOST=ubuntu@your-vps-host`
    - `export VPS_PROJECT_DIR=/srv/pocket-brain`
    - Optional: `export VPS_SSH_PORT=22`
    - Optional: `export VPS_SSH_IDENTITY=~/.ssh/id_ed25519`
+   - Optional: `export VPS_SSH_RETRY_ATTEMPTS=3`
+   - Optional: `export VPS_READY_RETRIES=30`
+   - Optional: `export VPS_READY_DELAY_SECONDS=2`
 3. Validate connectivity, repo layout, and runtime prerequisites:
    - `npm run vps:precheck:remote`
 4. Sync only (git pull on VPS):
@@ -157,6 +166,8 @@ This validates JSON contracts for `/api/v1/auth/status`, `/api/v1/auth/connect` 
 6. Post-deploy verify (remote SHA + readiness/migration summary):
    - `npm run vps:verify:remote`
 7. Optional direct flags:
+   - `bash scripts/deploy-vps-remote.sh --host ubuntu@203.0.113.10 --path /srv/pocket-brain`
+   - `bash scripts/deploy-vps-remote.sh --port 22 --identity ~/.ssh/id_ed25519`
    - `bash scripts/deploy-vps-remote.sh --with-worker`
    - `bash scripts/deploy-vps-remote.sh --skip-pull`
    - `bash scripts/deploy-vps-remote.sh --allow-stash`
@@ -165,6 +176,33 @@ This validates JSON contracts for `/api/v1/auth/status`, `/api/v1/auth/connect` 
    - `bash scripts/deploy-vps-remote.sh --precheck-only`
    - `bash scripts/deploy-vps-remote.sh --ready-retries 45 --ready-delay 2`
    - `bash scripts/verify-vps-remote.sh --ready-retries 30 --ready-delay 2`
+
+### 18) GitHub Actions CI/CD workflow
+1. Workflow file: `.github/workflows/ci-cd-vps.yml`
+2. Trigger behavior:
+   - Pull requests run CI build/test only.
+   - Pushes to `main` run CI, then remote VPS precheck/sync/deploy/verify.
+   - `workflow_dispatch` supports manual deploy overrides.
+3. Required repository secrets for deploy jobs:
+   - `VPS_SSH_HOST`
+   - `VPS_PROJECT_DIR`
+   - `VPS_SSH_PRIVATE_KEY`
+   - Optional: `VPS_SSH_PORT` (defaults to `22`)
+4. Optional repository variables:
+   - `VPS_SSH_RETRY_ATTEMPTS`
+   - `VPS_READY_RETRIES`
+   - `VPS_READY_DELAY_SECONDS`
+   - `VPS_POSTGRES_READY_RETRIES`
+   - `VPS_POSTGRES_READY_DELAY_SECONDS`
+5. Manual dispatch inputs:
+   - `with_worker`
+   - `skip_pull`
+   - `ready_retries`
+   - `ready_delay_seconds`
+6. Deploy safeguards:
+   - Deploy job auto-skips when required secrets are missing.
+   - Push deploys assert remote SHA matches workflow SHA after sync.
+   - Deploy concurrency is serialized via `vps-production-deploy`.
 
 ## Command Reference
 
@@ -205,8 +243,11 @@ This validates JSON contracts for `/api/v1/auth/status`, `/api/v1/auth/connect` 
 | `npm run vps:precheck:remote` | Verify SSH connectivity + repo layout on remote VPS before running actions |
 | `npm run vps:sync:remote` | Run `git pull --ff-only` on remote VPS repo over SSH |
 | `npm run vps:deploy:remote` | Run full VPS deploy workflow remotely over SSH |
+| `npm run vps:deploy:remote -- --skip-pull` | Run remote deploy after an explicit sync step without a second pull |
 | `npm run vps:verify:remote` | Print remote git SHA and `/ready` summary over SSH |
 | `npm run vps:smoke:public -- --base-url https://your-domain.example` | Run public Worker/routing JSON contract smoke checks |
+| `bash scripts/deploy-vps-remote.sh --host ubuntu@203.0.113.10 --path /srv/pocket-brain` | Run one-off remote precheck/deploy against an explicit SSH target/path |
+| `bash scripts/deploy-vps-remote.sh --port 22 --identity ~/.ssh/id_ed25519` | Override SSH port/identity for remote deploy script runs |
 | `bash scripts/deploy-vps-remote.sh --with-worker` | Remote deploy with Cloudflare Worker deploy step |
 | `bash scripts/deploy-vps-remote.sh --skip-pull` | Remote deploy without running `git pull` on VPS |
 | `bash scripts/deploy-vps-remote.sh --allow-stash` | Auto-stash dirty remote repo before sync/deploy |
@@ -214,6 +255,7 @@ This validates JSON contracts for `/api/v1/auth/status`, `/api/v1/auth/connect` 
 | `bash scripts/deploy-vps-remote.sh --sync-only` | Run only remote `git pull --ff-only` |
 | `bash scripts/deploy-vps-remote.sh --precheck-only` | Validate SSH + remote prerequisites without syncing/deploying |
 | `bash scripts/deploy-vps-remote.sh --ready-retries 45 --ready-delay 2` | Remote deploy with custom readiness retry settings |
+| `bash scripts/verify-vps-remote.sh --ready-retries 30 --ready-delay 2` | Verify remote readiness summary with custom retry settings |
 | `bash scripts/smoke-public-api.sh --base-url https://your-domain.example` | Run public API smoke checks directly via script |
 | `npx wrangler secret put KEY_ENCRYPTION_SECRET_PREV --config worker/wrangler.toml` | Set previous encryption secret during rotation |
 | `npx wrangler secret delete KEY_ENCRYPTION_SECRET_PREV --config worker/wrangler.toml` | Remove previous encryption secret after rotation window |
