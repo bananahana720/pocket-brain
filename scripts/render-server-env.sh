@@ -122,14 +122,16 @@ if [[ -z "$POSTGRES_USER" ]]; then
 fi
 
 POSTGRES_PASSWORD="$(read_env_value POSTGRES_PASSWORD)"
+if [[ "$MODE" == "production" ]]; then
+  if is_placeholder "$POSTGRES_PASSWORD" || [[ "$POSTGRES_PASSWORD" == "postgres" ]]; then
+    echo "POSTGRES_PASSWORD must be set in $SOURCE_ENV to a non-default non-placeholder value for production mode." >&2
+    exit 1
+  fi
+fi
 
 DATABASE_URL="$(read_env_value DATABASE_URL)"
 if [[ -z "$DATABASE_URL" ]]; then
   if [[ "$MODE" == "production" ]]; then
-    if [[ -z "$POSTGRES_PASSWORD" || "$POSTGRES_PASSWORD" == "postgres" ]]; then
-      echo "DATABASE_URL is missing and POSTGRES_PASSWORD is not set to a non-default value in $SOURCE_ENV for production mode." >&2
-      exit 1
-    fi
     DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
   else
     if [[ -z "$POSTGRES_PASSWORD" ]]; then

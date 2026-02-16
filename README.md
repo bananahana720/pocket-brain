@@ -94,6 +94,8 @@ npm install
 
 Create a `.env.local` file in the project root.
 
+For server/worker/VPS workflows, create root `.env` from `.env.example` and fill all placeholders before deploy.
+
 **Recommended production setup (secure):**
 
 1. Use this production request path architecture:
@@ -125,6 +127,7 @@ Create a `.env.local` file in the project root.
    - `REQUIRE_REDIS_FOR_READY` defaults to `true` in production (`false` in dev/test); set explicitly to override
 7. Frontend API calls should remain same-origin (`https://app.pocket-brain.org/api/*`) in production; do not point production `/api/v1` traffic to a `workers.dev` hostname.
 8. Create/connect your API key from the in-app drawer (`Menu > AI Security`).
+9. Set `POSTGRES_PASSWORD` in root `.env` to a strong non-default value (required by production compose/deploy).
 
 If Worker Clerk vars are partial/missing while a bearer token is provided, the Worker responds with `AUTH_CONFIG_INVALID`.
 If you are rolling out from an older server build that still has the compatibility toggle, set `ALLOW_LEGACY_SSE_QUERY_TOKEN=false` permanently before cutover. Current stream-ticket-only builds no longer use that flag.
@@ -224,6 +227,11 @@ Deploy script now:
 - checks readiness on both direct API (`:8788/ready`) and nginx (`:8080/ready`)
 - acquires a deploy lock (`/tmp/pocketbrain-deploy.lock`) to prevent overlapping runs
 - prints compose status + logs on failure
+- requires `POSTGRES_PASSWORD` in root `.env` (no default fallback)
+
+Origin hardening:
+- direct-origin traffic is restricted at nginx to Cloudflare networks plus private/local ranges.
+- public `/health` and `/ready` are blocked; use host-local checks (`127.0.0.1:8080/ready` and `127.0.0.1:8788/ready`).
 
 Infra readiness retry knobs (env):
 - `VPS_POSTGRES_READY_RETRIES` (default `20`)

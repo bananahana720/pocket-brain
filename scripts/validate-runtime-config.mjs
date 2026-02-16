@@ -291,6 +291,7 @@ function validateHttpsOrigin(value) {
 
 function validateServerConfig(errors) {
   const fromFile = parseEnvFile(SERVER_ENV_PATH);
+  const rootEnv = parseEnvFile(ROOT_ENV_PATH);
   const config = {
     ...fromFile,
     ...process.env,
@@ -333,6 +334,11 @@ function validateServerConfig(errors) {
   }
 
   if (isProduction) {
+    const postgresPassword = String(rootEnv.POSTGRES_PASSWORD || process.env.POSTGRES_PASSWORD || '').trim();
+    if (isPlaceholderSecret(postgresPassword) || postgresPassword.toLowerCase() === 'postgres') {
+      errors.push('server: POSTGRES_PASSWORD must be set in root .env to a non-default non-placeholder value');
+    }
+
     const clerkSecretKey = String(config.CLERK_SECRET_KEY || '').trim();
     if (isPlaceholderClerkKey(clerkSecretKey)) {
       errors.push('server: CLERK_SECRET_KEY must be a non-placeholder production key (no test key patterns)');
